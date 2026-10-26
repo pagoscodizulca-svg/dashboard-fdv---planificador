@@ -1,9 +1,16 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
+import zlib from "zlib";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
+import {
+  extractPositionedTextFromAlkostoPdfBuffer,
+  parseAlkostoRawText,
+  validateAndNormalizeAlkostoOC,
+  AlkostoParseValidationError
+} from "./src/services/alkostoOcParser";
 
 dotenv.config();
 
@@ -1613,12 +1620,44 @@ async function startServer() {
     return isNaN(num) ? 0 : num;
   }
 
-  // LECTOR OCR INTELIGENTE DE ÓRDENES DE COMPRA ALKOSTO Y FAMILIA CENTER CON LECTURA OPTIMIZADA DE CÓDIGOS
+  // LECTOR OCR INTELIGENTE Y DETERMINISTA DE ÓRDENES DE COMPRA ALKOSTO Y FAMILIA CENTER
   app.post("/api/alkosto/ocr-orden", authenticateToken, rateLimiter(10 * 60000, 20, 'OCR Orden Alkosto'), async (req: any, res: any) => {
     try {
       const { imageBase64, mimeType = "image/jpeg" } = req.body;
       if (!imageBase64) {
-        return res.status(400).json({ error: "Falta la imagen de la orden de compra" });
+        return res.status(400).json({ error: "Falta la imagen o PDF de la orden de compra" });
+      }
+
+      let cleanBase64 = String(imageBase64).trim();
+      let actualMime = String(mimeType || "image/jpeg").trim();
+      if (cleanBase64.startsWith("data:")) {
+        const m = cleanBase64.match(/^data:([^;]+);base64,(.+)$/);
+        if (m) {
+          actualMime = m[1];
+          cleanBase64 = m[2];
+        }
+      }
+
+      // CAPA 1 (PRECISIÓN 100% DETERMINISTA): Si el documento es un PDF digital del ERP de Alkosto,
+      // extraer directamente las celdas por coordenadas (X, Y) y validar matemáticamente cada renglón.
+      const isPdfPayload = actualMime === "application/pdf" || cleanBase64.startsWith("JVBERi0");
+      if (isPdfPayload) {
+        try {
+          const pdfBuffer = Buffer.from(cleanBase64, "base64");
+          const positionedText = extractPositionedTextFromAlkostoPdfBuffer(pdfBuffer, zlib.inflateSync);
+          if (positionedText) {
+            const deterministicOrder = parseAlkostoRawText(positionedText);
+            if (deterministicOrder && deterministicOrder.items.length > 0) {
+              return res.json({
+                success: true,
+                parserMode: "DETERMINISTIC_PDF",
+                data: deterministicOrder
+              });
+            }
+          }
+        } catch (pdfParseErr: any) {
+          console.warn("[ALKOSTO OCR] PDF no pudo procesarse por vía determinista, usando motor IA:", pdfParseErr?.message);
+        }
       }
 
       const ai = new GoogleGenAI({
@@ -1637,26 +1676,26 @@ async function startServer() {
 Extrae minuciosamente toda la información de cabecera y CADA UNO de los renglones/productos con sus códigos, descripciones, cantidades por tienda, totales y montos.
 
 DICCIONARIO MAESTRO DE CÓDIGOS Y PRODUCTOS CODIZULCA PARA ASISTIR LA LECTURA EXACTA:
-- EAN-13: 7590377000077 -> SKU 1496 (o 1461) MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR (Unidad: CJ)
+- EAN-13: 7590377000077 -> SKU 1496 MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR (Unidad: CJ)
+- EAN-13: 7590377000589 -> SKU 1497 MORTADELA ESP D/POLLO ASTURIAS 20UNDX500GR (Unidad: CJ)
+- EAN-13: 7591289609129 -> SKU 21 MORTADELA ESP D/POLLO CORRAL 1X12UNI (Unidad: CJ)
+- EAN-13: 7591289400023 -> SKU 047 NUGGET CORRAL DE 460GM (Unidad: UND)
+- Cadena Alkosto: 100253 -> SKU 046 NUGGETS DE POLLO (COD. 046) (Unidad: KG)
+- EAN-13: 5412873178161 -> SKU 1360 PATATAS FRESCAS MARQUISE 4X2.5KG (Unidad: CJ)
+- EAN-13: 7591210000513 -> SKU 7591210000513 CREMA DE LECHE PURISIMA 6 X 500 GRS (Unidad: CJ)
+- EAN-12: 021000061778 -> SKU 021000061778 QUESO CREMA KRAFT 226 GR X 36 UND (Unidad: UND)
+- Cadena Alkosto: 100281 -> SKU 100281 QUESO MOZZARELLA CORLASA 3.5KG X 4 UND (Unidad: KG)
 - Cadena Alkosto: 100881 -> SKU 1512 MORT. PECHUGA DE PAVO ASTURIAS X KG (Unidad: KG)
 - Cadena Alkosto: 100882 -> SKU 1511 MORT. PECHUGA DE POLLO ASTURIAS X KG (Unidad: KG)
-- Cadena Alkosto: 100929 -> SKU 1463 / 171 JAMON COCIDO DE PAVO AHUMADO SUPERIOR / JAMON SUPERIOR ALIMEX (Unidad: KG/CJ)
+- Cadena Alkosto: 100929 -> SKU 1463 JAMON COCIDO DE PAVO AHUMADO SUPERIOR ASTURIAS X KG (Unidad: KG)
 - Código 1446 -> SKU 1446 CHULETA FRESCA ASTURIAS POR KG (Unidad: KG)
 - Código 1462 / 1519 -> SKU 1519 MORTADELA ESP D/POLLO SALPICAO 10UNDX900GR (Unidad: CJ)
-- Código 21 -> SKU 21 MORTADELA ESP D/POLLO CORRAL 1X12UNI (Unidad: CJ)
-- Código 1464 -> SKU 1464 MORT. NAVIDEÑA ASTURIAS XKG (Unidad: KG)
-- Código 1461 -> SKU 1461 MORT. ESTANDAR ASTURIAS X KG (Unidad: KG)
-- Código 171 -> SKU 171 JAMON COC. SUPERIOR ALIMEX 1X5.9KG (Unidad: CJ)
-- Código 172 -> SKU 172 ESPALDA COCIDA ALIMEX 1X4.6KG (Unidad: CJ)
-- Código 630 / ALAS -> SKU 630 ALAS DESPRESADAS POR KG (Unidad: KG)
-- Código 629 / 102 / MUSLO -> SKU 629 MUSLO CUADRIL DESPRESADO POR KG (Unidad: KG)
-- Código 101 / POLLO -> SKU 101 POLLO BENEFICIADO ENTERO (Unidad: KG)
 
-REGLAS CRÍTICAS PARA LA LECTURA DE CÓDIGOS DE PRODUCTOS:
-1. "codigo": Lee el código EXACTO impreso en la columna de código de cada renglón. Puede ser un código de barra EAN-13 (13 dígitos limpios ej: 7590377000077), código interno de la cadena (ej. 100881, 100882, 100929) o código interno del proveedor (1446, 1461, etc.). ELIMINA cualquier espacio, punto, guion o letra extra.
-2. "skuCodizulca": Identifica el código SKU oficial de Codizulca correspondiente del diccionario (ej: 7590377000077 -> "1496"; 100881 -> "1512"; 100882 -> "1511"; 1446 -> "1446").
-3. "codigoBarra": Si el producto tiene código de barras de 13 dígitos o en la orden aparece el EAN (ej. 7590377000077), colócalo en este campo.
-4. "unid": Asigna "CJ" para embutidos o víveres empacados en bultos o cajas (mortadelas 10x900g, 12uni, latas, aceites, etc., o si EMP > 0), o "KG" para productos pesables a granel/vacío (chuletas por kg, pechugas de pavo por kg, pollo por kg, alas por kg).`;
+REGLAS CRÍTICAS DE ALINEACIÓN DE COLUMNAS Y CAMPOS:
+1. "codigo": Lee el código EXACTO impreso en la columna Código de cada renglón. ELIMINA cualquier espacio, punto o guion.
+2. "descripcion": Elimina el sufijo "/ <precio>" al final de la descripción (ej. "PECHUGA DE PAVO ASTURIAS X KG / 6.88" -> "PECHUGA DE PAVO ASTURIAS X KG"). NUNCA uses ese número tras la barra como costoUnitario.
+3. "emp" vs Tiendas (AK01..AK10 / FC01..FC07): La columna "EMP" (empaque: 0, 4, 6, 10, 12, 20) está situada entre "IVA" y la primera tienda ("AK01" o "FC01"). NUNCA asignes el valor entero de "EMP" a ninguna tienda.
+4. Verificación Matemática: La suma de las cantidades de las tiendas de cada fila DEBE coincidir exactamente con "totalCantidad", y "totalCantidad" * "costoUnitario" DEBE coincidir con "totalRenglon".`;
 
       const ocResponseSchema = {
         type: Type.OBJECT,
@@ -1877,205 +1916,22 @@ REGLAS CRÍTICAS PARA LA LECTURA DE CÓDIGOS DE PRODUCTOS:
 
       const parsed = safeExtractJson(rawResponseText);
 
-      // Normalizar raíz del objeto si viene envuelta
-      let rootOrder: any = parsed;
-      if (parsed.orden && typeof parsed.orden === 'object') rootOrder = parsed.orden;
-      else if (parsed.ordenCompra && typeof parsed.ordenCompra === 'object') rootOrder = parsed.ordenCompra;
-      else if (parsed.ordenDeCompra && typeof parsed.ordenDeCompra === 'object') rootOrder = parsed.ordenDeCompra;
-      else if (parsed.orden_compra && typeof parsed.orden_compra === 'object') rootOrder = parsed.orden_compra;
-      else if (parsed.orden_de_compra && typeof parsed.orden_de_compra === 'object') rootOrder = parsed.orden_de_compra;
-      else if (parsed.compra && typeof parsed.compra === 'object') rootOrder = parsed.compra;
-      else if (parsed.pedido && typeof parsed.pedido === 'object') rootOrder = parsed.pedido;
-      else if (parsed.data && typeof parsed.data === 'object' && !Array.isArray(parsed.data)) rootOrder = parsed.data;
-
-      // Extraer lista de items/renglones con cualquier nomenclatura posible
-      let rawItems: any[] = [];
-      if (Array.isArray(rootOrder)) {
-        rawItems = rootOrder;
-        rootOrder = { items: rawItems };
-      } else if (Array.isArray(rootOrder.items)) {
-        rawItems = rootOrder.items;
-      } else if (Array.isArray(rootOrder.articulos)) {
-        rawItems = rootOrder.articulos;
-      } else if (Array.isArray(rootOrder.artículos)) {
-        rawItems = rootOrder.artículos;
-      } else if (Array.isArray(rootOrder.productos)) {
-        rawItems = rootOrder.productos;
-      } else if (Array.isArray(rootOrder.renglones)) {
-        rawItems = rootOrder.renglones;
-      } else if (Array.isArray(rootOrder.detalle)) {
-        rawItems = rootOrder.detalle;
-      } else if (Array.isArray(rootOrder.detalles)) {
-        rawItems = rootOrder.detalles;
-      } else if (Array.isArray(rootOrder.lineas)) {
-        rawItems = rootOrder.lineas;
-      } else if (Array.isArray(rootOrder.filas)) {
-        rawItems = rootOrder.filas;
-      } else {
-        // Búsqueda profunda de cualquier array de objetos en rootOrder
-        for (const k of Object.keys(rootOrder)) {
-          if (Array.isArray(rootOrder[k]) && rootOrder[k].length > 0 && typeof rootOrder[k][0] === 'object') {
-            rawItems = rootOrder[k];
-            break;
-          }
-        }
-      }
-
-      // Normalización y enriquecimiento de renglones con el maestro de productos Codizulca
-      const cleanItems = rawItems.map((it: any, idx: number) => {
-        const rawCod = String(
-          it.codigo || 
-          it.codigo_articulo || 
-          it.codigo_producto || 
-          it.skuCodizulca || 
-          it.sku || 
-          it.codigoBarra || 
-          it.codigo_barra || 
-          it.ean || 
-          it.barcode || 
-          it.referencia || 
-          it.ref || 
-          ''
-        ).trim();
-        const cleanCod = rawCod.replace(/[\s\-_.]/g, '');
-        const desc = String(
-          it.descripcion || 
-          it.descripcion_producto || 
-          it.producto || 
-          it.nombre || 
-          it.articulo || 
-          it.detalle || 
-          it.concepto || 
-          it.item || 
-          it.description || 
-          ''
-        ).trim();
-        const match = resolverProductoBackend(cleanCod, desc);
-
-        const finalSku = (match ? match.sku : '') || it.skuCodizulca || it.sku || (cleanCod.length <= 6 ? cleanCod : '') || cleanCod;
-        const finalCodigo = cleanCod || finalSku || (match ? match.barcode : '');
-        const finalBarcode = it.codigoBarra || it.ean || (match && match.barcode ? match.barcode : (/^\d{12,14}$/.test(cleanCod) ? cleanCod : undefined));
-        // Priorizar la lectura exacta leída del documento físico/digital; si no viene descripción, usar la del catálogo
-        const finalDesc = desc || (match ? match.nombre : '');
-
-        const rawUnid = String(it.unid || it.unidad || it.unidadMedida || it.medida || '').trim().toUpperCase();
-        let finalUnid = rawUnid;
-        if (!finalUnid) {
-          if (match?.unid) finalUnid = match.unid;
-          else if (it.emp && parseNumeroSeguro(it.emp) > 0) finalUnid = 'CJ';
-          else finalUnid = 'KG';
-        }
-
-        // Parsear desglose de tiendas con parseNumeroSeguro
-        const cleanTiendas: Record<string, number> = {};
-        const storeObj = (it.tiendas && typeof it.tiendas === 'object') ? it.tiendas : {};
-        for (const [tag, val] of Object.entries(storeObj)) {
-          const numVal = parseNumeroSeguro(val);
-          if (numVal > 0) {
-            cleanTiendas[tag.toUpperCase()] = numVal;
-          }
-        }
-
-        // Detectar columnas de tiendas directamente en la raíz de 'it' (ej. it.AK01, it.AK02, it.FC01)
-        for (const [k, val] of Object.entries(it)) {
-          const uKey = k.toUpperCase();
-          if (/^(AK\d{2}|AKOP|FC\d{2}|FCOP)$/.test(uKey)) {
-            const numVal = parseNumeroSeguro(val);
-            if (numVal > 0) {
-              cleanTiendas[uKey] = numVal;
-            }
-          }
-        }
-
-        // Cantidad: tomar totalCantidad, cantidad, cant, cantidadSolicitada o suma de tiendas
-        let totalCant = parseNumeroSeguro(it.totalCantidad) || 
-                        parseNumeroSeguro(it.total_cantidad) || 
-                        parseNumeroSeguro(it.cantidad) || 
-                        parseNumeroSeguro(it.cant) || 
-                        parseNumeroSeguro(it.cantidadSolicitada) || 
-                        parseNumeroSeguro(it.cantidad_solicitada) || 
-                        parseNumeroSeguro(it.total) || 
-                        parseNumeroSeguro(it.cajas) || 
-                        parseNumeroSeguro(it.bultos) || 
-                        parseNumeroSeguro(it.kilos) || 0;
-
-        if (!totalCant && Object.keys(cleanTiendas).length > 0) {
-          totalCant = Object.values(cleanTiendas).reduce((sum, v) => sum + v, 0);
-        }
-
-        let precio = parseNumeroSeguro(it.costoUnitario) || 
-                     parseNumeroSeguro(it.costo_unitario) || 
-                     parseNumeroSeguro(it.costoBruto) || 
-                     parseNumeroSeguro(it.costo_bruto) || 
-                     parseNumeroSeguro(it.precio) || 
-                     parseNumeroSeguro(it.precioUnitario) || 
-                     parseNumeroSeguro(it.precio_unitario) || 
-                     parseNumeroSeguro(it.costo) || 
-                     parseNumeroSeguro(it.valor_unitario) || 0;
-
-        let total = parseNumeroSeguro(it.totalRenglon) || 
-                    parseNumeroSeguro(it.total_renglon) || 
-                    parseNumeroSeguro(it.subtotal) || 
-                    parseNumeroSeguro(it.total) || 
-                    parseNumeroSeguro(it.importe) || 
-                    parseNumeroSeguro(it.monto);
-
-        if (!precio && total > 0 && totalCant > 0) {
-          precio = Number((total / totalCant).toFixed(2));
-        } else if (precio > 0 && !total) {
-          total = Number((totalCant * precio).toFixed(2));
-        }
-
-        return {
-          ...it,
-          renglon: Number(it.renglon) || idx + 1,
-          codigo: finalSku || finalCodigo,
-          skuCodizulca: finalSku,
-          codigoBarra: finalBarcode,
-          descripcion: finalDesc,
-          unid: finalUnid,
-          emp: parseNumeroSeguro(it.emp) || 0,
-          totalCantidad: totalCant,
-          costoBruto: precio,
-          costoUnitario: precio,
-          totalRenglon: total,
-          tiendas: cleanTiendas
-        };
+      // Validar y normalizar con el esquema tipado estricto y guardarraíles matemáticos
+      const validatedOrder = validateAndNormalizeAlkostoOC(parsed, {
+        strictMath: false,
+        requireOrdenNro: false
       });
 
-      rootOrder.items = cleanItems;
-      rootOrder.ordenNro = String(
-        rootOrder.ordenNro || 
-        parsed.ordenNro || 
-        rootOrder.numeroOrden || 
-        parsed.numeroOrden || 
-        rootOrder.numero || 
-        parsed.numero || 
-        rootOrder.nroOrden || 
-        parsed.nroOrden || 
-        rootOrder.nro_orden || 
-        parsed.nro_orden || 
-        rootOrder.oc || 
-        parsed.oc || 
-        rootOrder.orden || 
-        parsed.orden || 
-        rootOrder.pedido || 
-        parsed.pedido || 
-        rootOrder.nroPedido || 
-        parsed.nroPedido || 
-        rootOrder.numOrden ||
-        parsed.numOrden ||
-        ''
-      ).trim();
-      rootOrder.sede = String(rootOrder.sede || parsed.sede || rootOrder.sucursal || rootOrder.codigoSede || '').trim();
-      rootOrder.fechaEmision = String(rootOrder.fechaEmision || parsed.fechaEmision || rootOrder.fecha || rootOrder.emision || '').trim();
-      rootOrder.fechaEntrega = String(rootOrder.fechaEntrega || parsed.fechaEntrega || rootOrder.entrega || rootOrder.fechaEstimada || '').trim();
-      rootOrder.clienteCadena = rootOrder.clienteCadena || parsed.clienteCadena || (rootOrder.sede?.startsWith('FC') ? 'FAMILIA_CENTER' : 'ALKOSTO');
-      rootOrder.subtotal = parseNumeroSeguro(rootOrder.subtotal) || cleanItems.reduce((acc: number, item: any) => acc + (parseNumeroSeguro(item.totalRenglon) || 0), 0);
-
-      return res.json({ success: true, data: rootOrder });
+      return res.json({ success: true, parserMode: "AI_VALIDATED", data: validatedOrder });
     } catch (err: any) {
       console.error("Error en OCR Alkosto:", err);
+      if (err instanceof AlkostoParseValidationError) {
+        return res.status(422).json({
+          error: err.message,
+          code: err.code,
+          issues: err.issues
+        });
+      }
       const quota = /RESOURCE_EXHAUSTED|prepayment credits|quota|billing/i.test(String(err?.message || ''));
       return res.status(quota ? 503 : 500).json({ error: quota ? "El lector automático (IA) no está disponible temporalmente. Ingresa la orden manualmente." : "Error procesando orden de compra" });
     }

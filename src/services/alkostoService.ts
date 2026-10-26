@@ -109,10 +109,22 @@ export const CATALOGO_ALKOSTO: CatalogoAlkostoItem[] = [
     categoria: 'MORTADELAS',
     presentacion: 'Caja (10 und x 900g)',
     kilosPorCaja: 9.0,
-    precioSugeridoUSD: 24.50,
+    precioSugeridoUSD: 20.00,
     codigoBarra: '7590377000077',
-    codigosCadena: ['1461', '1496', '7590377000077'],
-    sinonimos: ['MORTADELA ESPECIAL DE POLLO 900GR ASTURIAS', 'MORTADELA 900GR ASTURIAS', 'MORTADELA ASTURIAS 10X900', '1496', '1461'],
+    codigosCadena: ['1496', '7590377000077'],
+    sinonimos: ['MORTADELA ESPECIAL DE POLLO 900GR ASTURIAS', 'MORTADELA 900GR ASTURIAS', 'MORTADELA ASTURIAS 10X900', '1496'],
+    unidadSugerida: 'CJ'
+  },
+  {
+    sku: '1497',
+    producto: 'MORTADELA ESP D/POLLO ASTURIAS 20UNDX500GR',
+    categoria: 'MORTADELAS',
+    presentacion: 'Caja (20 und x 500g)',
+    kilosPorCaja: 10.0,
+    precioSugeridoUSD: 22.00,
+    codigoBarra: '7590377000589',
+    codigosCadena: ['1497', '7590377000589'],
+    sinonimos: ['MORTADELA ESPECIAL DE POLLO ASTURIA 500GR', 'MORTADELA ESPECIAL DE POLLO ASTURIAS 500GR', 'MORTADELA 500GR ASTURIAS', '1497', '7590377000589'],
     unidadSugerida: 'CJ'
   },
   {
@@ -130,11 +142,12 @@ export const CATALOGO_ALKOSTO: CatalogoAlkostoItem[] = [
     sku: '21',
     producto: 'MORTADELA ESP D/POLLO CORRAL 1X12UNI',
     categoria: 'MORTADELAS',
-    presentacion: 'Caja (12 und x 900g)',
-    kilosPorCaja: 10.8,
-    precioSugeridoUSD: 27.50,
-    codigosCadena: ['21', '1463'],
-    sinonimos: ['MORTADELA CORRAL 1X12', 'MORTADELA CORRAL 12UNI', '21'],
+    presentacion: 'Caja (12 und x 1kg)',
+    kilosPorCaja: 12.0,
+    precioSugeridoUSD: 36.00,
+    codigoBarra: '7591289609129',
+    codigosCadena: ['21', '7591289609129'],
+    sinonimos: ['MORTADELA DE POLLO DEL CORRAL 1KG', 'MORTADELA CORRAL 1X12', 'MORTADELA CORRAL 12UNI', '21', '7591289609129'],
     unidadSugerida: 'CJ'
   },
   {
@@ -591,10 +604,69 @@ export const CATALOGO_ALKOSTO: CatalogoAlkostoItem[] = [
     categoria: 'CONGELADOS',
     presentacion: 'Caja (4 bolsas x 2.5kg)',
     kilosPorCaja: 10.0,
-    precioSugeridoUSD: 21.00,
-    codigosCadena: ['1360', 'PATATAS'],
-    sinonimos: ['PAPAS MARQUISE', 'PATATAS FRESCAS', '1360'],
+    precioSugeridoUSD: 22.80,
+    codigoBarra: '5412873178161',
+    codigosCadena: ['1360', '5412873178161', 'PATATAS'],
+    sinonimos: ['PAPAS FRITAS CONGELADAS MARQUISE 2,5KG', 'PAPAS MARQUISE', 'PATATAS FRESCAS', '1360', '5412873178161'],
     unidadSugerida: 'CJ'
+  },
+  {
+    sku: '047',
+    producto: 'NUGGET CORRAL DE 460GM',
+    categoria: 'CONGELADOS',
+    presentacion: 'Paquete 460g',
+    kilosPorCaja: 0.46,
+    precioSugeridoUSD: 3.88,
+    codigoBarra: '7591289400023',
+    codigosCadena: ['047', '7591289400023'],
+    sinonimos: ['NUGGETS DE POLLO DEL CORRAL 460GR', 'NUGGETS DE POLLO DEL CORRAL 462GR', 'NUGGET CORRAL DE 460GM', '047', '7591289400023'],
+    unidadSugerida: 'UND'
+  },
+  {
+    sku: '046',
+    producto: 'NUGGETS DE POLLO (COD. 046)',
+    categoria: 'CONGELADOS',
+    presentacion: 'Bolsa Institucional por Kg',
+    kilosPorCaja: 1.0,
+    precioSugeridoUSD: 8.71,
+    codigosCadena: ['046', '100253'],
+    sinonimos: ['NUGGETS EL CORRAL POR KG', 'NUGGET CORRAL INSTITUCIONAL', 'NUGGETS DE POLLO (COD. 046)', '046', '100253'],
+    unidadSugerida: 'KG'
+  },
+  {
+    sku: '7591210000513',
+    producto: 'CREMA DE LECHE PURISIMA 6 X 500 GRS',
+    categoria: 'LACTEOS',
+    presentacion: 'Caja (6 und x 500g)',
+    kilosPorCaja: 3.0,
+    precioSugeridoUSD: 25.63,
+    codigoBarra: '7591210000513',
+    codigosCadena: ['7591210000513'],
+    sinonimos: ['CREMA DE LECHE PURISIMA 500GR', 'CREMA DE LECHE PURISIMA 6 X 500 GRS', '7591210000513'],
+    unidadSugerida: 'CJ'
+  },
+  {
+    sku: '021000061778',
+    producto: 'QUESO CREMA KRAFT 226 GR X 36 UND',
+    categoria: 'LACTEOS',
+    presentacion: 'Unidad 226g (Caja x 36 und)',
+    kilosPorCaja: 0.226,
+    precioSugeridoUSD: 3.00,
+    codigoBarra: '021000061778',
+    codigosCadena: ['021000061778'],
+    sinonimos: ['QUESO CREMA MARCA KRAFT 226GR', 'QUESO CREMA KRAFT 226 GR X 36 UND', '021000061778'],
+    unidadSugerida: 'UND'
+  },
+  {
+    sku: '100281',
+    producto: 'QUESO MOZZARELLA CORLASA 3.5KG X 4 UND',
+    categoria: 'LACTEOS',
+    presentacion: 'Pieza por Kg',
+    kilosPorCaja: 14.0,
+    precioSugeridoUSD: 10.00,
+    codigosCadena: ['100281'],
+    sinonimos: ['QUESO MOZZARELLA CORLASA X KG', 'QUESO MOZZARELLA CORLASA 3.5KG X 4 UND', '100281'],
+    unidadSugerida: 'KG'
   },
   {
     sku: '1569',
@@ -671,56 +743,73 @@ export function resolverProductoPorCodigoODescripcion(
 ): CatalogoAlkostoItem | undefined {
   const codRaw = String(codigoInput || '').trim();
   const codNorm = normalizarCodigoProducto(codRaw).toUpperCase();
-  const descNorm = String(descripcionInput || '').trim().toUpperCase();
+  const descNorm = String(descripcionInput || '')
+    .replace(/\s+\/\s*\d+(?:[.,]\d+)?\s*$/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase();
 
   if (!codNorm && !descNorm) return undefined;
 
   // 1. Coincidencia exacta por SKU
   if (codNorm) {
-    let match = CATALOGO_ALKOSTO.find(p => p.sku.toUpperCase() === codNorm);
+    const match = CATALOGO_ALKOSTO.find(p => p.sku.toUpperCase() === codNorm);
     if (match) return match;
   }
 
   // 2. Coincidencia por código de barra (EAN-13)
   if (codNorm) {
-    let match = CATALOGO_ALKOSTO.find(p => p.codigoBarra && normalizarCodigoProducto(p.codigoBarra) === codNorm);
+    const match = CATALOGO_ALKOSTO.find(p => p.codigoBarra && normalizarCodigoProducto(p.codigoBarra) === codNorm);
     if (match) return match;
   }
 
   // 3. Coincidencia por códigos de cadenas (ej. Alkosto / Familia Center)
   if (codNorm) {
-    let match = CATALOGO_ALKOSTO.find(p => p.codigosCadena && p.codigosCadena.some(c => normalizarCodigoProducto(c).toUpperCase() === codNorm));
+    const match = CATALOGO_ALKOSTO.find(p => p.codigosCadena && p.codigosCadena.some(c => normalizarCodigoProducto(c).toUpperCase() === codNorm));
     if (match) return match;
   }
 
-  // 4. Coincidencia por sinonimos en el código
+  // 4. Coincidencia por sinónimos exactos en el código
   if (codNorm) {
-    let match = CATALOGO_ALKOSTO.find(p => p.sinonimos && p.sinonimos.some(s => normalizarCodigoProducto(s).toUpperCase() === codNorm));
+    const match = CATALOGO_ALKOSTO.find(p => p.sinonimos && p.sinonimos.some(s => normalizarCodigoProducto(s).toUpperCase() === codNorm));
     if (match) return match;
   }
+
+  // GUARDARRAÍL CRÍTICO: Si el documento trae un código numérico/EAN explícito (>= 4 dígitos)
+  // que NO existe en el diccionario por código, solo permitir match por descripción si el nombre
+  // o sinónimo coincide de forma exacta completa, NUNCA por coincidencia difusa de palabras sueltas.
+  const hasExplicitUnmatchedNumericCode = codNorm.length >= 4 && /^\d+$/.test(codNorm);
 
   // 5. Coincidencia por descripción si existe
   if (descNorm) {
-    // Coincidencia exacta de nombre de producto
-    let match = CATALOGO_ALKOSTO.find(p => p.producto.toUpperCase() === descNorm);
+    // Coincidencia exacta de nombre de producto o sinónimo completo
+    let match = CATALOGO_ALKOSTO.find(
+      p => p.producto.toUpperCase() === descNorm ||
+           (p.sinonimos && p.sinonimos.some(s => s.toUpperCase() === descNorm))
+    );
     if (match) return match;
 
-    // Coincidencia por inclusión de frase
+    if (hasExplicitUnmatchedNumericCode) {
+      return undefined;
+    }
+
+    // Coincidencia por inclusión de frase completa (solo cuando no hay código numérico distinto)
     match = CATALOGO_ALKOSTO.find(p => {
       const pNorm = p.producto.toUpperCase();
       if (descNorm.includes(pNorm) || pNorm.includes(descNorm)) return true;
-      if (p.sinonimos && p.sinonimos.some(s => descNorm.includes(s.toUpperCase()))) return true;
+      if (p.sinonimos && p.sinonimos.some(s => s.length >= 6 && descNorm.includes(s.toUpperCase()))) return true;
       return false;
     });
     if (match) return match;
 
-    // Coincidencia por tokens principales
+    // Coincidencia por tokens principales (solo cuando el usuario busca por texto sin código numérico conflictivo)
     const tokens = descNorm.split(/\s+/).filter(t => t.length > 2 && !['POR', 'CON', 'DEL', 'LOS', 'LAS', 'PARA', 'MAS'].includes(t));
     if (tokens.length > 0) {
       match = CATALOGO_ALKOSTO.find(p => {
         const pNorm = p.producto.toUpperCase();
         const matchesCount = tokens.filter(t => pNorm.includes(t)).length;
-        return matchesCount >= Math.min(2, tokens.length);
+        const requiredMatches = tokens.length <= 2 ? tokens.length : Math.max(2, Math.ceil(tokens.length * 0.75));
+        return matchesCount >= requiredMatches;
       });
       if (match) return match;
     }

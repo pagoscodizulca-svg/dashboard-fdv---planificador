@@ -164,6 +164,7 @@ export interface CodizulcaNotaPedidoItem {
 
 export interface ParsedOrdenCompraAlkosto {
   clienteCadena?: 'ALKOSTO' | 'FAMILIA_CENTER' | string;
+  cadenasDetectadas?: Array<'ALKOSTO' | 'FAMILIA_CENTER' | 'VECINO_CENTER'>;
   ordenNro: string;
   sede: string;
   fechaEmision: string;
@@ -174,6 +175,8 @@ export interface ParsedOrdenCompraAlkosto {
   proveedorRif: string;
   observaciones?: string;
   subtotal: number;
+  subtotalAlkosto?: number;
+  subtotalFamiliaCenter?: number;
   items: Array<{
     renglon: number;
     codigo: string;

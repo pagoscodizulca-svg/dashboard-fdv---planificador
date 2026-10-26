@@ -85,11 +85,16 @@ function extractItemsList(data: any): any[] {
 }
 
 // Construye las filas de la tabla poblándolas exactamente a partir de la data de la Orden de Compra
-function buildFilasFromData(data: ParsedOrdenCompraAlkosto | null | undefined, tienda: string = 'CONSOLIDADO'): CodizulcaNotaPedidoItem[] {
+function buildFilasFromData(
+  data: ParsedOrdenCompraAlkosto | null | undefined,
+  tienda: string = 'CONSOLIDADO',
+  cadena: 'ALKOSTO' | 'FAMILIA_CENTER' = 'ALKOSTO'
+): CodizulcaNotaPedidoItem[] {
   const itemsList = extractItemsList(data);
   const totalItems = itemsList.length;
   const numRows = Math.max(15, totalItems);
   const result: CodizulcaNotaPedidoItem[] = [];
+  const chainPrefix = cadena === 'FAMILIA_CENTER' ? 'FC' : 'AK';
 
   for (let i = 0; i < numRows; i++) {
     if (i < totalItems) {
@@ -112,8 +117,15 @@ function buildFilasFromData(data: ParsedOrdenCompraAlkosto | null | undefined, t
         } else {
           cant = 0;
         }
-      } else if (!cant && it.tiendas && typeof it.tiendas === 'object') {
-        cant = (Object.values(it.tiendas) as any[]).reduce((sum: number, v: any) => sum + parseNumeroSeguro(v), 0);
+      } else if (it.tiendas && typeof it.tiendas === 'object' && Object.keys(it.tiendas).length > 0) {
+        // En CONSOLIDADO: sumar estrictamente las tiendas de la cadena activa (AK para Alkosto, FC para Familia Center)
+        const chainEntries = Object.entries(it.tiendas).filter(([tk]) => tk.toUpperCase().startsWith(chainPrefix));
+        const hasOtherChainEntries = Object.keys(it.tiendas).some(tk => !tk.toUpperCase().startsWith(chainPrefix));
+        if (chainEntries.length > 0) {
+          cant = chainEntries.reduce((sum: number, [, v]: [string, any]) => sum + parseNumeroSeguro(v), 0);
+        } else if (hasOtherChainEntries) {
+          cant = 0;
+        }
       }
 
       const rawCode = String(
@@ -135,7 +147,9 @@ function buildFilasFromData(data: ParsedOrdenCompraAlkosto | null | undefined, t
         (it as any).item || 
         (it as any).detalle || 
         ''
-      ).trim();
+      )
+        .replace(/\s+\/\s*\d+(?:[.,]\d+)?\s*$/, '')
+        .trim();
       const match = resolverProductoPorCodigoODescripcion(rawCode, rawDesc);
 
       const finalSku = (match ? match.sku : '') || (it.skuCodizulca && it.skuCodizulca.length <= 6 ? it.skuCodizulca : '') || (rawCode.length <= 6 ? rawCode : '') || rawCode;
@@ -156,7 +170,8 @@ function buildFilasFromData(data: ParsedOrdenCompraAlkosto | null | undefined, t
                 parseNumeroSeguro((it as any).total);
       if (!finalPrecio && sub > 0 && cant > 0) {
         finalPrecio = Number((sub / cant).toFixed(2));
-      } else if (finalPrecio > 0 && !sub && cant > 0) {
+      }
+      if (finalPrecio > 0) {
         sub = Number((cant * finalPrecio).toFixed(2));
       }
 
@@ -196,17 +211,20 @@ export function CodizulcaNotaPedido({
   initialSucursal,
   onOrderSaved 
 }: CodizulcaNotaPedidoProps) {
-  // Detección inicial de cadena según initialData
+  // Detección inicial de cadena según initialData (prioriza ALKOSTO si hay tiendas AK en orden multi-página)
   const getInitialCadena = (): 'ALKOSTO' | 'FAMILIA_CENTER' => {
     if (initialSucursal?.cadena) return initialSucursal.cadena;
     if (!initialData) return 'ALKOSTO';
     const rawItems = extractItemsList(initialData);
     const tagsList: string[] = [];
     rawItems.forEach((it: any) => {
-      if (it.tiendas) Object.keys(it.tiendas).forEach(tk => tagsList.push(tk));
+      if (it.tiendas) Object.keys(it.tiendas).forEach(tk => tagsList.push(tk.toUpperCase()));
     });
-    const esFamilia = tagsList.some(t => t.startsWith('FC')) || 
-                      (initialData as any).clienteCadena === 'FAMILIA_CENTER' || 
+    const hasAk = tagsList.some(t => t.startsWith('AK'));
+    const hasFc = tagsList.some(t => t.startsWith('FC'));
+    if (hasAk) return 'ALKOSTO';
+    if (hasFc) return 'FAMILIA_CENTER';
+    const esFamilia = (initialData as any).clienteCadena === 'FAMILIA_CENTER' || 
                       /familia/i.test(initialData.proveedorNombre || '') || 
                       /familia/i.test(initialData.sede || '') || 
                       initialData.sede === 'FCOP';
@@ -307,23 +325,28 @@ export function CodizulcaNotaPedido({
 
       const rawItems = extractItemsList(initialData);
 
-      // Detectar cadena según datos extraídos
+      // Detectar cadena según datos extraídos (prioriza ALKOSTO si el documento tiene página de Alkosto)
       const tagsList: string[] = [];
       rawItems.forEach((it: any) => {
-        if (it.tiendas) Object.keys(it.tiendas).forEach(tk => tagsList.push(tk));
+        if (it.tiendas) Object.keys(it.tiendas).forEach(tk => tagsList.push(tk.toUpperCase()));
       });
-      const esFamilia = tagsList.some(t => t.startsWith('FC')) || 
-                        (initialData as any).clienteCadena === 'FAMILIA_CENTER' || 
-                        /familia/i.test(initialData.proveedorNombre || '') || 
-                        /familia/i.test(initialData.sede || '') || 
-                        initialData.sede === 'FCOP';
+      const hasAk = tagsList.some(t => t.startsWith('AK'));
+      const hasFc = tagsList.some(t => t.startsWith('FC'));
+      const esFamilia = !hasAk && (
+        hasFc ||
+        (initialData as any).clienteCadena === 'FAMILIA_CENTER' || 
+        /familia/i.test(initialData.proveedorNombre || '') || 
+        /familia/i.test(initialData.sede || '') || 
+        initialData.sede === 'FCOP'
+      );
 
       const detectedCadena = esFamilia ? 'FAMILIA_CENTER' : 'ALKOSTO';
       setCadenaActiva(detectedCadena);
 
-      // Detectar tiendas disponibles en los items
+      // Detectar tiendas disponibles para la cadena activa
+      const prefix = detectedCadena === 'FAMILIA_CENTER' ? 'FC' : 'AK';
       const tiendaSet = new Set<string>();
-      tagsList.forEach(tk => {
+      tagsList.filter(tk => tk.startsWith(prefix)).forEach(tk => {
         tiendaSet.add(tk);
       });
       if (tiendaSet.size === 0) {
@@ -333,8 +356,8 @@ export function CodizulcaNotaPedido({
       const tiendasArray = Array.from(tiendaSet).sort();
       setTiendasDisponibles(tiendasArray);
 
-      // Cargar filas consolidadas de inmediato con buildFilasFromData
-      setFilas(buildFilasFromData(initialData, 'CONSOLIDADO'));
+      // Cargar filas consolidadas de inmediato con buildFilasFromData para la cadena activa
+      setFilas(buildFilasFromData(initialData, 'CONSOLIDADO', detectedCadena));
 
       const defaultSuc = detectedCadena === 'FAMILIA_CENTER' ? SUCURSALES_FAMILIA_CENTER[0] : SUCURSALES_ALKOSTO[0];
       setClienteNombre(defaultSuc.nombre);
@@ -356,7 +379,7 @@ export function CodizulcaNotaPedido({
 
   // Carga las filas según si es consolidado o una tienda individual (AK01..AK10 o FC01..FC07)
   const cargarFilasSegunTienda = (tienda: string, data = initialData, cadena = cadenaActiva) => {
-    const dataFilas = buildFilasFromData(data, tienda);
+    const dataFilas = buildFilasFromData(data, tienda, cadena);
     setFilas(dataFilas);
 
     // Actualizar nombre, código y descripción de sucursal según listado oficial
@@ -816,7 +839,7 @@ export function CodizulcaNotaPedido({
                   setObservaciones(suc.direccion);
                   if (suc.tag && tiendasDisponibles.includes(suc.tag)) {
                     setTiendaSeleccionada(suc.tag);
-                    setFilas(buildFilasFromData(initialData, suc.tag));
+                    setFilas(buildFilasFromData(initialData, suc.tag, cadenaActiva));
                   }
                 }
               }}
