@@ -165,6 +165,13 @@ export interface CodizulcaNotaPedidoItem {
 export interface ParsedOrdenCompraAlkosto {
   clienteCadena?: 'ALKOSTO' | 'FAMILIA_CENTER' | string;
   cadenasDetectadas?: Array<'ALKOSTO' | 'FAMILIA_CENTER' | 'VECINO_CENTER'>;
+  clienteNombre?: string;
+  idCliente?: string;
+  ruta?: string;
+  supervisor?: string;
+  chofer?: string;
+  cantidadCestas?: string | number;
+  nroPedido?: string;
   ordenNro: string;
   sede: string;
   fechaEmision: string;
@@ -187,6 +194,7 @@ export interface ParsedOrdenCompraAlkosto {
     emp?: number;
     unid: string;
     totalCantidad: number;
+    cantDespachada?: number | string;
     costoBruto?: number;
     costoUnitario: number;
     totalRenglon: number;

@@ -150,6 +150,55 @@ export function limpiarDescripcionAlkosto(desc: string): string {
 }
 
 /**
+ * Normaliza estrictamente cualquier unidad de medida extraída por OCR o PDF
+ * hacia las 4 unidades oficiales de CODIZULCA: 'CJ' | 'KG' | 'UND' | 'BLT'.
+ */
+export function normalizarUnidadMedidaAlkosto(
+  rawUnid?: unknown,
+  descripcion?: string,
+  emp?: number,
+  catalogUnid?: string
+): 'CJ' | 'KG' | 'UND' | 'BLT' {
+  const clean = String(rawUnid || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[.\-_/]/g, '');
+
+  if (clean) {
+    if (['CJ', 'CJA', 'CAJ', 'CAJA', 'CAJAS', 'CJS', 'BTO', 'BTOS', 'BULTO', 'BULTOS', 'EMP', 'CS'].includes(clean)) {
+      return 'CJ';
+    }
+    if (['BLT'].includes(clean)) {
+      return 'BLT';
+    }
+    if (['KG', 'KGS', 'KILO', 'KILOS', 'KLS', 'KGR', 'KL', 'K'].includes(clean)) {
+      return 'KG';
+    }
+    if (['UND', 'UNID', 'UNIDAD', 'UNIDADES', 'UNI', 'UN', 'PZA', 'PZAS', 'PIEZA', 'PIEZAS', 'PAQ', 'PAQUETE', 'BOLSA', 'BOLSAS'].includes(clean)) {
+      return 'UND';
+    }
+  }
+
+  if (catalogUnid && ['CJ', 'KG', 'UND', 'BLT'].includes(catalogUnid.toUpperCase())) {
+    return catalogUnid.toUpperCase() as 'CJ' | 'KG' | 'UND' | 'BLT';
+  }
+
+  const descUpper = String(descripcion || '').toUpperCase();
+  if (/\b(X\s*KG|POR\s*KG|XKG|A\s+GRANEL)\b/.test(descUpper)) {
+    return 'KG';
+  }
+  if (/\b(\d+\s*UND\s*X|\d+\s*X\s*\d+\s*(GR|GRS|KG|LT|ML|UNI|UND))\b/.test(descUpper)) {
+    return 'CJ';
+  }
+
+  if (emp && emp > 0) {
+    return 'CJ';
+  }
+
+  return 'KG';
+}
+
+/**
  * Normaliza fechas en formato DD/MM/YYYY a DD/MM/YYYY o YYYY-MM-DD según se requiera,
  * validando que día, mes y año estén en rangos reales.
  */
@@ -478,7 +527,7 @@ export function parseAlkostoRawText(rawText: string): ParsedOrdenCompraAlkosto {
 
       const finalSku = catalogMatch ? catalogMatch.sku : rawCode;
       const finalBarcode = catalogMatch?.codigoBarra || (/^\d{12,14}$/.test(rawCode) ? rawCode : undefined);
-      const finalUnid = catalogMatch?.unidadSugerida || (mapped.emp > 0 ? 'CJ' : 'KG');
+      const finalUnid = normalizarUnidadMedidaAlkosto(undefined, cleanDesc, mapped.emp, catalogMatch?.unidadSugerida);
 
       const existing = itemsByCode.get(rawCode);
       if (existing) {
@@ -768,16 +817,39 @@ export function validateAndNormalizeAlkostoOC(
     );
   }
 
+  // Helper insensible a mayúsculas, acentos y espacios/guiones para leer encabezados visuales de CODIZULCA y Alkosto
+  const pickProp = (obj: any, candidates: string[]): any => {
+    if (!obj || typeof obj !== 'object') return undefined;
+    for (const c of candidates) {
+      if (obj[c] !== undefined && obj[c] !== null && obj[c] !== '') return obj[c];
+    }
+    const normKey = (k: string) =>
+      k.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+    const targetSet = new Set(candidates.map(normKey));
+    for (const [k, v] of Object.entries(obj)) {
+      if (v !== undefined && v !== null && v !== '' && targetSet.has(normKey(k))) {
+        return v;
+      }
+    }
+    return undefined;
+  };
+
+  // Filtrar filas vacías de plantillas (ej. filas en blanco 2..15 de la Nota de Pedido Codizulca)
+  const nonEmptyRawItems = rawItems.filter((it: any) => {
+    if (!it || typeof it !== 'object') return true; // Dejar pasar para que el validador reporte el error de tipo
+    const hasCod = Boolean(String(pickProp(it, ['codigo', 'sku', 'SKU', 'skuCodizulca', 'codigoBarra', 'ean', 'referencia']) ?? '').trim());
+    const hasDesc = Boolean(String(pickProp(it, ['descripcion', 'DESCRIPCIÓN DEL PRODUCTO', 'descripcionProducto', 'producto', 'nombre', 'articulo']) ?? '').trim());
+    const hasCant = parseNumeroEstricto(pickProp(it, ['totalCantidad', 'cantSolicitada', 'CANT', 'cantidad', 'cant', 'CANT. SOLICITADA']), 0) > 0;
+    const hasStores = it.tiendas && typeof it.tiendas === 'object' && Object.values(it.tiendas).some(v => parseNumeroEstricto(v, 0) > 0);
+    return hasCod || hasDesc || hasCant || hasStores;
+  });
+
+  const itemsToValidate = nonEmptyRawItems.length > 0 ? nonEmptyRawItems : rawItems;
+
   // 3. Validar y normalizar Número de Orden de Compra
   const rawOrdenNro = String(
-    root.ordenNro ??
-    rawInput.ordenNro ??
-    root.numeroOrden ??
-    rawInput.numeroOrden ??
-    root.nroOrden ??
-    rawInput.nroOrden ??
-    root.nro_orden ??
-    root.oc ??
+    pickProp(root, ['ordenNro', 'ORDEN DE COMPRA', 'ordenCompra', 'orden_compra', 'numeroOrden', 'nroOrden', 'nro_orden', 'oc']) ??
+    pickProp(rawInput, ['ordenNro', 'ORDEN DE COMPRA', 'ordenCompra', 'numeroOrden', 'nroOrden', 'oc']) ??
     (typeof root.orden === 'string' ? root.orden : '') ??
     ''
   ).trim();
@@ -793,8 +865,8 @@ export function validateAndNormalizeAlkostoOC(
   // 4. Normalizar y validar cada renglón
   const normalizedItems: ParsedOrdenCompraAlkosto['items'] = [];
 
-  rawItems.forEach((it: any, idx: number) => {
-    const renglonNum = Number(it?.renglon) || idx + 1;
+  itemsToValidate.forEach((it: any, idx: number) => {
+    const renglonNum = Number(pickProp(it, ['renglon', 'N°', 'nro', 'numero'])) || idx + 1;
     if (!it || typeof it !== 'object') {
       issues.push({
         field: `items[${idx}]`,
@@ -805,29 +877,54 @@ export function validateAndNormalizeAlkostoOC(
       return;
     }
 
-    const rawCod = String(
-      it.codigo ??
-      it.codigo_articulo ??
-      it.codigo_producto ??
-      it.skuCodizulca ??
-      it.sku ??
-      it.codigoBarra ??
-      it.codigo_barra ??
-      it.ean ??
-      it.barcode ??
-      it.referencia ??
-      ''
+    let rawCod = String(
+      pickProp(it, [
+        'codigo',
+        'sku',
+        'SKU',
+        'skuCodizulca',
+        'codigo_articulo',
+        'codigo_producto',
+        'codigoBarra',
+        'codigo_barra',
+        'ean',
+        'barcode',
+        'referencia'
+      ]) ?? ''
     ).trim();
+
+    let rawUnidInput = String(
+      pickProp(it, [
+        'unid',
+        'UNID',
+        'unidad',
+        'unidadMedida',
+        'unidad_medida',
+        'cantSolicitadaUnid'
+      ]) ?? ''
+    ).trim();
+
+    // Guardarraíl contra cruce de columnas: si la IA colocó la unidad ("CJ", "KG", "UND") en el campo SKU/codigo
+    if (/^(CJ|CAJA|CAJAS|KG|KGS|KILOS|UND|UNID|UNIDADES|BLT|BTO|BTOS|BULTO|BULTOS)$/i.test(rawCod)) {
+      const potentialCodeInUnid = rawUnidInput && !/^(CJ|CAJA|CAJAS|KG|KGS|KILOS|UND|UNID|UNIDADES|BLT|BTO|BTOS|BULTO|BULTOS)$/i.test(rawUnidInput)
+        ? rawUnidInput
+        : '';
+      rawUnidInput = rawCod;
+      rawCod = String(pickProp(it, ['skuCodizulca', 'codigoBarra']) ?? potentialCodeInUnid ?? '').trim();
+    }
 
     const cleanCod = normalizarCodigoProducto(rawCod);
     const rawDesc = String(
-      it.descripcion ??
-      it.descripcion_producto ??
-      it.producto ??
-      it.nombre ??
-      it.articulo ??
-      it.detalle ??
-      ''
+      pickProp(it, [
+        'descripcion',
+        'DESCRIPCIÓN DEL PRODUCTO',
+        'descripcionProducto',
+        'descripcion_producto',
+        'producto',
+        'nombre',
+        'articulo',
+        'detalle'
+      ]) ?? ''
     ).trim();
     const cleanDesc = limpiarDescripcionAlkosto(rawDesc);
 
@@ -835,7 +932,7 @@ export function validateAndNormalizeAlkostoOC(
       issues.push({
         field: `items[${idx}].codigo`,
         renglon: renglonNum,
-        message: `El renglón ${renglonNum} carece tanto de código como de descripción.`,
+        message: `El renglón ${renglonNum} carece tanto de SKU/código como de descripción.`,
         severity: 'ERROR'
       });
       return;
@@ -846,6 +943,16 @@ export function validateAndNormalizeAlkostoOC(
     const finalCodigo = finalSku || cleanCod || (match?.codigoBarra ?? '');
     const finalBarcode = it.codigoBarra || it.ean || match?.codigoBarra || (/^\d{12,14}$/.test(cleanCod) ? cleanCod : undefined);
     const finalDesc = cleanDesc || (match ? match.producto : '');
+
+    if (!finalCodigo) {
+      issues.push({
+        field: `items[${idx}].codigo`,
+        renglon: renglonNum,
+        message: `El renglón ${renglonNum} ("${finalDesc}") no tiene un SKU identificable.`,
+        severity: 'ERROR'
+      });
+      return;
+    }
 
     // Normalizar tiendas (AK01..AK10, FC01..FC07, etc.)
     const cleanTiendas: Record<string, number> = {};
@@ -882,8 +989,12 @@ export function validateAndNormalizeAlkostoOC(
     const empNum = parseNumeroEstricto(it.emp, 0);
     const ivaNum = parseNumeroEstricto(it.iva, 0);
 
-    const rawUnid = String(it.unid || it.unidad || it.unidadMedida || '').trim().toUpperCase();
-    const finalUnid = rawUnid || match?.unidadSugerida || (empNum > 0 ? 'CJ' : 'KG');
+    const finalUnid = normalizarUnidadMedidaAlkosto(
+      rawUnidInput,
+      finalDesc,
+      empNum,
+      match?.unidadSugerida
+    );
 
     // Calcular suma de tiendas por cadena
     const sumAkTiendas = Object.entries(cleanTiendas)
@@ -895,15 +1006,25 @@ export function validateAndNormalizeAlkostoOC(
     const sumAllTiendas = Object.values(cleanTiendas).reduce((acc, v) => acc + v, 0);
 
     let totalCant = parseNumeroEstricto(
-      it.totalCantidad ??
-      it.total_cantidad ??
-      it.cantidad ??
-      it.cant ??
-      it.cantidadSolicitada ??
-      it.cajas ??
-      it.bultos,
+      pickProp(it, [
+        'totalCantidad',
+        'cantSolicitada',
+        'CANT',
+        'cantidadSolicitada',
+        'cantidad_solicitada',
+        'total_cantidad',
+        'cantidad',
+        'cant',
+        'cajas',
+        'bultos'
+      ]),
       0
     );
+
+    const cantDespachadaRaw = pickProp(it, ['cantDespachada', 'CANTIDAD DESPACHADA', 'cantidadDespachada', 'cantidad_despachada']) ?? '';
+    const cantDespachadaClean = cantDespachadaRaw !== '' && cantDespachadaRaw !== null && cantDespachadaRaw !== undefined
+      ? String(parseNumeroEstricto(cantDespachadaRaw, 0) || cantDespachadaRaw).trim()
+      : '';
 
     if (totalCant < 0) {
       issues.push({
@@ -931,28 +1052,36 @@ export function validateAndNormalizeAlkostoOC(
             severity: 'ERROR'
           });
         } else {
-          // En modo asistido (OCR de foto), la suma explícita de tiendas o el total sirven de respaldo
           totalCant = sumAkTiendas > 0 && sumFcTiendas === 0 ? sumAkTiendas : totalCant;
         }
       }
     }
 
     let precio = parseNumeroEstricto(
-      it.costoUnitario ??
-      it.costo_unitario ??
-      it.costoBruto ??
-      it.costo_bruto ??
-      it.precio ??
-      it.precioUnitario,
+      pickProp(it, [
+        'costoUnitario',
+        'PRECIO',
+        'precio',
+        'precioUnitario',
+        'precio_unitario',
+        'costo_unitario',
+        'costoBruto',
+        'costo_bruto'
+      ]),
       0
     );
 
     let totalRenglon = parseNumeroEstricto(
-      it.totalRenglon ??
-      it.total_renglon ??
-      it.subtotal ??
-      it.importe ??
-      it.monto,
+      pickProp(it, [
+        'totalRenglon',
+        'SUB TOTAL',
+        'subtotal',
+        'subTotal',
+        'sub_total',
+        'total_renglon',
+        'importe',
+        'monto'
+      ]),
       0
     );
 
@@ -989,7 +1118,7 @@ export function validateAndNormalizeAlkostoOC(
       issues.push({
         field: `items[${idx}].totalCantidad`,
         renglon: renglonNum,
-        message: `El renglón ${renglonNum} (${finalCodigo}) tiene cantidad total 0.`,
+        message: `El renglón ${renglonNum} (${finalCodigo}) tiene cantidad solicitada 0.`,
         severity: 'ERROR'
       });
     }
@@ -1004,6 +1133,7 @@ export function validateAndNormalizeAlkostoOC(
       emp: empNum,
       unid: finalUnid,
       totalCantidad: totalCant,
+      cantDespachada: cantDespachadaClean,
       costoBruto: parseNumeroEstricto(it.costoBruto, precio),
       costoUnitario: precio,
       totalRenglon: Number(totalRenglon.toFixed(2)),
@@ -1028,6 +1158,16 @@ export function validateAndNormalizeAlkostoOC(
   const hasAk = Array.from(allStoreTags).some(t => t.startsWith('AK'));
   const hasFc = Array.from(allStoreTags).some(t => t.startsWith('FC'));
 
+  const clienteNombreClean = String(pickProp(root, ['clienteNombre', 'CLIENTE', 'cliente']) ?? pickProp(rawInput, ['clienteNombre', 'CLIENTE', 'cliente']) ?? '').trim();
+  const idClienteClean = String(pickProp(root, ['idCliente', 'ID CLIENTE', 'codigoCliente', 'codCliente']) ?? pickProp(rawInput, ['idCliente', 'ID CLIENTE', 'codigoCliente']) ?? '').trim();
+  const rutaClean = String(pickProp(root, ['ruta', 'RUTA']) ?? pickProp(rawInput, ['ruta', 'RUTA']) ?? '').trim();
+  const supervisorClean = String(pickProp(root, ['supervisor', 'SUPERVISOR']) ?? pickProp(rawInput, ['supervisor', 'SUPERVISOR']) ?? '').trim();
+  const choferClean = String(pickProp(root, ['chofer', 'CHOFER']) ?? pickProp(rawInput, ['chofer', 'CHOFER']) ?? '').trim();
+  const cantidadCestasClean = pickProp(root, ['cantidadCestas', 'CANTIDAD DE CESTAS']) ?? pickProp(rawInput, ['cantidadCestas', 'CANTIDAD DE CESTAS']);
+  const nroPedidoClean = String(pickProp(root, ['nroPedido', 'N° DE PEDIDO', 'numeroPedido']) ?? pickProp(rawInput, ['nroPedido', 'N° DE PEDIDO']) ?? '').trim();
+  const observacionesClean = String(pickProp(root, ['observaciones', 'OBSERVACIONES']) ?? pickProp(rawInput, ['observaciones', 'OBSERVACIONES']) ?? '').trim();
+  const fechaExtraida = String(pickProp(root, ['fechaEntrega', 'FECHA', 'fecha', 'entrega', 'fechaEmision']) ?? '').trim();
+
   let clienteCadena = String(root.clienteCadena || rawInput.clienteCadena || '').trim().toUpperCase();
   if (hasAk && !clienteCadena) {
     clienteCadena = 'ALKOSTO';
@@ -1035,26 +1175,35 @@ export function validateAndNormalizeAlkostoOC(
     clienteCadena = 'FAMILIA_CENTER';
   } else if (!clienteCadena) {
     const sedeStr = String(root.sede || '').toUpperCase();
-    clienteCadena = sedeStr.startsWith('FC') || /FAMILIA/i.test(String(root.proveedorNombre || ''))
+    clienteCadena = sedeStr.startsWith('FC') ||
+                    /FAMILIA/i.test(String(root.proveedorNombre || '')) ||
+                    /FAMILIA/i.test(clienteNombreClean)
       ? 'FAMILIA_CENTER'
       : 'ALKOSTO';
   }
 
   const subtotalCalc = normalizedItems.reduce((acc, it) => acc + (it.totalRenglon || 0), 0);
-  const rawSubtotal = parseNumeroEstricto(root.subtotal, 0);
+  const rawSubtotal = parseNumeroEstricto(root.subtotal ?? root.total, 0);
 
   return {
     clienteCadena,
     cadenasDetectadas: root.cadenasDetectadas || (hasAk && hasFc ? ['ALKOSTO', 'FAMILIA_CENTER'] : [clienteCadena as any]),
-    ordenNro: rawOrdenNro,
+    clienteNombre: clienteNombreClean || undefined,
+    idCliente: idClienteClean || undefined,
+    ruta: rutaClean || undefined,
+    supervisor: supervisorClean || undefined,
+    chofer: choferClean || undefined,
+    cantidadCestas: cantidadCestasClean !== undefined ? cantidadCestasClean : undefined,
+    nroPedido: nroPedidoClean || undefined,
+    ordenNro: rawOrdenNro || 'S/N',
     sede: String(root.sede || (clienteCadena === 'FAMILIA_CENTER' ? 'FCOP' : 'AKOP')).trim(),
-    fechaEmision: normalizarFechaAlkosto(root.fechaEmision || root.fecha || ''),
-    fechaEntrega: normalizarFechaAlkosto(root.fechaEntrega || root.entrega || ''),
+    fechaEmision: normalizarFechaAlkosto(root.fechaEmision || fechaExtraida || ''),
+    fechaEntrega: normalizarFechaAlkosto(root.fechaEntrega || root.entrega || fechaExtraida || ''),
     diasCredito: parseNumeroEstricto(root.diasCredito, 15),
     tasaCambio: parseNumeroEstricto(root.tasaCambio, 0),
     proveedorNombre: String(root.proveedorNombre || 'CODIZULCA, C.A.').trim(),
     proveedorRif: String(root.proveedorRif || 'J409876136').trim(),
-    observaciones: root.observaciones ? String(root.observaciones).trim() : undefined,
+    observaciones: observacionesClean || undefined,
     subtotal: rawSubtotal > 0 ? rawSubtotal : Number(subtotalCalc.toFixed(2)),
     subtotalAlkosto: root.subtotalAlkosto,
     subtotalFamiliaCenter: root.subtotalFamiliaCenter,

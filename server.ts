@@ -1669,11 +1669,54 @@ async function startServer() {
         }
       });
 
-      const prompt = `Analiza detalladamente esta Orden de Compra dirigida a CODIZULCA, C.A. Puede pertenecer a:
-1. ALKOSTO (ALKOSTO DONDE COMPRAR ES GANAR, C.A.): contiene columnas por tienda AK01, AK02, AK03, AK04, AK05, AK06, AK07, AK08, AK09, AK10 (y AKOP).
-2. FAMILIA CENTER (FAMILIA CENTER, C.A.): contiene columnas por tienda FC01, FC02, FC03, FC04, FC05, FC06, FC07 (y FCOP).
+      const prompt = `Actúa como un motor de visión artificial de precisión bancaria especializado en extraer Órdenes de Compra (OC) y Notas de Pedido de CODIZULCA, C.A.
+Analiza la imagen o documento adjunto y devuelve ÚNICAMENTE un objeto JSON estrictamente estructurado que siga el esquema proporcionado.
 
-Extrae minuciosamente toda la información de cabecera y CADA UNO de los renglones/productos con sus códigos, descripciones, cantidades por tienda, totales y montos.
+EL DOCUMENTO PUEDE VENIR EN UNO DE ESTOS DOS ESQUEMAS VISUALES OFICIALES:
+
+================================================================================
+ESQUEMA VISUAL A: FORMATO OFICIAL DE ORDEN DE COMPRA / NOTA DE PEDIDO CODIZULCA
+================================================================================
+1. ENCABEZADOS SUPERIORES:
+   - "CLIENTE:" -> Extraer en "clienteNombre" (ej. "Alkosto 1 san Felipe", "Familia Center 1 - Plaza lago").
+   - "FECHA:" -> Extraer en "fechaEntrega" (formato DD/MM/YYYY o YYYY-MM-DD).
+   - "ID CLIENTE:" -> Extraer en "idCliente" (ej. "7498", "7499", "7490").
+   - "N° DE PEDIDO:" -> Extraer en "nroPedido".
+   - "ORDEN DE COMPRA:" -> Extraer en "ordenNro" (ej. "0200605591", "OC-4501"). ¡CRÍTICO: Nunca dejar vacío si aparece impreso o manuscrito!
+   - "RUTA:" -> Extraer en "ruta" (ej. "SAIRU VALLES / CUENTAS CLAVE 2").
+2. TABLA DE PRODUCTOS (8 COLUMNAS ESTRICTAS DE IZQUIERDA A DERECHA):
+   - Columna 1: "N°" -> Número de fila/renglón (1 al 15). Extraer en "renglon".
+   - Columna 2 y 3 (Bajo cabecera agrupada "CANT. SOLICITADA"):
+     * Subcolumna 2a: "UNID" -> Unidad de medida comercial. Normalizar estrictamente a:
+       - "CJ" si dice CJ, CAJA, CAJAS, BULTO, BULTOS, CJS.
+       - "UND" si dice UND, UNI, UNIDAD, UNIDADES, PZA, PIEZA.
+       - "KG" si dice KG, KGS, KILO, KILOS, KILOGRAMOS.
+       - "BLT" si dice BLT.
+       Extraer en "unid". ¡PROHIBIDO poner la unidad en la columna SKU o CANT!
+     * Subcolumna 2b: "CANT" -> Cantidad numérica solicitada. Extraer en "totalCantidad".
+   - Columna 4: "CANTIDAD DESPACHADA" -> Suele venir en blanco o con número de despacho. Extraer en "cantDespachada". ¡ADVERTENCIA VISUAL CRÍTICA!: Aunque "CANTIDAD DESPACHADA" esté vacía, NO desplaces la columna "SKU" hacia la izquierda ni mezcles "CANT" con "SKU".
+   - Columna 5: "SKU" -> Código corto CODIZULCA (ej. "1496", "1497", "21", "047", "046", "1360", "1512") o código EAN/Cadena. Extraer en "codigo" y "skuCodizulca".
+   - Columna 6: "DESCRIPCIÓN DEL PRODUCTO" -> Nombre completo del producto. Extraer en "descripcion".
+   - Columna 7: "PRECIO" -> Precio unitario en USD/Bs. Extraer en "costoUnitario".
+   - Columna 8: "SUB TOTAL" -> Monto total de la fila (CANT * PRECIO). Extraer en "totalRenglon".
+   - NOTA IMPORTANTE SOBRE FILAS VACÍAS: El formato oficial CODIZULCA tiene 15 filas preimpresas (1..15). Ignora por completo las filas vacías de la plantilla que no tengan SKU, descripción ni cantidad.
+3. PIE DE PÁGINA:
+   - "TOTAL GENERAL" -> Extraer en "subtotal".
+   - "OBSERVACIONES" -> Extraer en "observaciones".
+   - "SUPERVISOR" -> Extraer en "supervisor".
+   - "CHOFER" -> Extraer en "chofer".
+   - "CANTIDAD DE CESTAS" -> Extraer en "cantidadCestas".
+
+================================================================================
+ESQUEMA VISUAL B: ORDEN DE COMPRA MATRIZ DE CADENA (ALKOSTO / FAMILIA CENTER)
+================================================================================
+1. Pertenece a ALKOSTO (columnas de tienda AK01..AK10, AKOP) o FAMILIA CENTER (columnas FC01..FC07, FCOP).
+2. "ordenNro": Número de Orden de Compra en la esquina superior derecha (ej. "0200605591").
+3. "codigo": Lee el código EXACTO impreso en la columna Código de cada renglón sin espacios ni guiones.
+4. "descripcion": Elimina el sufijo "/ <precio>" al final de la descripción (ej. "PECHUGA DE PAVO ASTURIAS X KG / 6.88" -> "PECHUGA DE PAVO ASTURIAS X KG"). NUNCA uses ese número tras la barra como costoUnitario.
+5. "emp" vs Tiendas (AK01..AK10 / FC01..FC07): La columna "EMP" (empaque: 0, 4, 6, 10, 12, 20) está situada entre "IVA" y la primera tienda ("AK01" o "FC01"). NUNCA asignes el valor entero de "EMP" a ninguna tienda.
+6. Unidad de medida ("unid"): Si el producto se vende por caja/empaque (EMP >= 4 o descripción indica UND/CAJA como "10UNDX900GR", "20UNDX500GR", "1X12UNI", "4X2.5KG", "6 X 500 GRS") usa "CJ"; si es por pieza unitaria (ej. "NUGGET CORRAL DE 460GM", "226 GR X 36 UND") usa "UND"; si es por peso ("X KG", "POR KG", "3.5KG X 4 UND") usa "KG".
+7. Verificación Matemática: La suma de las cantidades de las tiendas de cada fila DEBE coincidir con "totalCantidad", y "totalCantidad" * "costoUnitario" DEBE coincidir con "totalRenglon".
 
 DICCIONARIO MAESTRO DE CÓDIGOS Y PRODUCTOS CODIZULCA PARA ASISTIR LA LECTURA EXACTA:
 - EAN-13: 7590377000077 -> SKU 1496 MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR (Unidad: CJ)
@@ -1689,43 +1732,46 @@ DICCIONARIO MAESTRO DE CÓDIGOS Y PRODUCTOS CODIZULCA PARA ASISTIR LA LECTURA EX
 - Cadena Alkosto: 100882 -> SKU 1511 MORT. PECHUGA DE POLLO ASTURIAS X KG (Unidad: KG)
 - Cadena Alkosto: 100929 -> SKU 1463 JAMON COCIDO DE PAVO AHUMADO SUPERIOR ASTURIAS X KG (Unidad: KG)
 - Código 1446 -> SKU 1446 CHULETA FRESCA ASTURIAS POR KG (Unidad: KG)
-- Código 1462 / 1519 -> SKU 1519 MORTADELA ESP D/POLLO SALPICAO 10UNDX900GR (Unidad: CJ)
-
-REGLAS CRÍTICAS DE ALINEACIÓN DE COLUMNAS Y CAMPOS:
-1. "codigo": Lee el código EXACTO impreso en la columna Código de cada renglón. ELIMINA cualquier espacio, punto o guion.
-2. "descripcion": Elimina el sufijo "/ <precio>" al final de la descripción (ej. "PECHUGA DE PAVO ASTURIAS X KG / 6.88" -> "PECHUGA DE PAVO ASTURIAS X KG"). NUNCA uses ese número tras la barra como costoUnitario.
-3. "emp" vs Tiendas (AK01..AK10 / FC01..FC07): La columna "EMP" (empaque: 0, 4, 6, 10, 12, 20) está situada entre "IVA" y la primera tienda ("AK01" o "FC01"). NUNCA asignes el valor entero de "EMP" a ninguna tienda.
-4. Verificación Matemática: La suma de las cantidades de las tiendas de cada fila DEBE coincidir exactamente con "totalCantidad", y "totalCantidad" * "costoUnitario" DEBE coincidir con "totalRenglon".`;
+- Código 1462 / 1519 -> SKU 1519 MORTADELA ESP D/POLLO SALPICAO 10UNDX900GR (Unidad: CJ)`;
 
       const ocResponseSchema = {
         type: Type.OBJECT,
         properties: {
-          clienteCadena: { type: Type.STRING },
-          ordenNro: { type: Type.STRING },
+          clienteCadena: { type: Type.STRING, description: "ALKOSTO o FAMILIA_CENTER" },
+          ordenNro: { type: Type.STRING, description: "Número de Orden de Compra (ej. 0200605591)" },
+          clienteNombre: { type: Type.STRING, description: "Nombre del cliente o sucursal en encabezado CLIENTE" },
+          idCliente: { type: Type.STRING, description: "Código de sucursal en encabezado ID CLIENTE (ej. 7498, 7490)" },
+          ruta: { type: Type.STRING, description: "Ruta o vendedor asignado en encabezado RUTA" },
+          nroPedido: { type: Type.STRING, description: "N° de pedido si aparece en el formato" },
           sede: { type: Type.STRING },
           fechaEmision: { type: Type.STRING },
-          fechaEntrega: { type: Type.STRING },
+          fechaEntrega: { type: Type.STRING, description: "Fecha del documento o fecha de entrega" },
           diasCredito: { type: Type.NUMBER },
           tasaCambio: { type: Type.NUMBER },
           proveedorNombre: { type: Type.STRING },
           proveedorRif: { type: Type.STRING },
-          subtotal: { type: Type.NUMBER },
+          subtotal: { type: Type.NUMBER, description: "Subtotal o Total General de la orden" },
+          observaciones: { type: Type.STRING },
+          supervisor: { type: Type.STRING },
+          chofer: { type: Type.STRING },
+          cantidadCestas: { type: Type.STRING },
           items: {
             type: Type.ARRAY,
             items: {
               type: Type.OBJECT,
               properties: {
-                renglon: { type: Type.NUMBER },
-                codigo: { type: Type.STRING },
-                skuCodizulca: { type: Type.STRING },
-                codigoBarra: { type: Type.STRING },
-                descripcion: { type: Type.STRING },
-                unid: { type: Type.STRING },
-                emp: { type: Type.NUMBER },
-                totalCantidad: { type: Type.NUMBER },
+                renglon: { type: Type.NUMBER, description: "Columna N° (número de fila)" },
+                unid: { type: Type.STRING, description: "Columna UNID normalizada estrictamente a CJ, UND, KG o BLT" },
+                totalCantidad: { type: Type.NUMBER, description: "Columna CANT (cantidad solicitada)" },
+                cantDespachada: { type: Type.STRING, description: "Columna CANTIDAD DESPACHADA (vacío si no tiene valor)" },
+                codigo: { type: Type.STRING, description: "Columna SKU o Código del artículo" },
+                skuCodizulca: { type: Type.STRING, description: "SKU interno CODIZULCA asociado al producto" },
+                codigoBarra: { type: Type.STRING, description: "Código de barras EAN si aparece" },
+                descripcion: { type: Type.STRING, description: "Columna DESCRIPCIÓN DEL PRODUCTO" },
+                emp: { type: Type.NUMBER, description: "Unidades por empaque si aparece en formato matriz" },
                 costoBruto: { type: Type.NUMBER },
-                costoUnitario: { type: Type.NUMBER },
-                totalRenglon: { type: Type.NUMBER },
+                costoUnitario: { type: Type.NUMBER, description: "Columna PRECIO (precio unitario)" },
+                totalRenglon: { type: Type.NUMBER, description: "Columna SUB TOTAL de la fila" },
                 tiendas: {
                   type: Type.OBJECT,
                   properties: {
@@ -1751,7 +1797,7 @@ REGLAS CRÍTICAS DE ALINEACIÓN DE COLUMNAS Y CAMPOS:
                   }
                 }
               },
-              required: ["codigo", "descripcion", "totalCantidad"]
+              required: ["codigo", "descripcion", "unid", "totalCantidad"]
             }
           }
         },
@@ -1770,7 +1816,7 @@ REGLAS CRÍTICAS DE ALINEACIÓN DE COLUMNAS Y CAMPOS:
               {
                 role: "user",
                 parts: [
-                  { inlineData: { mimeType, data: imageBase64 } },
+                  { inlineData: { mimeType: actualMime, data: cleanBase64 } },
                   { text: prompt }
                 ]
               }
@@ -1796,7 +1842,7 @@ REGLAS CRÍTICAS DE ALINEACIÓN DE COLUMNAS Y CAMPOS:
                 {
                   role: "user",
                   parts: [
-                    { inlineData: { mimeType, data: imageBase64 } },
+                    { inlineData: { mimeType: actualMime, data: cleanBase64 } },
                     { text: prompt }
                   ]
                 }

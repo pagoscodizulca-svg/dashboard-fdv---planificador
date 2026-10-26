@@ -14,6 +14,7 @@ import {
   saveAlkostoOrder, 
   transmitirPedidoAlkosto 
 } from '../services/alkostoService';
+import { normalizarUnidadMedidaAlkosto } from '../services/alkostoOcParser';
 
 interface CodizulcaNotaPedidoProps {
   initialData?: ParsedOrdenCompraAlkosto | null;
@@ -156,7 +157,12 @@ function buildFilasFromData(
       const finalBarcode = it.codigoBarra || (it as any).barcode || match?.codigoBarra || '';
       // Preservar la descripción exacta leída de la orden; si no viene, usar la del catálogo
       const finalDesc = rawDesc || (match ? match.producto : '');
-      const finalUnid = it.unid || (it as any).unidad || match?.unidadSugerida || (parseNumeroSeguro(it.emp) > 0 ? 'CJ' : 'KG');
+      const finalUnid = normalizarUnidadMedidaAlkosto(
+        it.unid || (it as any).unidad,
+        finalDesc,
+        parseNumeroSeguro(it.emp),
+        match?.unidadSugerida
+      );
       
       let finalPrecio = parseNumeroSeguro(it.costoUnitario) || 
                         parseNumeroSeguro((it as any).costo_unitario) || 
@@ -175,11 +181,13 @@ function buildFilasFromData(
         sub = Number((cant * finalPrecio).toFixed(2));
       }
 
+      const rawDespachada = (it as any).cantDespachada ?? (it as any).cantidadDespachada ?? '';
+
       result.push({
         renglon: i + 1,
         unid: finalUnid,
         cantSolicitada: cant,
-        cantDespachada: '',
+        cantDespachada: rawDespachada !== '' && rawDespachada !== null && rawDespachada !== undefined ? String(rawDespachada) : '',
         codigo: finalSku,
         skuCodizulca: finalSku,
         codigoBarra: finalBarcode,
@@ -360,9 +368,21 @@ export function CodizulcaNotaPedido({
       setFilas(buildFilasFromData(initialData, 'CONSOLIDADO', detectedCadena));
 
       const defaultSuc = detectedCadena === 'FAMILIA_CENTER' ? SUCURSALES_FAMILIA_CENTER[0] : SUCURSALES_ALKOSTO[0];
-      setClienteNombre(defaultSuc.nombre);
-      setIdCliente(defaultSuc.codigo);
-      setObservaciones(defaultSuc.direccion);
+      const extractedId = initialData.idCliente ? String(initialData.idCliente).trim() : '';
+      const matchedSucById = extractedId
+        ? [...SUCURSALES_ALKOSTO, ...SUCURSALES_FAMILIA_CENTER].find(s => s.codigo === extractedId)
+        : undefined;
+
+      setClienteNombre(initialData.clienteNombre || matchedSucById?.nombre || defaultSuc.nombre);
+      setIdCliente(extractedId || defaultSuc.codigo);
+      setObservaciones(initialData.observaciones || matchedSucById?.direccion || defaultSuc.direccion);
+      if (initialData.ruta) setRuta(initialData.ruta);
+      if (initialData.supervisor) setSupervisor(initialData.supervisor);
+      if (initialData.chofer) setChofer(initialData.chofer);
+      if (initialData.cantidadCestas !== undefined && initialData.cantidadCestas !== null) {
+        setCantidadCestas(String(initialData.cantidadCestas));
+      }
+      if (initialData.nroPedido) setNroPedido(initialData.nroPedido);
     } else if (initialSucursal) {
       if (initialSucursal.cadena) setCadenaActiva(initialSucursal.cadena);
       setClienteNombre(initialSucursal.nombre);

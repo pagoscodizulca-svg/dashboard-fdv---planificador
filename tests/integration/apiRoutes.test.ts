@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawn, ChildProcess } from 'child_process';
+import zlib from 'zlib';
 
 describe('Integration: API Server Routes & Authentication Flow', () => {
   let baseUrl = 'http://localhost:3005';
@@ -222,6 +223,107 @@ describe('Integration: API Server Routes & Authentication Flow', () => {
       const data = await res.json();
       expect(data.success).toBe(true);
       expect(data.message).toContain('transmitido');
+    });
+  });
+
+  describe('POST /api/alkosto/ocr-orden (Extracción 100% Exacta de Orden de Compra)', () => {
+    function buildAlkostoPdfBase64(lines: string[]): string {
+      const encodeGlyphs = (line: string) =>
+        Array.from(line)
+          .map(ch => `<${(ch.charCodeAt(0) - 29).toString(16).padStart(4, '0').toUpperCase()}>`)
+          .join('');
+
+      const btBlocks = lines
+        .map((ln, idx) => `BT /F1 9.28 Tf 1 0 0 -1 20 ${(idx + 1) * 14} Tm [${encodeGlyphs(ln)}] TJ ET`)
+        .join('\n');
+
+      const compressed = zlib.deflateSync(Buffer.from(btBlocks, 'latin1'));
+      const header = Buffer.from('%PDF-1.4\n1 0 obj\n<< /Length ' + compressed.length + ' /Filter /FlateDecode >>\nstream\n', 'latin1');
+      const footer = Buffer.from('\nendstream\nendobj\n%%EOF', 'latin1');
+      return Buffer.concat([header, compressed, footer]).toString('base64');
+    }
+
+    it('should return 400 when imageBase64 is missing', async () => {
+      const res = await fetch(`${baseUrl}/api/alkosto/ocr-orden`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${vendorToken}`
+        },
+        body: JSON.stringify({})
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it('should extract 100% exact structured JSON (ordenNro, SKUs, unidades CJ/UND/KG y tiendas) from a real OC document', async () => {
+      const ocLines = [
+        'ALKOSTO DONDE COMPRAR ES GANAR, C.A. - SEDE: AKOP',
+        'RIF: J-413243580',
+        'Dias de Credito',
+        ' 21',
+        'Orden Nro.: 0000055165',
+        'TASA DE CAMBIO: 881.0664',
+        'Emision 19/10/2026',
+        'Entrega 22/10/2026',
+        'EMP AK01 AK02 AK03 AK04 AK05 AK06 AK07 AK08 AK09 AK10 Cantidad',
+        '7590377000077 MORTADELA ESPECIAL DE POLLO 900GR ASTURIAS / 2.40',
+        ' 0.00 10.00 0.00 0.00 10.00 10 0.00 10.00 20.00 0.00 0.00 10.00 0.00 0.00 60.00 20.0000 0.00 0.00 0.00 20.0000 1,200.00',
+        '7591289400023 NUGGETS DE POLLO DEL CORRAL 460GR / 5.84',
+        ' 16.00 0.00 0.00 0.00 24.00 0 0.00 0.00 36.00 0.00 12.00 12.00 0.00 0.00 84.00 3.8800 0.00 0.00 0.00 3.8800 325.92',
+        '100881 PECHUGA DE PAVO ASTURIAS X KG / 6.88',
+        ' 0.00 78.00 65.00 104.00 78.00 0 0.00 65.00 104.00 39.00 130.00 104.00 0.00 0.00 767.00 5.5000 0.00 0.00 0.00 5.5000 4,218.50',
+        'SubTotal ( AK ) 5,744.42'
+      ];
+
+      const pdfBase64 = buildAlkostoPdfBase64(ocLines);
+
+      const res = await fetch(`${baseUrl}/api/alkosto/ocr-orden`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${vendorToken}`
+        },
+        body: JSON.stringify({
+          imageBase64: pdfBase64,
+          mimeType: 'application/pdf'
+        })
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.success).toBe(true);
+      expect(body.data.ordenNro).toBe('0000055165');
+      expect(body.data.items).toHaveLength(3);
+
+      // Renglón 1: Bulto / Caja ("CJ") -> SKU 1496
+      expect(body.data.items[0]).toMatchObject({
+        codigo: '1496',
+        skuCodizulca: '1496',
+        unid: 'CJ',
+        totalCantidad: 60,
+        costoUnitario: 20,
+        totalRenglon: 1200
+      });
+
+      // Renglón 2: Unidades ("UND") -> SKU 047
+      expect(body.data.items[1]).toMatchObject({
+        codigo: '047',
+        skuCodizulca: '047',
+        unid: 'UND',
+        totalCantidad: 84,
+        costoUnitario: 3.88,
+        totalRenglon: 325.92
+      });
+
+      // Renglón 3: Kilogramos ("KG") -> SKU 1512
+      expect(body.data.items[2]).toMatchObject({
+        codigo: '1512',
+        skuCodizulca: '1512',
+        unid: 'KG',
+        totalCantidad: 767,
+        costoUnitario: 5.5,
+        totalRenglon: 4218.5
+      });
     });
   });
 

@@ -11,6 +11,7 @@ import {
   parseAlkostoRawText,
   extractPositionedTextFromAlkostoPdfBuffer,
   validateAndNormalizeAlkostoOC,
+  normalizarUnidadMedidaAlkosto,
   AlkostoParseValidationError
 } from '../../src/services/alkostoOcParser';
 import { resolverProductoPorCodigoODescripcion } from '../../src/services/alkostoService';
@@ -312,6 +313,130 @@ describe('Unit & Regression: alkostoOcParser', () => {
         'MORTADELA ESPECIAL DE POLLO NUEVA PRESENTACION 250GR'
       );
       expect(unknownProduct).toBeUndefined();
+    });
+
+    it('should strictly normalize units of measure (CJ, UND, KG, BLT) without ambiguity', () => {
+      expect(normalizarUnidadMedidaAlkosto('CAJAS')).toBe('CJ');
+      expect(normalizarUnidadMedidaAlkosto('BULTO')).toBe('CJ');
+      expect(normalizarUnidadMedidaAlkosto('CJ')).toBe('CJ');
+      expect(normalizarUnidadMedidaAlkosto('UNIDADES')).toBe('UND');
+      expect(normalizarUnidadMedidaAlkosto('PIEZA')).toBe('UND');
+      expect(normalizarUnidadMedidaAlkosto('UND')).toBe('UND');
+      expect(normalizarUnidadMedidaAlkosto('KILOGRAMOS')).toBe('KG');
+      expect(normalizarUnidadMedidaAlkosto('KGS')).toBe('KG');
+      expect(normalizarUnidadMedidaAlkosto('', 'MORTADELA 10UNDX900GR', 10)).toBe('CJ');
+      expect(normalizarUnidadMedidaAlkosto('', 'PECHUGA DE PAVO X KG', 0)).toBe('KG');
+    });
+
+    it('should accurately validate and normalize the CODIZULCA 8-column visual OC format and strip empty template rows 4..15', () => {
+      const rawVisionCodizulcaForm = {
+        CLIENTE: 'Alkosto 1 san Felipe',
+        'ID CLIENTE': '7498',
+        RUTA: 'SAIRU VALLES / CUENTAS CLAVE 2',
+        FECHA: '26/10/2026',
+        'ORDEN DE COMPRA': '0200605591',
+        SUPERVISOR: 'PEDRO PEREZ',
+        CHOFER: 'TRANSPORTE CODIZULCA',
+        OBSERVACIONES: 'Dirección de despacho; calle 98 CC san Felipe 1 nivel PB sector casco central.',
+        items: [
+          {
+            'N°': 1,
+            UNID: 'BULTOS',
+            CANT: 25,
+            'CANTIDAD DESPACHADA': '',
+            SKU: '1496',
+            'DESCRIPCIÓN DEL PRODUCTO': 'MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR',
+            PRECIO: '20,00',
+            'SUB TOTAL': '500,00'
+          },
+          {
+            'N°': 2,
+            UNID: 'UNIDADES',
+            CANT: 36,
+            'CANTIDAD DESPACHADA': '',
+            SKU: '047',
+            'DESCRIPCIÓN DEL PRODUCTO': 'NUGGET CORRAL DE 460GM',
+            PRECIO: '3,88',
+            'SUB TOTAL': '139,68'
+          },
+          {
+            'N°': 3,
+            UNID: 'KILOS',
+            CANT: 104,
+            'CANTIDAD DESPACHADA': '104',
+            SKU: '1512',
+            'DESCRIPCIÓN DEL PRODUCTO': 'MORT. PECHUGA DE PAVO ASTURIAS X KG',
+            PRECIO: '5,50',
+            'SUB TOTAL': '572,00'
+          },
+          // Filas vacías preimpresas de la plantilla (4..6) que deben ser ignoradas automáticamente
+          { 'N°': 4, UNID: '', CANT: 0, 'CANTIDAD DESPACHADA': '', SKU: '', 'DESCRIPCIÓN DEL PRODUCTO': '', PRECIO: 0, 'SUB TOTAL': 0 },
+          { 'N°': 5, UNID: '', CANT: 0, 'CANTIDAD DESPACHADA': '', SKU: '', 'DESCRIPCIÓN DEL PRODUCTO': '', PRECIO: 0, 'SUB TOTAL': 0 }
+        ]
+      };
+
+      const validated = validateAndNormalizeAlkostoOC(rawVisionCodizulcaForm, { requireOrdenNro: true });
+      expect(validated.ordenNro).toBe('0200605591');
+      expect(validated.clienteNombre).toBe('Alkosto 1 san Felipe');
+      expect(validated.idCliente).toBe('7498');
+      expect(validated.ruta).toBe('SAIRU VALLES / CUENTAS CLAVE 2');
+      expect(validated.items).toHaveLength(3);
+
+      expect(validated.items[0]).toMatchObject({
+        renglon: 1,
+        unid: 'CJ',
+        totalCantidad: 25,
+        codigo: '1496',
+        skuCodizulca: '1496',
+        descripcion: 'MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR',
+        costoUnitario: 20,
+        totalRenglon: 500
+      });
+      expect(validated.items[1]).toMatchObject({
+        renglon: 2,
+        unid: 'UND',
+        totalCantidad: 36,
+        codigo: '047',
+        skuCodizulca: '047',
+        descripcion: 'NUGGET CORRAL DE 460GM',
+        costoUnitario: 3.88,
+        totalRenglon: 139.68
+      });
+      expect(validated.items[2]).toMatchObject({
+        renglon: 3,
+        unid: 'KG',
+        totalCantidad: 104,
+        cantDespachada: '104',
+        codigo: '1512',
+        skuCodizulca: '1512',
+        descripcion: 'MORT. PECHUGA DE PAVO ASTURIAS X KG',
+        costoUnitario: 5.5,
+        totalRenglon: 572
+      });
+      expect(validated.subtotal).toBe(1211.68);
+    });
+
+    it('should automatically recover when OCR swaps UNID and SKU columns', () => {
+      const swappedColumnsPayload = {
+        ordenNro: '0200605592',
+        items: [
+          {
+            renglon: 1,
+            codigo: 'CJ',      // Error típico de visión: puso la unidad en SKU
+            unid: '1497',      // y el SKU en UNID
+            totalCantidad: 15,
+            descripcion: 'MORTADELA ESP D/POLLO ASTURIAS 20UNDX500GR',
+            costoUnitario: 22,
+            totalRenglon: 330
+          }
+        ]
+      };
+
+      const recovered = validateAndNormalizeAlkostoOC(swappedColumnsPayload);
+      expect(recovered.items[0].codigo).toBe('1497');
+      expect(recovered.items[0].skuCodizulca).toBe('1497');
+      expect(recovered.items[0].unid).toBe('CJ');
+      expect(recovered.items[0].totalCantidad).toBe(15);
     });
   });
 });
