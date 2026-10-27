@@ -106,7 +106,37 @@ export interface HorarioSlot {
   degustacion?: Degustacion;
 }
 
-export type EstadoPedidoAlkosto = 'BORRADOR' | 'ENVIADO' | 'APROBADO' | 'DESPACHADO' | 'ENTREGADO' | 'CANCELADO';
+export type EstadoPedidoAlkosto = 'BORRADOR' | 'POR VALIDAR' | 'POR_VALIDAR' | 'ENVIADO' | 'APROBADO' | 'DESPACHADO' | 'ENTREGADO' | 'CANCELADO';
+
+export interface StrictOrderRenglon {
+  codigo: string;
+  descripcion: string;
+  unidad_medida?: string;
+  cantidad: number;
+  precio_unitario: number;
+  subtotal: number;
+}
+
+export interface StrictOrderPayload {
+  id?: string;
+  correlativo?: string;
+  cadena: 'ALKOSTO' | 'FAMILIA CENTER';
+  id_cliente: string;
+  sucursal_cliente: string;
+  numero_oc: string;
+  direccion_despacho: string;
+  observacion_formateada: string;
+  vendedor: string;
+  renglones: StrictOrderRenglon[];
+  total_renglones: number;
+  monto_pedido: number;
+  estado: 'POR VALIDAR';
+  origen: 'APP FDV';
+  fecha?: string;
+  supervisor?: string;
+  chofer?: string;
+  cantidad_cestas?: string | number;
+}
 
 export interface AlkostoOrderItem {
   id: string;
@@ -146,6 +176,18 @@ export interface AlkostoOrder {
   fecha_transmision?: string;
   createdAt: string;
   updatedAt?: string;
+  // Campos del Esquema de Datos Normalizado (Strict Payload)
+  cadena?: 'ALKOSTO' | 'FAMILIA CENTER';
+  sucursal_cliente?: string;
+  numero_oc?: string;
+  direccion_despacho?: string;
+  observacion_formateada?: string;
+  vendedor?: string;
+  renglones?: StrictOrderRenglon[];
+  total_renglones?: number;
+  monto_pedido?: number;
+  origen?: 'APP FDV' | string;
+  strict_payload?: StrictOrderPayload;
 }
 
 export interface CodizulcaNotaPedidoItem {

@@ -47,8 +47,14 @@
  *    - Invariante 3 (Subtotal de Página): Sum(TotalRenglon) == SubTotal ( AK | FC | HC ) (tol. ±0.10).
  */
 
-import { ParsedOrdenCompraAlkosto } from '../types';
-import { resolverProductoPorCodigoODescripcion, normalizarCodigoProducto } from './alkostoService';
+import { ParsedOrdenCompraAlkosto, StrictOrderPayload, StrictOrderRenglon, AlkostoOrder, CodizulcaNotaPedidoItem } from '../types';
+import {
+  resolverProductoPorCodigoODescripcion,
+  normalizarCodigoProducto,
+  getSucursalByTag,
+  SUCURSALES_ALKOSTO,
+  SUCURSALES_FAMILIA_CENTER
+} from './alkostoService';
 
 export interface AlkostoValidationIssue {
   field: string;
@@ -531,12 +537,14 @@ export function parseAlkostoRawText(rawText: string): ParsedOrdenCompraAlkosto {
 
       const existing = itemsByCode.get(rawCode);
       if (existing) {
-        // Fusionar tiendas de Alkosto y Familia Center para el mismo producto
-        Object.assign(existing.tiendas, mapped.tiendas);
+        // Fusionar tiendas de Alkosto y Familia Center (o múltiples páginas de la misma cadena) sin perder ni truncar ninguna sucursal
+        for (const [tk, tv] of Object.entries(mapped.tiendas)) {
+          existing.tiendas[tk] = (existing.tiendas[tk] || 0) + tv;
+        }
         if (pageChain === 'ALKOSTO') {
-          existing.totalCantidadAlkosto = mapped.totalCantidad;
+          existing.totalCantidadAlkosto = (existing.totalCantidadAlkosto || 0) + mapped.totalCantidad;
         } else if (pageChain === 'FAMILIA_CENTER') {
-          existing.totalCantidadFamilia = mapped.totalCantidad;
+          existing.totalCantidadFamilia = (existing.totalCantidadFamilia || 0) + mapped.totalCantidad;
         }
         existing.totalCantidad = (existing.totalCantidadAlkosto || 0) + (existing.totalCantidadFamilia || 0);
         existing.totalRenglon = Number((existing.totalCantidad * existing.costoUnitario).toFixed(2));
@@ -563,7 +571,8 @@ export function parseAlkostoRawText(rawText: string): ParsedOrdenCompraAlkosto {
   }
 
   const mergedItems = Array.from(itemsByCode.values()).map((it, idx) => {
-    // Para que la vista inicial (ALKOSTO si existe página Alkosto) muestre el total exacto de la cadena principal:
+    // Para que la vista inicial (ALKOSTO si existe página Alkosto) muestre el total exacto de la cadena principal,
+    // mientras `it.tiendas` conserva el 100% de las tiendas AK y FC para el desglose multi-sucursal:
     const hasAlkostoPage = cadenasDetectadas.includes('ALKOSTO');
     const primaryTotalCantidad = hasAlkostoPage && it.totalCantidadAlkosto > 0
       ? it.totalCantidadAlkosto
@@ -1208,5 +1217,539 @@ export function validateAndNormalizeAlkostoOC(
     subtotalAlkosto: root.subtotalAlkosto,
     subtotalFamiliaCenter: root.subtotalFamiliaCenter,
     items: normalizedItems
+  };
+}
+
+/**
+ * Normaliza estrictamente el nombre de la cadena a "ALKOSTO" o "FAMILIA CENTER"
+ * en mayúsculas para coincidir exactamente con los filtros de la Sala de Espera.
+ */
+export function normalizarCadenaEstricta(
+  tagOrName?: string,
+  fallbackCadena?: string
+): 'ALKOSTO' | 'FAMILIA CENTER' {
+  const combined = `${tagOrName || ''} ${fallbackCadena || ''}`.toUpperCase();
+  if (
+    combined.includes('FAMILIA') ||
+    /\bFC0?[1-7]\b|\bFCOP\b/.test(combined) ||
+    /\b0*7489\b|\b0*749[0-4]\b|\b0*8229\b|\b0*5373\b/.test(combined)
+  ) {
+    return 'FAMILIA CENTER';
+  }
+  return 'ALKOSTO';
+}
+
+/**
+ * Valida con regex el número de Orden de Compra (OC).
+ * Nunca omite el pedido en silencio: retorna `valido: false` y `alerta` si falta o no cumple el patrón.
+ */
+export function validarNumeroOC(rawOc: unknown): {
+  valido: boolean;
+  numero_oc: string;
+  alerta?: string;
+} {
+  const raw = String(rawOc ?? '').trim();
+  if (!raw || raw.toUpperCase() === 'S/N' || raw.toUpperCase() === 'N/A' || raw.toUpperCase() === 'PENDIENTE') {
+    return {
+      valido: false,
+      numero_oc: 'S/N',
+      alerta: 'Falta el número de Orden de Compra (OC). Verifica la casilla "ORDEN DE COMPRA" antes de enviar.'
+    };
+  }
+
+  // Extraer secuencia válida de OC (ej. "0000055773", "0200605591", "OC-55773")
+  const match = raw.match(/(?:OC[-\s#:]*)?([A-Z0-9\-]{4,20})/i);
+  const candidate = match ? match[1].trim().toUpperCase() : raw.toUpperCase();
+  const hasMinDigits = (candidate.match(/\d/g) || []).length >= 4;
+
+  if (!hasMinDigits) {
+    return {
+      valido: false,
+      numero_oc: candidate || 'S/N',
+      alerta: `El número de Orden de Compra "${raw}" no tiene al menos 4 dígitos válidos.`
+    };
+  }
+
+  return {
+    valido: true,
+    numero_oc: candidate
+  };
+}
+
+/**
+ * Construye siempre el formato estandarizado de observación para Sala de Espera:
+ * "{Sucursal/Ciudad} | OC {Cadena}: {numero_oc} | Dir: {direccion_despacho}"
+ */
+export function construirObservacionFormateada(params: {
+  sucursal_cliente: string;
+  ciudad_zona?: string;
+  cadena: 'ALKOSTO' | 'FAMILIA CENTER';
+  numero_oc?: string;
+  direccion_despacho?: string;
+}): string {
+  const cadenaNorm = normalizarCadenaEstricta(params.cadena, params.sucursal_cliente);
+  const sucursalClean = String(params.sucursal_cliente || params.ciudad_zona || cadenaNorm)
+    .trim()
+    .toUpperCase();
+  const ocCheck = validarNumeroOC(params.numero_oc);
+  const ocVal = ocCheck.numero_oc || 'S/N';
+
+  // Limpiar dirección para no duplicar prefijos si ya venía formateada previamente
+  let rawDir = String(params.direccion_despacho || '')
+    .replace(/\s*\|\s*OC\s+(?:ALKOSTO|FAMILIA(?:\s+CENTER)?)\s*:\s*[^|]+/gi, '')
+    .replace(/^.*\|\s*Dir:\s*/i, '')
+    .trim();
+
+  if (!rawDir || rawDir.toUpperCase() === sucursalClean) {
+    rawDir = params.ciudad_zona?.trim() || sucursalClean || 'Entrega según Orden de Compra';
+  }
+
+  return `${sucursalClean} | OC ${cadenaNorm}: ${ocVal} | Dir: ${rawDir}`;
+}
+
+/**
+ * Construye un pedido bajo el Esquema de Datos Normalizado (Strict Payload) y su
+ * correspondiente objeto AlkostoOrder listo para transmisión transaccional.
+ */
+export function construirPedidoNormalizadoSucursal(params: {
+  storeTagOrCode: string;
+  sucursalNombreFallback?: string;
+  direccionFallback?: string;
+  numero_oc: string;
+  vendedor: string;
+  supervisor?: string;
+  chofer?: string;
+  cantidadCestas?: string | number;
+  fechaISO: string;
+  condicionPago?: string;
+  filas: Array<{
+    renglon?: number;
+    codigo: string;
+    skuCodizulca?: string;
+    descripcion: string;
+    unid?: string;
+    cantidad: number;
+    precio_unitario: number;
+    subtotal?: number;
+  }>;
+  orderIndex?: number;
+  batchTimestamp?: number;
+  explicitCorrelativo?: string;
+}): {
+  strictPayload: StrictOrderPayload;
+  alkostoOrder: AlkostoOrder;
+  alertaOC?: string;
+} {
+  const suc = getSucursalByTag(params.storeTagOrCode);
+  const cadena = normalizarCadenaEstricta(
+    suc?.tag || params.storeTagOrCode,
+    suc?.nombre || params.sucursalNombreFallback
+  );
+
+  const rawCode = String(suc?.codigo || params.storeTagOrCode || '7498').trim();
+  const idClientePadded = /^\d+$/.test(rawCode) ? rawCode.padStart(6, '0') : rawCode;
+  const sucursalCodigoCorto = /^\d+$/.test(rawCode) ? rawCode.replace(/^0+/, '') || rawCode : rawCode;
+
+  const sucursalCliente = String(
+    suc?.nombre || params.sucursalNombreFallback || `${cadena} (${params.storeTagOrCode})`
+  )
+    .trim()
+    .toUpperCase();
+
+  const direccionDespacho = String(
+    suc?.direccion || params.direccionFallback || suc?.zona || 'Entrega según Orden de Compra'
+  ).trim();
+
+  const ocValidation = validarNumeroOC(params.numero_oc);
+  const numeroOcFinal = ocValidation.numero_oc;
+
+  const observacionFormateada = construirObservacionFormateada({
+    sucursal_cliente: sucursalCliente,
+    ciudad_zona: suc?.zona,
+    cadena,
+    numero_oc: numeroOcFinal,
+    direccion_despacho: direccionDespacho
+  });
+
+  const vendedorClean = String(params.vendedor || 'SAIRU VALLES / CUENTAS CLAVES')
+    .trim()
+    .toUpperCase();
+
+  const renglonesNormalizados: StrictOrderRenglon[] = [];
+  const itemsAlkosto: AlkostoOrder['items'] = [];
+
+  params.filas.forEach((f, idx) => {
+    const cantidad = parseNumeroEstricto(f.cantidad, 0);
+    const precioUnitario = parseNumeroEstricto(f.precio_unitario, 0);
+    if (cantidad <= 0 && !f.codigo && !f.descripcion) return;
+    if (cantidad <= 0) return;
+
+    const match = resolverProductoPorCodigoODescripcion(f.codigo, f.descripcion);
+    const cleanSku = String(f.skuCodizulca || (match ? match.sku : f.codigo) || 'S/C').trim();
+    const cleanDesc = limpiarDescripcionAlkosto(f.descripcion || (match ? match.producto : 'PRODUCTO'));
+    const unid = normalizarUnidadMedidaAlkosto(f.unid, cleanDesc, undefined, match?.unidadSugerida);
+
+    const calcSub = precioUnitario > 0
+      ? Number((cantidad * precioUnitario).toFixed(2))
+      : Number(parseNumeroEstricto(f.subtotal, 0).toFixed(2));
+    const safePrice = Number((Number.isFinite(precioUnitario) ? precioUnitario : 0).toFixed(4));
+    const safeSub = Number((Number.isFinite(calcSub) ? calcSub : 0).toFixed(2));
+
+    renglonesNormalizados.push({
+      codigo: cleanSku,
+      descripcion: cleanDesc,
+      unidad_medida: unid,
+      cantidad,
+      precio_unitario: safePrice,
+      subtotal: safeSub
+    });
+
+    const kxBox = match ? match.kilosPorCaja : (unid === 'KG' ? 1 : 10);
+    const totalK = Number((unid === 'KG' ? cantidad : cantidad * kxBox).toFixed(2));
+
+    itemsAlkosto.push({
+      id: `item-${f.renglon || idx + 1}`,
+      sku: cleanSku,
+      producto: cleanDesc,
+      categoria: match ? match.categoria : 'CHARCUTERIA / CARNES',
+      presentacion: unid,
+      cantidadCajas: cantidad,
+      kilosPorCaja: kxBox,
+      totalKilos: totalK,
+      precioUnitarioUSD: safePrice,
+      subtotalUSD: safeSub
+    });
+  });
+
+  const totalRenglones = renglonesNormalizados.length;
+  const montoPedido = Number(
+    renglonesNormalizados.reduce((acc, r) => acc + (Number(r.subtotal) || 0), 0).toFixed(2)
+  );
+  const totalBultos = Number(
+    renglonesNormalizados.reduce((acc, r) => acc + (Number(r.cantidad) || 0), 0).toFixed(2)
+  );
+  const totalKilos = Number(
+    itemsAlkosto.reduce((acc, it) => acc + (Number(it.totalKilos) || 0), 0).toFixed(2)
+  );
+
+  const ts = (params.batchTimestamp || Date.now()) + (params.orderIndex || 0) * 50;
+  const tagSlug = String(suc?.tag || params.storeTagOrCode || 'doc')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+  const uniqueId = `alk-${tagSlug}-${ts.toString(36)}-${Math.random().toString(36).substring(2, 7)}`;
+
+  const strictPayload: StrictOrderPayload = {
+    id: uniqueId,
+    correlativo: params.explicitCorrelativo,
+    cadena,
+    id_cliente: idClientePadded,
+    sucursal_cliente: sucursalCliente,
+    numero_oc: numeroOcFinal,
+    direccion_despacho: direccionDespacho,
+    observacion_formateada: observacionFormateada,
+    vendedor: vendedorClean,
+    renglones: renglonesNormalizados,
+    total_renglones: totalRenglones,
+    monto_pedido: montoPedido,
+    estado: 'POR VALIDAR',
+    origen: 'APP FDV',
+    fecha: params.fechaISO,
+    supervisor: params.supervisor,
+    chofer: params.chofer,
+    cantidad_cestas: params.cantidadCestas
+  };
+
+  const alkostoOrder: AlkostoOrder = {
+    id: uniqueId,
+    numeroPedido: params.explicitCorrelativo || 'AUTO',
+    correlativo: params.explicitCorrelativo,
+    ordenCompraAlkosto: numeroOcFinal !== 'S/N' ? numeroOcFinal : undefined,
+    sucursalCodigo: sucursalCodigoCorto,
+    sucursalNombre: sucursalCliente,
+    direccionEntrega: direccionDespacho,
+    vendedora: vendedorClean.split('/')[0].trim() || 'SAIRU VALLES',
+    ruta: vendedorClean,
+    fechaPedido: params.fechaISO,
+    fechaEntregaEstimada: params.fechaISO,
+    items: itemsAlkosto,
+    totalBultos,
+    totalKilos,
+    totalUSD: montoPedido,
+    estado: 'ENVIADO',
+    transmitido_a_pedidos_manuales: true,
+    fecha_transmision: new Date(ts).toISOString(),
+    condicionPago: params.condicionPago || 'Crédito 21 días',
+    observaciones: observacionFormateada,
+    createdAt: new Date(ts).toISOString(),
+    cadena,
+    sucursal_cliente: sucursalCliente,
+    numero_oc: numeroOcFinal,
+    direccion_despacho: direccionDespacho,
+    observacion_formateada: observacionFormateada,
+    vendedor: vendedorClean,
+    renglones: renglonesNormalizados,
+    total_renglones: totalRenglones,
+    monto_pedido: montoPedido,
+    origen: 'APP FDV',
+    strict_payload: strictPayload
+  };
+
+  return {
+    strictPayload,
+    alkostoOrder,
+    alertaOC: ocValidation.alerta
+  };
+}
+
+/**
+ * Extrae el 100% de los pedidos por sucursal/sede (Multi-Sucursal y Multi-Cadena: Alkosto + Familia Center)
+ * contenidos en una Orden de Compra, sin truncar ni mezclar renglones entre sucursales.
+ */
+export function extraerPedidosNormalizadosDeOC(params: {
+  initialData?: ParsedOrdenCompraAlkosto | null;
+  filasActuales: CodizulcaNotaPedidoItem[];
+  tiendaSeleccionada: string;
+  enviarLoteCompleto?: boolean;
+  idClienteSeleccionado: string;
+  clienteNombreSeleccionado: string;
+  direccionObservacionFallback?: string;
+  numero_oc: string;
+  vendedor: string;
+  supervisor?: string;
+  chofer?: string;
+  cantidadCestas?: string | number;
+  fechaISO: string;
+  nroPedido?: string;
+}): {
+  pedidos: AlkostoOrder[];
+  strictPayloads: StrictOrderPayload[];
+  tiendasConPedido: string[];
+  alertaOC?: string;
+} {
+  const {
+    initialData,
+    filasActuales,
+    tiendaSeleccionada,
+    enviarLoteCompleto = true,
+    idClienteSeleccionado,
+    clienteNombreSeleccionado,
+    direccionObservacionFallback,
+    numero_oc,
+    vendedor,
+    supervisor,
+    chofer,
+    cantidadCestas,
+    fechaISO,
+    nroPedido
+  } = params;
+
+  // Combinar la matriz de tiendas desde initialData.items y filasActuales para nunca perder
+  // ni las tiendas de otra cadena (ej. FC01..FC07 cuando se visualiza AK) ni las ediciones hechas en tabla.
+  const rawItemsFromOC = Array.isArray(initialData?.items) ? initialData!.items : [];
+
+  // Orden oficial determinista de todas las sucursales posibles (AK01..AK10, AKOP, FC01..FC07, FCOP)
+  const orderedCandidateTags = [
+    ...SUCURSALES_ALKOSTO.map(s => s.tag!).filter(Boolean),
+    'AKOP',
+    ...SUCURSALES_FAMILIA_CENTER.map(s => s.tag!).filter(Boolean),
+    'FCOP'
+  ];
+
+  // Mapa por código o índice para reconciliar precios/descripciones editados en filasActuales con las tiendas de initialData
+  const editedByCode = new Map<string, CodizulcaNotaPedidoItem>();
+  filasActuales.forEach(f => {
+    const key = String(f.codigo || f.skuCodizulca || '').trim().toUpperCase();
+    if (key) editedByCode.set(key, f);
+  });
+
+  // Fuente maestra de filas con tiendas
+  const masterRows: Array<{
+    renglon: number;
+    codigo: string;
+    skuCodizulca?: string;
+    descripcion: string;
+    unid: string;
+    precio: number;
+    cantSolicitada: number;
+    tiendas?: Record<string, number>;
+  }> = [];
+
+  const usedEditedKeys = new Set<string>();
+
+  if (rawItemsFromOC.length > 0) {
+    rawItemsFromOC.forEach((ocItem, idx) => {
+      const match = resolverProductoPorCodigoODescripcion(ocItem.codigo, ocItem.descripcion);
+      const skuKey = String(ocItem.skuCodizulca || (match ? match.sku : ocItem.codigo) || '').trim().toUpperCase();
+      const rawKey = String(ocItem.codigo || '').trim().toUpperCase();
+      const editedRow = editedByCode.get(skuKey) || editedByCode.get(rawKey) || filasActuales[idx];
+      if (skuKey) usedEditedKeys.add(skuKey);
+      if (rawKey) usedEditedKeys.add(rawKey);
+
+      const mergedTiendas: Record<string, number> = {
+        ...(ocItem.tiendas || {}),
+        ...(editedRow?.tiendas || {})
+      };
+
+      // Si el usuario estaba viendo una tienda específica (ej. AK01) y editó manualmente cantSolicitada en la tabla:
+      if (
+        tiendaSeleccionada !== 'CONSOLIDADO' &&
+        editedRow &&
+        (editedRow.codigo || editedRow.descripcion) &&
+        parseNumeroEstricto(editedRow.cantSolicitada, 0) >= 0
+      ) {
+        const editedQty = parseNumeroEstricto(editedRow.cantSolicitada, 0);
+        if (editedQty > 0) {
+          mergedTiendas[tiendaSeleccionada] = editedQty;
+        }
+      }
+
+      masterRows.push({
+        renglon: idx + 1,
+        codigo: editedRow?.codigo || ocItem.skuCodizulca || (match ? match.sku : ocItem.codigo),
+        skuCodizulca: editedRow?.skuCodizulca || ocItem.skuCodizulca || (match ? match.sku : ocItem.codigo),
+        descripcion: editedRow?.descripcion || ocItem.descripcion,
+        unid: editedRow?.unid || ocItem.unid || (match?.unidadSugerida ?? 'CJ'),
+        precio: parseNumeroEstricto(editedRow?.precio, 0) || parseNumeroEstricto(ocItem.costoUnitario, 0) || (match?.precioSugeridoUSD ?? 0),
+        cantSolicitada: parseNumeroEstricto(editedRow?.cantSolicitada, 0) || parseNumeroEstricto(ocItem.totalCantidad, 0),
+        tiendas: mergedTiendas
+      });
+    });
+  }
+
+  // Agregar cualquier fila extra que la vendedora haya insertado manualmente en la tabla y que no estuviera en rawItemsFromOC
+  filasActuales.forEach((f, idx) => {
+    if (!f.codigo && !f.descripcion) return;
+    const key = String(f.codigo || f.skuCodizulca || '').trim().toUpperCase();
+    if (rawItemsFromOC.length > 0 && (usedEditedKeys.has(key) || idx < rawItemsFromOC.length)) {
+      return;
+    }
+    masterRows.push({
+      renglon: f.renglon || masterRows.length + 1,
+      codigo: f.codigo,
+      skuCodizulca: f.skuCodizulca || f.codigo,
+      descripcion: f.descripcion,
+      unid: f.unid || 'CJ',
+      precio: parseNumeroEstricto(f.precio, 0),
+      cantSolicitada: parseNumeroEstricto(f.cantSolicitada, 0),
+      tiendas: f.tiendas
+    });
+  });
+
+  // Identificar el 100% de las tiendas con cantidad > 0 en toda la Orden de Compra
+  const detectedStoresSet = new Set<string>();
+  masterRows.forEach(r => {
+    if (r.tiendas && typeof r.tiendas === 'object') {
+      Object.entries(r.tiendas).forEach(([tag, val]) => {
+        const uTag = tag.trim().toUpperCase();
+        if (uTag !== 'CI' && parseNumeroEstricto(val, 0) > 0) {
+          detectedStoresSet.add(uTag);
+        }
+      });
+    }
+  });
+
+  const tiendasConPedido = orderedCandidateTags.filter(t => detectedStoresSet.has(t));
+  // Añadir cualquier otro tag válido no listado en orderedCandidateTags
+  Array.from(detectedStoresSet).forEach(t => {
+    if (!tiendasConPedido.includes(t)) tiendasConPedido.push(t);
+  });
+
+  const pedidos: AlkostoOrder[] = [];
+  const strictPayloads: StrictOrderPayload[] = [];
+  let alertaOC: string | undefined;
+  const batchTimestamp = Date.now();
+
+  // Si existen múltiples tiendas en la OC y se solicita enviar el lote completo (comportamiento por defecto para evitar pérdida de sucursales):
+  const targetStores =
+    enviarLoteCompleto && tiendasConPedido.length > 0
+      ? tiendasConPedido
+      : tiendaSeleccionada !== 'CONSOLIDADO' && tiendasConPedido.includes(tiendaSeleccionada)
+        ? [tiendaSeleccionada]
+        : tiendasConPedido;
+
+  if (targetStores.length > 0) {
+    targetStores.forEach((storeTag, idx) => {
+      const storeFilas = masterRows
+        .map(r => {
+          const cant = r.tiendas ? parseNumeroEstricto(r.tiendas[storeTag], 0) : 0;
+          if (cant <= 0) return null;
+          return {
+            renglon: r.renglon,
+            codigo: r.codigo,
+            skuCodizulca: r.skuCodizulca,
+            descripcion: r.descripcion,
+            unid: r.unid,
+            cantidad: cant,
+            precio_unitario: r.precio,
+            subtotal: Number((cant * r.precio).toFixed(2))
+          };
+        })
+        .filter((x): x is NonNullable<typeof x> => x !== null);
+
+      if (storeFilas.length > 0) {
+        const built = construirPedidoNormalizadoSucursal({
+          storeTagOrCode: storeTag,
+          numero_oc,
+          vendedor,
+          supervisor,
+          chofer,
+          cantidadCestas,
+          fechaISO,
+          filas: storeFilas,
+          orderIndex: idx,
+          batchTimestamp
+        });
+        pedidos.push(built.alkostoOrder);
+        strictPayloads.push(built.strictPayload);
+        if (built.alertaOC) alertaOC = built.alertaOC;
+      }
+    });
+  }
+
+  // Caso de orden manual de una sola sucursal (sin desglose de matriz `tiendas`)
+  if (pedidos.length === 0) {
+    const validRows = filasActuales
+      .filter(f => (f.codigo || f.descripcion) && parseNumeroEstricto(f.cantSolicitada, 0) > 0)
+      .map(f => ({
+        renglon: f.renglon,
+        codigo: f.codigo,
+        skuCodizulca: f.skuCodizulca,
+        descripcion: f.descripcion,
+        unid: f.unid,
+        cantidad: parseNumeroEstricto(f.cantSolicitada, 0),
+        precio_unitario: parseNumeroEstricto(f.precio, 0),
+        subtotal: parseNumeroEstricto(f.subtotal, 0)
+      }));
+
+    if (validRows.length > 0) {
+      const storeRef = tiendaSeleccionada !== 'CONSOLIDADO' ? tiendaSeleccionada : idClienteSeleccionado;
+      const explicitCorr =
+        nroPedido && nroPedido !== 'AUTO' && !nroPedido.startsWith('PENDIENTE') ? nroPedido : undefined;
+      const built = construirPedidoNormalizadoSucursal({
+        storeTagOrCode: storeRef,
+        sucursalNombreFallback: clienteNombreSeleccionado,
+        direccionFallback: direccionObservacionFallback,
+        numero_oc,
+        vendedor,
+        supervisor,
+        chofer,
+        cantidadCestas,
+        fechaISO,
+        filas: validRows,
+        orderIndex: 0,
+        batchTimestamp,
+        explicitCorrelativo: explicitCorr
+      });
+      pedidos.push(built.alkostoOrder);
+      strictPayloads.push(built.strictPayload);
+      if (built.alertaOC) alertaOC = built.alertaOC;
+    }
+  }
+
+  return {
+    pedidos,
+    strictPayloads,
+    tiendasConPedido,
+    alertaOC
   };
 }

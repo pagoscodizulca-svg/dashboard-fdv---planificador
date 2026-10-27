@@ -9,7 +9,10 @@ import {
   extractPositionedTextFromAlkostoPdfBuffer,
   parseAlkostoRawText,
   validateAndNormalizeAlkostoOC,
-  AlkostoParseValidationError
+  AlkostoParseValidationError,
+  normalizarCadenaEstricta,
+  construirObservacionFormateada,
+  parseNumeroEstricto
 } from "./src/services/alkostoOcParser";
 
 dotenv.config();
@@ -1178,61 +1181,191 @@ async function startServer() {
     }
   });
 
+  // Contador atómico en memoria para asignación secuencial de correlativos sin colisiones en lotes
+  let lastAllocatedCorrelativo = 0;
+
+  async function allocateNextCorrelativo(requestedCorrelativo?: string): Promise<string> {
+    if (lastAllocatedCorrelativo === 0) {
+      let maxFound = 0;
+      if (supabase) {
+        try {
+          const { data } = await supabase
+            .from('pedidos_alkosto')
+            .select('correlativo, numero_pedido')
+            .order('created_at', { ascending: false })
+            .limit(200);
+          if (Array.isArray(data)) {
+            for (const row of data) {
+              const cVal = parseInt(String(row.correlativo || row.numero_pedido || ''), 10);
+              if (!isNaN(cVal) && cVal > maxFound && cVal < 9000) {
+                maxFound = cVal;
+              }
+            }
+          }
+        } catch {}
+      }
+      if (maxFound === 0) {
+        try {
+          const snap = await getDocs(collection(db, 'alkosto_orders'));
+          snap.forEach(d => {
+            const data = d.data();
+            const cVal = parseInt(String(data.correlativo || data.numeroPedido || ''), 10);
+            if (!isNaN(cVal) && cVal > maxFound && cVal < 9000) {
+              maxFound = cVal;
+            }
+          });
+        } catch {}
+      }
+      lastAllocatedCorrelativo = maxFound;
+    }
+
+    const reqClean = String(requestedCorrelativo || '').trim();
+    if (reqClean && /^\d{1,5}$/.test(reqClean)) {
+      const reqNum = parseInt(reqClean, 10);
+      if (reqNum > lastAllocatedCorrelativo) {
+        lastAllocatedCorrelativo = reqNum;
+        return String(reqNum).padStart(4, '0');
+      }
+    }
+
+    lastAllocatedCorrelativo += 1;
+    return String(lastAllocatedCorrelativo).padStart(4, '0');
+  }
+
   async function syncAlkostoOrderToExternal(item: any) {
     try {
       const correlativo = String(item.correlativo || item.numeroPedido || '').trim();
       const orderId = String(item.id || `alk-${Date.now()}`).trim();
 
-      // Formatear renglones de artículos con la estructura exacta del Programa de Pedidos Manuales (gestor-de-pedidos-pro)
-      const gestorArticles = Array.isArray(item.items)
-        ? item.items.map((it: any) => ({
-            codigo: String(it.sku || it.codigo || "").trim(),
-            descripcion: String(it.producto || it.descripcion || "Item").trim(),
-            cantidad_solicitada: Number(it.cantidadCajas ?? it.cantSolicitada ?? it.cantidad ?? 0),
-            unidad_medida: String(it.presentacion || it.unid || it.unidad || "CJ").trim(),
-            precio_unitario: Number(it.precioUnitarioUSD ?? it.precio ?? 0),
-            sub_total: Number(it.subtotalUSD ?? it.subtotal ?? 0)
-          }))
-        : [];
+      const cadenaNorm = normalizarCadenaEstricta(
+        item.cadena || item.sucursalCodigo || item.id_cliente,
+        item.sucursal_cliente || item.sucursalNombre || item.cliente
+      );
+      const sucursalClienteClean = String(
+        item.sucursal_cliente || item.sucursalNombre || item.cliente || cadenaNorm
+      )
+        .trim()
+        .toUpperCase();
 
-      const totalMonto = Number(item.totalUSD ?? item.total_usd ?? gestorArticles.reduce((acc: number, a: any) => acc + (a.sub_total || 0), 0));
-      const fechaValida = item.fechaPedido
-        ? (String(item.fechaPedido).includes('T') ? String(item.fechaPedido).split('T')[0] : String(item.fechaPedido))
+      const rawIdCli = String(item.id_cliente || item.sucursalCodigo || item.idCliente || '').trim();
+      const idClientePadded = /^\d+$/.test(rawIdCli) ? rawIdCli.padStart(6, '0') : rawIdCli;
+
+      const numeroOcClean = String(
+        item.numero_oc || item.ordenCompraAlkosto || item.orden_compra_alkosto || item.orden_compra || 'S/N'
+      ).trim();
+
+      const direccionDespachoClean = String(
+        item.direccion_despacho || item.direccionEntrega || item.observaciones || 'Entrega según Orden de Compra'
+      ).trim();
+
+      const observacionFormateada =
+        item.observacion_formateada && String(item.observacion_formateada).includes(' | OC ')
+          ? String(item.observacion_formateada).trim()
+          : construirObservacionFormateada({
+              sucursal_cliente: sucursalClienteClean,
+              cadena: cadenaNorm,
+              numero_oc: numeroOcClean,
+              direccion_despacho: direccionDespachoClean
+            });
+
+      // Formatear renglones de artículos con conversión numérica limpia (cero NaN)
+      const sourceRenglones = Array.isArray(item.renglones) && item.renglones.length > 0
+        ? item.renglones
+        : Array.isArray(item.items)
+          ? item.items
+          : [];
+
+      const gestorArticles = sourceRenglones
+        .map((it: any) => {
+          const rawCod = String(it.sku || it.codigo || '').trim();
+          const cleanCod = /^\d{1,6}$/.test(rawCod) ? rawCod.padStart(6, '0') : rawCod;
+          const desc = String(it.producto || it.descripcion || 'PRODUCTO').trim().toUpperCase();
+          const cant = parseNumeroEstricto(it.cantidad ?? it.cantidadCajas ?? it.cantSolicitada ?? it.cantidad_solicitada, 0);
+          const precio = parseNumeroEstricto(it.precio_unitario ?? it.precioUnitarioUSD ?? it.precio, 0);
+          const sub = precio > 0
+            ? Number((cant * precio).toFixed(2))
+            : Number(parseNumeroEstricto(it.subtotal ?? it.subtotalUSD ?? it.sub_total, 0).toFixed(2));
+          const rawUnit = String(it.unidad_medida || it.presentacion || it.unid || it.unidad || 'CJ').trim().toUpperCase();
+          const normUnit = ['CJ', 'CJA', 'CAJA', 'CAJAS', 'BLT', 'BTO', 'BULTO', 'BULTOS'].includes(rawUnit)
+            ? 'BULTO'
+            : rawUnit === 'UND' || rawUnit === 'UNIDAD'
+              ? 'UNIDAD'
+              : 'KG';
+
+          return {
+            codigo: cleanCod,
+            descripcion: desc,
+            cantidad_solicitada: cant,
+            cantidad_despachada: 0,
+            unidad_medida: normUnit,
+            precio_unitario: precio,
+            sub_total: sub
+          };
+        })
+        .filter((a: any) => a.cantidad_solicitada > 0 || a.descripcion);
+
+      const totalMonto = Number(
+        (
+          gestorArticles.reduce((acc: number, a: any) => acc + (Number(a.sub_total) || 0), 0) ||
+          parseNumeroEstricto(item.monto_pedido ?? item.totalUSD ?? item.total_usd, 0)
+        ).toFixed(2)
+      );
+
+      const fechaValida = item.fechaPedido || item.fecha
+        ? (String(item.fechaPedido || item.fecha).includes('T')
+            ? String(item.fechaPedido || item.fecha).split('T')[0]
+            : String(item.fechaPedido || item.fecha))
         : new Date().toISOString().split('T')[0];
 
-      const observacionesComb = [
-        item.observaciones ? String(item.observaciones).trim() : null,
-        item.ordenCompraAlkosto ? `OC Alkosto: ${String(item.ordenCompraAlkosto).trim()}` : null
-      ].filter(Boolean).join(" | ");
+      const vendedorClean = String(item.vendedor || item.ruta || 'SAIRU VALLES / CUENTAS CLAVE 2').trim().toUpperCase();
+      const supervisorClean = String(item.supervisor || item.vendedora || 'SAIRU VALLES').trim().toUpperCase();
 
       const rawOrder = {
-        id_cliente: String(item.sucursalCodigo || item.idCliente || "").trim(),
-        cliente: String(item.sucursalNombre || item.cliente || "ALKOSTO").trim(),
+        id_cliente: idClientePadded,
+        cliente: sucursalClienteClean,
+        sucursal_cliente: sucursalClienteClean,
+        cadena: cadenaNorm,
+        numero_oc: numeroOcClean,
+        direccion_despacho: direccionDespachoClean,
+        observacion_formateada: observacionFormateada,
+        vendedor: vendedorClean,
         numero_pedido: correlativo,
-        ruta: String(item.ruta || "CUENTAS CLAVE 2").trim(),
-        supervisor: String(item.vendedora || "SAIRU VALLES").trim(),
-        chofer: String(item.chofer || "").trim(),
-        observaciones: observacionesComb,
+        ruta: vendedorClean,
+        supervisor: supervisorClean,
+        chofer: String(item.chofer || 'TRANSPORTE CODIZULCA').trim(),
+        observaciones: observacionFormateada,
         fecha: fechaValida,
         total_pedido: totalMonto,
         monto_pedido: totalMonto,
-        sucursal: "Maracaibo",
-        articulos: gestorArticles
+        total_renglones: gestorArticles.length,
+        estado: 'POR VALIDAR',
+        origen: cadenaNorm,
+        fuente_origen: 'APP FDV',
+        sucursal: 'Maracaibo',
+        articulos: gestorArticles,
+        renglones: gestorArticles.map((a: any) => ({
+          codigo: a.codigo,
+          descripcion: a.descripcion,
+          unidad_medida: a.unidad_medida,
+          cantidad: a.cantidad_solicitada,
+          precio_unitario: a.precio_unitario,
+          subtotal: a.sub_total
+        }))
       };
 
       const supabaseOrderRow = {
         id: orderId,
-        numero_pedido: correlativo || null,
+        numero_pedido: correlativo || 'APP-FDV',
         cliente: rawOrder.cliente,
         id_cliente: rawOrder.id_cliente || null,
         ruta: rawOrder.ruta,
         supervisor: rawOrder.supervisor,
         chofer: rawOrder.chofer || null,
-        observaciones: rawOrder.observaciones || null,
+        observaciones: observacionFormateada,
         fecha: fechaValida,
         total_pedido: totalMonto,
         monto_pedido: totalMonto,
-        status: "PENDIENTE_CXC", // <--- ENTRA DIRECTAMENTE A LA SALA DE ESPERA (CXC) DE PEDIDOS MANUALES
+        status: "POR_VALIDAR", // <--- SIEMPRE ENTRA EN ESTADO POR_VALIDAR A LA SALA DE ESPERA DE PEDIDOS MANUALES
         sucursal: "Maracaibo",
         version: 1,
         is_modified: false,
@@ -1242,10 +1375,11 @@ async function startServer() {
         articulos: gestorArticles,
         status_history: [
           {
-            status: "CREADO",
+            status: "POR_VALIDAR",
             department: "Ventas",
-            changedBy: rawOrder.supervisor || "SAIRU VALLES",
-            timestamp: new Date().toISOString()
+            changedBy: rawOrder.ruta || "SAIRU VALLES",
+            timestamp: new Date().toISOString(),
+            reason: `Recibido en Sala de Espera desde APP FDV (${cadenaNorm} | OC: ${numeroOcClean})`
           }
         ],
         raw_order: rawOrder,
@@ -1254,7 +1388,7 @@ async function startServer() {
         is_archived: false
       };
 
-      // 1. Envío directo al Supabase del Programa de Pedidos Manuales (Realtime Sala de Espera CxC)
+      // 1. Envío directo al Supabase del Programa de Pedidos Manuales (Sala de Espera - Cadenas Comerciales)
       try {
         const ordersUrl = `${PEDIDOS_MANUALES_SUPABASE_URL.replace(/\/+$/, '')}/rest/v1/orders`;
         const supaRes = await fetch(ordersUrl, {
@@ -1268,16 +1402,16 @@ async function startServer() {
           body: JSON.stringify(supabaseOrderRow)
         });
         if (supaRes.ok) {
-          console.log(`[ALKOSTO -> PEDIDOS MANUALES] Pedido N° ${correlativo} (ID: ${orderId}) insertado exitosamente en Sala de Espera de Supabase (status: PENDIENTE_CXC)`);
+          console.log(`[ENVIO_FDV -> SALA_ESPERA] Pedido N° ${correlativo} (ID: ${orderId} | ${sucursalClienteClean} | OC: ${numeroOcClean} | Renglones: ${gestorArticles.length} | Monto: $${totalMonto.toFixed(2)}) insertado en Sala de Espera (status: POR_VALIDAR)`);
         } else {
           const errTxt = await supaRes.text();
-          console.warn(`[ALKOSTO -> PEDIDOS MANUALES] Supabase aviso:`, supaRes.status, errTxt);
+          console.warn(`[ENVIO_FDV -> SALA_ESPERA] Supabase aviso:`, supaRes.status, errTxt);
         }
       } catch (supaErr) {
-        console.error(`[ALKOSTO -> PEDIDOS MANUALES] Error conectando a Supabase Pedidos Manuales:`, supaErr);
+        console.error(`[ENVIO_FDV -> SALA_ESPERA] Error conectando a Supabase Pedidos Manuales:`, supaErr);
       }
 
-      // 2. Persistencia en archivo local orders.json del Gestor de Pedidos Manuales
+      // 2. Persistencia en archivo local orders.json del Gestor de Pedidos Manuales (si existe)
       try {
         const ordersFilePath = path.resolve(process.cwd(), '../gestor-de-pedidos-pro/orders.json');
         if (fs.existsSync(ordersFilePath)) {
@@ -1290,7 +1424,7 @@ async function startServer() {
 
           const dbOrderObj = {
             id: orderId,
-            status: "PENDIENTE_CXC",
+            status: "POR_VALIDAR",
             isArchived: false,
             createdAt: supabaseOrderRow.created_at,
             updatedAt: supabaseOrderRow.updated_at,
@@ -1312,26 +1446,27 @@ async function startServer() {
           }
 
           fs.writeFileSync(ordersFilePath, JSON.stringify(fileOrders, null, 2), 'utf8');
-          console.log(`[ALKOSTO -> PEDIDOS MANUALES] Pedido N° ${correlativo} guardado en orders.json de gestor-de-pedidos-pro`);
         }
       } catch (fErr) {
         console.warn(`[ALKOSTO -> PEDIDOS MANUALES] No se pudo escribir localmente en orders.json:`, fErr);
       }
 
-      // 3. Actualizar estado local a ENVIADO en Firestore y Supabase local para sacarlo de la sala de espera de la app de Sairú
+      // 3. Actualizar estado local a ENVIADO en Firestore y Supabase local con await estricto (sin race condition)
       try {
         await setDoc(doc(db, 'alkosto_orders', orderId), {
           estado: 'ENVIADO',
           status: 'ENVIADO',
+          observaciones: observacionFormateada,
           transmitido_a_pedidos_manuales: true,
           fecha_transmision: new Date().toISOString()
         }, { merge: true });
 
         if (supabase) {
-          Promise.resolve(supabase.from('pedidos_alkosto').update({
+          await supabase.from('pedidos_alkosto').update({
             status: 'ENVIADO',
+            observaciones: observacionFormateada,
             updated_at: new Date().toISOString()
-          }).eq('id', orderId)).catch(err => console.warn("[SUPABASE LOCAL] Error actualizando estado a ENVIADO:", err?.message));
+          }).eq('id', orderId);
         }
       } catch (dbErr) {
         console.warn(`[ALKOSTO] Error actualizando estado a ENVIADO en db local:`, dbErr);
@@ -1349,11 +1484,11 @@ async function startServer() {
             id: orderId,
             numeroPedido: correlativo,
             correlativo: correlativo,
-            ordenCompraAlkosto: item.ordenCompraAlkosto,
+            ordenCompraAlkosto: numeroOcClean,
             sucursalCodigo: item.sucursalCodigo,
-            sucursalNombre: item.sucursalNombre,
+            sucursalNombre: sucursalClienteClean,
             vendedora: item.vendedora || 'SAIRU VALLES',
-            ruta: item.ruta || 'CUENTAS CLAVE 2',
+            ruta: vendedorClean,
             fechaPedido: fechaValida,
             fechaEntrega: item.fechaEntregaEstimada,
             totalBultos: item.totalBultos,
@@ -1361,7 +1496,7 @@ async function startServer() {
             totalUSD: totalMonto,
             condicionPago: item.condicionPago || 'Crédito 21 días',
             items: item.items,
-            observaciones: observacionesComb
+            observaciones: observacionFormateada
           })
         }).catch(err => console.warn("Google script webhook alkosto error:", err));
       }
@@ -1371,61 +1506,142 @@ async function startServer() {
     }
   }
 
+  async function processAndPersistSingleAlkostoOrder(item: any): Promise<any> {
+    const id = item.id || `alk-ord-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
+    const correlativo = await allocateNextCorrelativo(
+      item.correlativo && item.correlativo !== 'AUTO' && item.numeroPedido !== 'PENDIENTE'
+        ? item.correlativo
+        : undefined
+    );
+
+    const cadenaNorm = normalizarCadenaEstricta(
+      item.cadena || item.sucursalCodigo || item.id_cliente,
+      item.sucursal_cliente || item.sucursalNombre
+    );
+    const sucursalNombreClean = String(item.sucursal_cliente || item.sucursalNombre || cadenaNorm).trim().toUpperCase();
+    const numeroOcClean = String(item.numero_oc || item.ordenCompraAlkosto || 'S/N').trim();
+    const direccionClean = String(item.direccion_despacho || item.direccionEntrega || item.observaciones || 'Entrega según Orden de Compra').trim();
+
+    const observacionFormateada =
+      item.observacion_formateada && String(item.observacion_formateada).includes(' | OC ')
+        ? String(item.observacion_formateada).trim()
+        : construirObservacionFormateada({
+            sucursal_cliente: sucursalNombreClean,
+            cadena: cadenaNorm,
+            numero_oc: numeroOcClean,
+            direccion_despacho: direccionClean
+          });
+
+    const record = {
+      ...item,
+      id,
+      correlativo,
+      numeroPedido: correlativo,
+      ordenCompraAlkosto: numeroOcClean !== 'S/N' ? numeroOcClean : (item.ordenCompraAlkosto || ''),
+      sucursalNombre: sucursalNombreClean,
+      direccionEntrega: direccionClean,
+      observaciones: observacionFormateada,
+      observacion_formateada: observacionFormateada,
+      cadena: cadenaNorm,
+      sucursal_cliente: sucursalNombreClean,
+      numero_oc: numeroOcClean,
+      direccion_despacho: direccionClean,
+      estado: 'ENVIADO',
+      status: 'ENVIADO',
+      origen: 'APP FDV',
+      transmitido_a_pedidos_manuales: true,
+      fecha_transmision: new Date().toISOString(),
+      createdAt: item.createdAt || new Date().toISOString()
+    };
+
+    // 1. Guardar en Firestore con await
+    await setDoc(doc(db, 'alkosto_orders', id), record, { merge: true }).catch(err =>
+      console.warn("[FIRESTORE] Aviso guardando pedido Alkosto:", err?.message)
+    );
+
+    // 2. Guardar en Supabase local (pedidos_alkosto) con status: 'ENVIADO' directamente en el upsert y con await estricto
+    if (supabase) {
+      const { error: supaErr } = await supabase.from('pedidos_alkosto').upsert({
+        id: record.id,
+        numero_pedido: record.numeroPedido || '',
+        correlativo: record.correlativo || record.numeroPedido || '',
+        orden_compra_alkosto: record.ordenCompraAlkosto || '',
+        sucursal_codigo: record.sucursalCodigo || '',
+        sucursal_nombre: record.sucursalNombre || '',
+        vendedora: record.vendedora || 'SAIRU VALLES',
+        ruta: record.ruta || 'CUENTAS CLAVE 2',
+        fecha_pedido: record.fechaPedido ? new Date(record.fechaPedido).toISOString().split('T')[0] : null,
+        total_bultos: Number(record.totalBultos) || 0,
+        total_kilos: Number(record.totalKilos) || 0,
+        total_usd: Number(record.monto_pedido ?? record.totalUSD) || 0,
+        condicion_pago: record.condicionPago || '',
+        items: record.items || [],
+        observaciones: observacionFormateada,
+        status: 'ENVIADO',
+        created_at: record.createdAt,
+        updated_at: new Date().toISOString()
+      });
+      if (supaErr) {
+        console.warn("[SUPABASE LOCAL] Error en upsert de pedidos_alkosto:", supaErr.message);
+      }
+    }
+
+    // 3. Sincronizar de inmediato y con await con la Sala de Espera de Pedidos Manuales
+    await syncAlkostoOrderToExternal(record);
+
+    return record;
+  }
+
   app.post("/api/alkosto/pedidos", authenticateToken, async (req: any, res: any) => {
     try {
       const item = req.body;
-      if (!item || !item.sucursalNombre) {
-        return res.status(400).json({ error: "Falta sucursalNombre" });
+      if (!item || (!item.sucursalNombre && !item.sucursal_cliente)) {
+        return res.status(400).json({ error: "Falta sucursalNombre / sucursal_cliente" });
       }
-      const id = item.id || `alk-ord-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
-      
-      // Asignar correlativo automáticamente en sala de espera si no viene asignado
-      let correlativo = item.correlativo;
-      if (!correlativo || correlativo === 'AUTO' || item.numeroPedido === 'PENDIENTE') {
-        const snap = await getDocs(collection(db, 'alkosto_orders')).catch(() => null);
-        const total = snap ? snap.size : 0;
-        correlativo = String(total + 1).padStart(4, '0');
-        item.correlativo = correlativo;
-        item.numeroPedido = correlativo;
-      }
-
-      const record = {
-        ...item,
-        correlativo,
-        id,
-        createdAt: item.createdAt || new Date().toISOString()
-      };
-      await setDoc(doc(db, 'alkosto_orders', id), record, { merge: true });
-
-      // Guardar en Supabase si está disponible
-      if (supabase) {
-        Promise.resolve(supabase.from('pedidos_alkosto').upsert({
-          id: record.id,
-          numero_pedido: record.numeroPedido || '',
-          correlativo: record.correlativo || record.numeroPedido || '',
-          orden_compra_alkosto: record.ordenCompraAlkosto || '',
-          sucursal_codigo: record.sucursalCodigo || '',
-          sucursal_nombre: record.sucursalNombre || '',
-          vendedora: record.vendedora || 'SAIRU VALLES',
-          ruta: record.ruta || 'CUENTAS CLAVE 2',
-          fecha_pedido: record.fechaPedido ? new Date(record.fechaPedido).toISOString().split('T')[0] : null,
-          total_bultos: Number(record.totalBultos) || 0,
-          total_kilos: Number(record.totalKilos) || 0,
-          total_usd: Number(record.totalUSD) || 0,
-          condicion_pago: record.condicionPago || '',
-          items: record.items || [],
-          observaciones: record.observaciones || '',
-          created_at: record.createdAt
-        })).catch(err => console.warn("[SUPABASE] Error guardando pedido Alkosto:", err?.message));
-      }
-
-      // Transmisión automática del pedido al programa externo / Google Sheets
-      syncAlkostoOrderToExternal(record).catch(() => {});
-
+      const record = await processAndPersistSingleAlkostoOrder(item);
       res.json({ success: true, data: record });
     } catch (err: any) {
       console.error("Error saving Alkosto order:", err);
       res.status(500).json({ error: "Error saving Alkosto order", details: err?.message });
+    }
+  });
+
+  // Endpoint transaccional de lote secuencial (N pedidos de una Orden de Compra)
+  app.post("/api/alkosto/pedidos/lote", authenticateToken, async (req: any, res: any) => {
+    try {
+      const pedidosInput = Array.isArray(req.body?.pedidos) ? req.body.pedidos : Array.isArray(req.body) ? req.body : [];
+      if (pedidosInput.length === 0) {
+        return res.status(400).json({ success: false, error: "El lote de pedidos está vacío" });
+      }
+
+      const insertados: any[] = [];
+      const fallidos: Array<{ index: number; sucursal?: string; error: string }> = [];
+
+      for (let i = 0; i < pedidosInput.length; i++) {
+        const p = pedidosInput[i];
+        try {
+          const saved = await processAndPersistSingleAlkostoOrder(p);
+          insertados.push(saved);
+          console.log(`[ENVIO_FDV LOTE] Pedido ${i + 1}/${pedidosInput.length} procesado con ID ${saved.id} (Correlativo: ${saved.correlativo})`);
+        } catch (err: any) {
+          fallidos.push({
+            index: i,
+            sucursal: p?.sucursal_cliente || p?.sucursalNombre,
+            error: err?.message || "Error procesando pedido del lote"
+          });
+        }
+      }
+
+      res.status(fallidos.length === 0 ? 200 : 207).json({
+        success: fallidos.length === 0,
+        totalRecibidos: pedidosInput.length,
+        totalInsertados: insertados.length,
+        data: insertados,
+        fallidos
+      });
+    } catch (err: any) {
+      console.error("Error procesando lote Alkosto:", err);
+      res.status(500).json({ success: false, error: "Error procesando lote de pedidos", details: err?.message });
     }
   });
 
@@ -1435,10 +1651,11 @@ async function startServer() {
       if (!item || (!item.id && !item.numeroPedido)) {
         return res.status(400).json({ success: false, error: "Datos de pedido requeridos o inválidos para transmisión" });
       }
-      await syncAlkostoOrderToExternal(item);
+      const record = await processAndPersistSingleAlkostoOrder(item);
       res.json({ 
         success: true, 
-        message: `Pedido N° ${item.correlativo || item.numeroPedido} transmitido directamente a la Sala de Espera del Gestor de Pedidos Manuales` 
+        data: record,
+        message: `Pedido N° ${record.correlativo || record.numeroPedido} transmitido directamente a la Sala de Espera del Gestor de Pedidos Manuales` 
       });
     } catch (err: any) {
       console.error("Error transmitiendo pedido:", err);

@@ -932,26 +932,60 @@ export function subscribeAlkostoOrders(callback: (orders: AlkostoOrder[]) => voi
   }
 }
 
-export async function saveAlkostoOrder(order: AlkostoOrder): Promise<AlkostoOrder> {
+export async function saveAlkostoOrder(
+  order: AlkostoOrder,
+  options: { skipBackendSync?: boolean } = {}
+): Promise<AlkostoOrder> {
   const current = getLocalCache();
 
-  // Asignación automática del correlativo oficial en la sala de espera
-  if (!order.correlativo || order.correlativo.includes('AUTO') || order.numeroPedido.length > 5) {
+  // Si aún no tiene correlativo, proponer uno local preliminar (el servidor asignará el definitivo atómicamente)
+  if (!order.correlativo || order.correlativo.includes('AUTO') || order.numeroPedido === 'AUTO' || order.numeroPedido === 'PENDIENTE' || order.numeroPedido.length > 5) {
     const correlativoAuto = calcularSiguienteCorrelativo(current);
     order.correlativo = correlativoAuto;
     order.numeroPedido = correlativoAuto;
   }
 
-  const idx = current.findIndex(o => o.id === order.id);
+  // 1. Sincronizar primero de forma determinista con el backend API (con await estricto para evitar race conditions)
+  if (!options.skipBackendSync) {
+    try {
+      const res = await fetch('/api/alkosto/pedidos', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders()
+        },
+        body: JSON.stringify(order)
+      });
+      if (res.ok) {
+        const resJson = await res.json().catch(() => null);
+        if (resJson?.data) {
+          if (resJson.data.correlativo) {
+            order.correlativo = String(resJson.data.correlativo);
+            order.numeroPedido = String(resJson.data.numeroPedido || resJson.data.correlativo);
+          }
+          if (resJson.data.id) {
+            order.id = String(resJson.data.id);
+          }
+        }
+      }
+    } catch (apiErr) {
+      console.warn('[ENVIO_FDV] Aviso al sincronizar con backend en saveAlkostoOrder:', apiErr);
+    }
+  }
+
+  // 2. Actualizar caché local con el correlativo definitivo
+  const latestCache = getLocalCache();
+  const idx = latestCache.findIndex(o => o.id === order.id);
   let updated: AlkostoOrder[];
   if (idx >= 0) {
-    updated = [...current];
+    updated = [...latestCache];
     updated[idx] = { ...order, updatedAt: new Date().toISOString() };
   } else {
-    updated = [{ ...order, updatedAt: new Date().toISOString() }, ...current];
+    updated = [{ ...order, updatedAt: new Date().toISOString() }, ...latestCache];
   }
   setLocalCache(updated);
 
+  // 3. Persistir en Firestore con await
   try {
     const docRef = doc(db, ALKOSTO_COLLECTION, order.id);
     await setDoc(docRef, order, { merge: true });
@@ -959,22 +993,10 @@ export async function saveAlkostoOrder(order: AlkostoOrder): Promise<AlkostoOrde
     console.warn("Error guardando pedido Alkosto en Firestore:", err);
   }
 
-  // Sincronizar también con backend API
-  try {
-    fetch('/api/alkosto/pedidos', {
-      method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        ...getAuthHeaders()
-      },
-      body: JSON.stringify(order)
-    }).catch(() => {});
-  } catch {}
-
   return order;
 }
 
-export async function transmitirPedidoAlkosto(order: AlkostoOrder): Promise<{ success: boolean; message: string }> {
+export async function transmitirPedidoAlkosto(order: AlkostoOrder): Promise<{ success: boolean; message: string; data?: any }> {
   try {
     const res = await fetch('/api/alkosto/pedidos/transmitir', {
       method: 'POST',
@@ -991,10 +1013,14 @@ export async function transmitirPedidoAlkosto(order: AlkostoOrder): Promise<{ su
       data = JSON.parse(resText);
     } catch {}
 
-    if (res.ok) {
-      return { success: true, message: data.message || "Pedido transmitido con éxito" };
+    if (res.ok && data?.success !== false) {
+      return {
+        success: true,
+        message: data.message || "Pedido transmitido con éxito",
+        data: data.data
+      };
     } else {
-      throw new Error(data.error || "Error transmitiendo pedido");
+      throw new Error(data.error || `Error transmitiendo pedido (HTTP ${res.status})`);
     }
   } catch (err: any) {
     console.warn("Fallo transmisión por backend, intentando fallback:", err);
@@ -1016,6 +1042,144 @@ export async function transmitirPedidoAlkosto(order: AlkostoOrder): Promise<{ su
       throw new Error(err.message || "No se pudo transmitir el pedido");
     }
   }
+}
+
+/**
+ * Envía un único pedido de forma transaccional con reintentos automáticos (hasta 3 intentos)
+ * y emite los logs de auditoría requeridos en consola (`[ENVIO_FDV]`).
+ */
+export async function enviarPedidoAlkostoTransaccional(
+  pedido: AlkostoOrder,
+  indiceActual: number,
+  totalLote: number
+): Promise<AlkostoOrder> {
+  const maxIntentos = 3;
+  let ultimoError: Error | null = null;
+
+  for (let intento = 1; intento <= maxIntentos; intento++) {
+    try {
+      // Enviar al endpoint transaccional del servidor (que asigna correlativo atómico, guarda en Supabase local con status ENVIADO e inserta en Sala de Espera con status POR_VALIDAR)
+      const res = await fetch('/api/alkosto/pedidos', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders()
+        },
+        body: JSON.stringify({
+          ...pedido,
+          estado: 'ENVIADO',
+          transmitido_a_pedidos_manuales: true
+        })
+      });
+
+      const resText = await res.text();
+      let payload: any = null;
+      try {
+        payload = JSON.parse(resText);
+      } catch {}
+
+      if (!res.ok || !payload?.success) {
+        throw new Error(payload?.error || payload?.details || `Error HTTP ${res.status} al insertar pedido`);
+      }
+
+      const serverRecord = payload.data || {};
+      const pedidoConfirmado: AlkostoOrder = {
+        ...pedido,
+        id: String(serverRecord.id || pedido.id),
+        correlativo: String(serverRecord.correlativo || pedido.correlativo || pedido.numeroPedido),
+        numeroPedido: String(serverRecord.numeroPedido || serverRecord.correlativo || pedido.numeroPedido),
+        estado: 'ENVIADO',
+        transmitido_a_pedidos_manuales: true,
+        fecha_transmision: serverRecord.fecha_transmision || new Date().toISOString()
+      };
+
+      // Sincronizar caché local y Firestore con el ID y correlativo definitivos (sin volver a disparar POST al backend)
+      await saveAlkostoOrder(pedidoConfirmado, { skipBackendSync: true });
+
+      const renglonesCount = pedidoConfirmado.total_renglones ?? pedidoConfirmado.renglones?.length ?? pedidoConfirmado.items?.length ?? 0;
+      const montoVal = Number(pedidoConfirmado.monto_pedido ?? pedidoConfirmado.totalUSD ?? 0);
+
+      console.log(
+        `[ENVIO_FDV] Pedido ${indiceActual}/${totalLote} enviado con ID ${pedidoConfirmado.id} | Cliente ID: ${pedidoConfirmado.sucursalCodigo} (${pedidoConfirmado.sucursal_cliente || pedidoConfirmado.sucursalNombre}) | Correlativo: N° ${pedidoConfirmado.correlativo} | OC: ${pedidoConfirmado.numero_oc || pedidoConfirmado.ordenCompraAlkosto || 'S/N'} | Renglones: ${renglonesCount} | Monto: $${montoVal.toFixed(2)}`
+      );
+
+      return pedidoConfirmado;
+    } catch (err: any) {
+      ultimoError = err instanceof Error ? err : new Error(String(err));
+      console.warn(
+        `[ENVIO_FDV] Intento ${intento}/${maxIntentos} fallido para pedido ${indiceActual}/${totalLote} (${pedido.sucursal_cliente || pedido.sucursalNombre}): ${ultimoError.message}`
+      );
+      if (intento < maxIntentos) {
+        await new Promise(resolve => setTimeout(resolve, 400 * intento));
+      }
+    }
+  }
+
+  throw ultimoError || new Error(`Fallo al enviar el pedido de ${pedido.sucursal_cliente || pedido.sucursalNombre}`);
+}
+
+/**
+ * Envía un lote de N pedidos de forma estrictamente secuencial (`for ... of` con `await`)
+ * verificando la integridad de cada pedido (N de N) y reportando progreso en vivo.
+ */
+export async function enviarLotePedidosAlkosto(
+  pedidosPorEnviar: AlkostoOrder[],
+  onProgress?: (indice: number, total: number, pedidoActual: AlkostoOrder) => void
+): Promise<{
+  pedidosInsertados: AlkostoOrder[];
+  pedidosFallidos: Array<{ pedido: AlkostoOrder; motivo: string }>;
+  integridadCompleta: boolean;
+}> {
+  const pedidosInsertados: AlkostoOrder[] = [];
+  const pedidosFallidos: Array<{ pedido: AlkostoOrder; motivo: string }> = [];
+  const total = pedidosPorEnviar.length;
+
+  console.log(`[ENVIO_FDV] Iniciando transmisión transaccional de lote: ${total} pedido(s) por enviar...`);
+
+  // Asignar correlativos consecutivos preliminares sin colisión antes de iniciar el bucle secuencial
+  const baseCache = getLocalCache();
+  let nextCorrNum = parseInt(calcularSiguienteCorrelativo(baseCache), 10) || 1;
+
+  for (let i = 0; i < total; i++) {
+    const pedido = { ...pedidosPorEnviar[i] };
+    if (!pedido.correlativo || pedido.correlativo === 'AUTO' || pedido.numeroPedido === 'AUTO' || pedido.numeroPedido === 'PENDIENTE') {
+      const assignedCorr = String(nextCorrNum).padStart(4, '0');
+      pedido.correlativo = assignedCorr;
+      pedido.numeroPedido = assignedCorr;
+      nextCorrNum++;
+    }
+
+    if (onProgress) {
+      onProgress(i + 1, total, pedido);
+    }
+
+    try {
+      const confirmado = await enviarPedidoAlkostoTransaccional(pedido, i + 1, total);
+      pedidosInsertados.push(confirmado);
+      // Ajustar nextCorrNum si el servidor asignó un correlativo mayor
+      const serverCorrNum = parseInt(String(confirmado.correlativo || ''), 10);
+      if (!isNaN(serverCorrNum) && serverCorrNum >= nextCorrNum) {
+        nextCorrNum = serverCorrNum + 1;
+      }
+    } catch (err: any) {
+      const motivo = err?.message || 'Error de red o validación en el servidor';
+      console.error(
+        `[ENVIO_FDV] ERROR en Pedido ${i + 1}/${total} (${pedido.sucursal_cliente || pedido.sucursalNombre}): ${motivo}`
+      );
+      pedidosFallidos.push({ pedido, motivo });
+    }
+  }
+
+  const integridadCompleta = pedidosInsertados.length === total && pedidosFallidos.length === 0;
+  console.log(
+    `[ENVIO_FDV] Resultado de lote: ${pedidosInsertados.length}/${total} insertados exitosamente | Fallidos: ${pedidosFallidos.length} | Integridad 100%: ${integridadCompleta}`
+  );
+
+  return {
+    pedidosInsertados,
+    pedidosFallidos,
+    integridadCompleta
+  };
 }
 
 export async function updateAlkostoOrderStatus(id: string, nuevoEstado: EstadoPedidoAlkosto): Promise<void> {

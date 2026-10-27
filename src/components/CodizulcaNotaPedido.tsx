@@ -12,9 +12,16 @@ import {
   getSucursalByTag,
   detectCadenaFromTagOrName,
   saveAlkostoOrder, 
-  transmitirPedidoAlkosto 
+  transmitirPedidoAlkosto,
+  enviarLotePedidosAlkosto
 } from '../services/alkostoService';
-import { normalizarUnidadMedidaAlkosto } from '../services/alkostoOcParser';
+import {
+  normalizarUnidadMedidaAlkosto,
+  extraerPedidosNormalizadosDeOC,
+  validarNumeroOC,
+  construirObservacionFormateada,
+  normalizarCadenaEstricta
+} from '../services/alkostoOcParser';
 
 interface CodizulcaNotaPedidoProps {
   initialData?: ParsedOrdenCompraAlkosto | null;
@@ -284,8 +291,12 @@ export function CodizulcaNotaPedido({
   });
 
   const [mensajeExito, setMensajeExito] = useState<string | null>(null);
+  const [alertaValidacionOC, setAlertaValidacionOC] = useState<string | null>(null);
   const [guardando, setGuardando] = useState(false);
   const [transmitiendo, setTransmitiendo] = useState(false);
+  const [progresoEnvio, setProgresoEnvio] = useState<{ actual: number; total: number; sucursal: string } | null>(null);
+  const [pedidosFallidosLote, setPedidosFallidosLote] = useState<Array<{ pedido: AlkostoOrder; motivo: string }>>([]);
+  const [todasTiendasOC, setTodasTiendasOC] = useState<string[]>([]);
 
   // Función para limpiar completamente el formato y dejarlo listo para otra OC
   const limpiarFormato = () => {
@@ -294,6 +305,10 @@ export function CodizulcaNotaPedido({
     setNroPedido('AUTO');
     setTiendaSeleccionada('CONSOLIDADO');
     setCantidadCestas('0');
+    setAlertaValidacionOC(null);
+    setPedidosFallidosLote([]);
+    setProgresoEnvio(null);
+    setTodasTiendasOC([]);
     const today = new Date();
     setFecha(today.toLocaleDateString('es-VE', { day: '2-digit', month: '2-digit', year: 'numeric' }));
     setFechaISO(today.toISOString().split('T')[0]);
@@ -317,8 +332,12 @@ export function CodizulcaNotaPedido({
   useEffect(() => {
     if (initialData) {
       const ocNum = initialData.ordenNro || (initialData as any).numeroOrden || (initialData as any).nroOrden || (initialData as any).oc || '';
-      if (ocNum) {
+      if (ocNum && ocNum !== 'S/N') {
         setOrdenCompraRef(ocNum);
+        setAlertaValidacionOC(null);
+      } else {
+        setOrdenCompraRef('');
+        setAlertaValidacionOC('⚠️ Esta Orden de Compra no tiene un número de OC detectado. Por favor ingrésalo en la casilla "ORDEN DE COMPRA" antes de transmitir.');
       }
       const fechaVal = initialData.fechaEntrega || (initialData as any).fecha || (initialData as any).entrega || '';
       if (fechaVal) {
@@ -330,14 +349,31 @@ export function CodizulcaNotaPedido({
 
       setTiendaSeleccionada('CONSOLIDADO');
       setObservaciones('');
+      setPedidosFallidosLote([]);
 
       const rawItems = extractItemsList(initialData);
 
-      // Detectar cadena según datos extraídos (prioriza ALKOSTO si el documento tiene página de Alkosto)
-      const tagsList: string[] = [];
+      // Extraer el 100% de las tiendas con cantidad > 0 en todas las páginas/cadenas del documento (AK y FC)
+      const allTagsWithQty = new Set<string>();
       rawItems.forEach((it: any) => {
-        if (it.tiendas) Object.keys(it.tiendas).forEach(tk => tagsList.push(tk.toUpperCase()));
+        if (it.tiendas && typeof it.tiendas === 'object') {
+          Object.entries(it.tiendas).forEach(([tk, val]) => {
+            const uTag = tk.trim().toUpperCase();
+            if (uTag !== 'CI' && parseNumeroSeguro(val) > 0) {
+              allTagsWithQty.add(uTag);
+            }
+          });
+        }
       });
+      const tagsList = Array.from(allTagsWithQty);
+      const orderedAllTags = [
+        ...CADENAS_ABREVIATURAS.ALKOSTO,
+        'AKOP',
+        ...CADENAS_ABREVIATURAS.FAMILIA_CENTER,
+        'FCOP'
+      ].filter(t => allTagsWithQty.has(t));
+      setTodasTiendasOC(orderedAllTags);
+
       const hasAk = tagsList.some(t => t.startsWith('AK'));
       const hasFc = tagsList.some(t => t.startsWith('FC'));
       const esFamilia = !hasAk && (
@@ -351,18 +387,13 @@ export function CodizulcaNotaPedido({
       const detectedCadena = esFamilia ? 'FAMILIA_CENTER' : 'ALKOSTO';
       setCadenaActiva(detectedCadena);
 
-      // Detectar tiendas disponibles para la cadena activa
-      const prefix = detectedCadena === 'FAMILIA_CENTER' ? 'FC' : 'AK';
-      const tiendaSet = new Set<string>();
-      tagsList.filter(tk => tk.startsWith(prefix)).forEach(tk => {
-        tiendaSet.add(tk);
-      });
-      if (tiendaSet.size === 0) {
+      // Si el documento contiene múltiples sucursales (incluyendo AK + FC), mostrar todas las tiendas con pedido para que ninguna quede oculta
+      if (orderedAllTags.length > 0) {
+        setTiendasDisponibles(orderedAllTags);
+      } else {
         const defaultTags = detectedCadena === 'FAMILIA_CENTER' ? CADENAS_ABREVIATURAS.FAMILIA_CENTER : CADENAS_ABREVIATURAS.ALKOSTO;
-        defaultTags.forEach(t => tiendaSet.add(t));
+        setTiendasDisponibles(defaultTags);
       }
-      const tiendasArray = Array.from(tiendaSet).sort();
-      setTiendasDisponibles(tiendasArray);
 
       // Cargar filas consolidadas de inmediato con buildFilasFromData para la cadena activa
       setFilas(buildFilasFromData(initialData, 'CONSOLIDADO', detectedCadena));
@@ -373,9 +404,19 @@ export function CodizulcaNotaPedido({
         ? [...SUCURSALES_ALKOSTO, ...SUCURSALES_FAMILIA_CENTER].find(s => s.codigo === extractedId)
         : undefined;
 
-      setClienteNombre(initialData.clienteNombre || matchedSucById?.nombre || defaultSuc.nombre);
+      const finalSucNombre = initialData.clienteNombre || matchedSucById?.nombre || defaultSuc.nombre;
+      const finalDir = initialData.observaciones || matchedSucById?.direccion || defaultSuc.direccion;
+      const formattedObs = construirObservacionFormateada({
+        sucursal_cliente: finalSucNombre,
+        ciudad_zona: matchedSucById?.zona || defaultSuc.zona,
+        cadena: normalizarCadenaEstricta(detectedCadena, finalSucNombre),
+        numero_oc: ocNum || 'S/N',
+        direccion_despacho: finalDir
+      });
+
+      setClienteNombre(finalSucNombre);
       setIdCliente(extractedId || defaultSuc.codigo);
-      setObservaciones(initialData.observaciones || matchedSucById?.direccion || defaultSuc.direccion);
+      setObservaciones(formattedObs);
       if (initialData.ruta) setRuta(initialData.ruta);
       if (initialData.supervisor) setSupervisor(initialData.supervisor);
       if (initialData.chofer) setChofer(initialData.chofer);
@@ -388,7 +429,17 @@ export function CodizulcaNotaPedido({
       setClienteNombre(initialSucursal.nombre);
       setIdCliente(initialSucursal.codigo);
       const foundSuc = [...SUCURSALES_ALKOSTO, ...SUCURSALES_FAMILIA_CENTER].find(s => s.codigo === initialSucursal.codigo);
-      if (foundSuc) setObservaciones(foundSuc.direccion);
+      if (foundSuc) {
+        setObservaciones(
+          construirObservacionFormateada({
+            sucursal_cliente: foundSuc.nombre,
+            ciudad_zona: foundSuc.zona,
+            cadena: normalizarCadenaEstricta(foundSuc.tag || foundSuc.codigo, foundSuc.nombre),
+            numero_oc: ordenCompraRef || 'S/N',
+            direccion_despacho: foundSuc.direccion
+          })
+        );
+      }
     } else {
       limpiarFormato();
     }
@@ -399,41 +450,79 @@ export function CodizulcaNotaPedido({
 
   // Carga las filas según si es consolidado o una tienda individual (AK01..AK10 o FC01..FC07)
   const cargarFilasSegunTienda = (tienda: string, data = initialData, cadena = cadenaActiva) => {
-    const dataFilas = buildFilasFromData(data, tienda, cadena);
+    const effectiveCadena = tienda.startsWith('FC')
+      ? 'FAMILIA_CENTER'
+      : tienda.startsWith('AK')
+        ? 'ALKOSTO'
+        : cadena;
+    const dataFilas = buildFilasFromData(data, tienda, effectiveCadena);
     setFilas(dataFilas);
 
-    // Actualizar nombre, código y descripción de sucursal según listado oficial
+    // Actualizar nombre, código y observación estandarizada de sucursal según listado oficial
     if (tienda !== 'CONSOLIDADO') {
       const suc = getSucursalByTag(tienda);
       if (suc) {
         setClienteNombre(suc.nombre);
         setIdCliente(suc.codigo);
-        setObservaciones(suc.direccion);
+        setObservaciones(
+          construirObservacionFormateada({
+            sucursal_cliente: suc.nombre,
+            ciudad_zona: suc.zona,
+            cadena: normalizarCadenaEstricta(suc.tag || suc.codigo, suc.nombre),
+            numero_oc: ordenCompraRef || initialData?.ordenNro || 'S/N',
+            direccion_despacho: suc.direccion
+          })
+        );
       } else {
-        const fallbackSuc = (tienda.startsWith('FC') || cadena === 'FAMILIA_CENTER') ? SUCURSALES_FAMILIA_CENTER[0] : SUCURSALES_ALKOSTO[0];
+        const fallbackSuc = (tienda.startsWith('FC') || effectiveCadena === 'FAMILIA_CENTER') ? SUCURSALES_FAMILIA_CENTER[0] : SUCURSALES_ALKOSTO[0];
         setClienteNombre(fallbackSuc.nombre);
         setIdCliente(fallbackSuc.codigo);
-        setObservaciones(fallbackSuc.direccion);
+        setObservaciones(
+          construirObservacionFormateada({
+            sucursal_cliente: fallbackSuc.nombre,
+            ciudad_zona: fallbackSuc.zona,
+            cadena: normalizarCadenaEstricta(fallbackSuc.tag || fallbackSuc.codigo, fallbackSuc.nombre),
+            numero_oc: ordenCompraRef || initialData?.ordenNro || 'S/N',
+            direccion_despacho: fallbackSuc.direccion
+          })
+        );
       }
     } else {
-      const defaultSuc = cadena === 'FAMILIA_CENTER' ? SUCURSALES_FAMILIA_CENTER[0] : SUCURSALES_ALKOSTO[0];
+      const defaultSuc = effectiveCadena === 'FAMILIA_CENTER' ? SUCURSALES_FAMILIA_CENTER[0] : SUCURSALES_ALKOSTO[0];
       setClienteNombre(defaultSuc.nombre);
       setIdCliente(defaultSuc.codigo);
-      setObservaciones(defaultSuc.direccion);
+      setObservaciones(
+        construirObservacionFormateada({
+          sucursal_cliente: defaultSuc.nombre,
+          ciudad_zona: defaultSuc.zona,
+          cadena: normalizarCadenaEstricta(defaultSuc.tag || defaultSuc.codigo, defaultSuc.nombre),
+          numero_oc: ordenCompraRef || initialData?.ordenNro || 'S/N',
+          direccion_despacho: defaultSuc.direccion
+        })
+      );
     }
   };
 
   // Manejar cambio manual de cadena (Alkosto vs Familia Center)
   const handleCambiarCadena = (nuevaCadena: 'ALKOSTO' | 'FAMILIA_CENTER') => {
     setCadenaActiva(nuevaCadena);
-    const tags = nuevaCadena === 'FAMILIA_CENTER' ? CADENAS_ABREVIATURAS.FAMILIA_CENTER : CADENAS_ABREVIATURAS.ALKOSTO;
-    setTiendasDisponibles(tags);
+    if (todasTiendasOC.length > 0) {
+      setTiendasDisponibles(todasTiendasOC);
+    } else {
+      const tags = nuevaCadena === 'FAMILIA_CENTER' ? CADENAS_ABREVIATURAS.FAMILIA_CENTER : CADENAS_ABREVIATURAS.ALKOSTO;
+      setTiendasDisponibles(tags);
+    }
     setTiendaSeleccionada('CONSOLIDADO');
     cargarFilasSegunTienda('CONSOLIDADO', initialData, nuevaCadena);
   };
 
   // Manejar cambio de tienda seleccionada
   const handleCambiarTienda = (t: string) => {
+    if (t.startsWith('FC') && cadenaActiva !== 'FAMILIA_CENTER') {
+      setCadenaActiva('FAMILIA_CENTER');
+    } else if (t.startsWith('AK') && cadenaActiva !== 'ALKOSTO') {
+      setCadenaActiva('ALKOSTO');
+    }
     setTiendaSeleccionada(t);
     cargarFilasSegunTienda(t);
   };
@@ -551,229 +640,115 @@ export function CodizulcaNotaPedido({
     window.print();
   };
 
-  // Guardar en base de datos Firestore y sincronizar
+  // Guardar o transmitir de forma transaccional con verificación de integridad 100% (N de N)
   const handleGuardarEnSistema = async () => {
-    setGuardando(true);
-    try {
-      const itemsValidos = filas.filter(f => f.codigo || f.descripcion || f.cantSolicitada > 0);
-      
-      const nuevoPedido: AlkostoOrder = {
-        id: `alk-doc-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
-        numeroPedido: nroPedido === 'AUTO' ? 'PENDIENTE' : nroPedido,
-        correlativo: nroPedido === 'AUTO' ? undefined : nroPedido,
-        ordenCompraAlkosto: ordenCompraRef.trim() || undefined,
-        sucursalCodigo: idCliente,
-        sucursalNombre: clienteNombre,
-        direccionEntrega: 'Entrega según orden de compra',
-        vendedora: vendedoraNombre.toUpperCase(),
-        ruta: ruta.toUpperCase(),
-        fechaPedido: fechaISO,
-        fechaEntregaEstimada: fechaISO,
-        items: itemsValidos.map(it => {
-          const match = resolverProductoPorCodigoODescripcion(it.codigo, it.descripcion);
-          const kxBox = match ? match.kilosPorCaja : (it.unid === 'KG' ? 1 : 10);
-          const totalK = it.unid === 'KG' ? Number(it.cantSolicitada) : (Number(it.cantSolicitada) * kxBox);
-          return {
-            id: `item-${it.renglon}`,
-            sku: it.skuCodizulca || (match ? match.sku : it.codigo),
-            producto: it.descripcion,
-            categoria: match ? match.categoria : 'CHARCUTERIA / CARNES',
-            presentacion: it.unid || (match ? match.presentacion : 'CJ'),
-            cantidadCajas: Number(it.cantSolicitada) || 0,
-            kilosPorCaja: kxBox,
-            totalKilos: totalK,
-            precioUnitarioUSD: Number(it.precio) || 0,
-            subtotalUSD: Number(it.subtotal) || 0
-          };
-        }),
-        totalBultos: totalBultosCajas,
-        totalKilos: itemsValidos.reduce((acc, it) => {
-          const match = resolverProductoPorCodigoODescripcion(it.codigo, it.descripcion);
-          const kxBox = match ? match.kilosPorCaja : (it.unid === 'KG' ? 1 : 10);
-          return acc + (it.unid === 'KG' ? Number(it.cantSolicitada) : Number(it.cantSolicitada) * kxBox);
-        }, 0),
-        totalUSD: totalGeneral,
-        estado: 'ENVIADO',
-        transmitido_a_pedidos_manuales: true,
-        fecha_transmision: new Date().toISOString(),
-        condicionPago: 'Crédito 21 días',
-        observaciones: observaciones,
-        createdAt: new Date().toISOString()
-      };
-
-      const pedidoGuardado = await saveAlkostoOrder(nuevoPedido);
-      const correlativoFinal = pedidoGuardado.correlativo || pedidoGuardado.numeroPedido;
-      setNroPedido(correlativoFinal);
-
-      // Transmitir directamente a la Sala de Espera del Programa de Pedidos Manuales
-      try {
-        await transmitirPedidoAlkosto(pedidoGuardado);
-        setMensajeExito(`¡Pedido N° ${correlativoFinal} transmitido directamente a la Sala de Espera de Pedidos Manuales! Tu app queda despejada.`);
-      } catch (txErr) {
-        setMensajeExito(`¡Pedido guardado N° ${correlativoFinal}! Enviado a Pedidos Manuales.`);
-      }
-
-      setTimeout(() => setMensajeExito(null), 5000);
-      if (onOrderSaved) onOrderSaved();
-    } catch (err: any) {
-      console.error(err);
-      alert('Error guardando pedido: ' + err.message);
-    } finally {
-      setGuardando(false);
-    }
+    await handleTransmitirAOtroPrograma();
   };
 
-  const handleTransmitirAOtroPrograma = async () => {
+  const handleTransmitirAOtroPrograma = async (
+    opciones?: { soloTiendaActual?: boolean; reintentarFallidos?: AlkostoOrder[] }
+  ) => {
+    if (transmitiendo) return;
+
+    // 1. Validar número de Orden de Compra (OC) con regex antes de enviar (nunca omitir en silencio)
+    const ocRaw = ordenCompraRef.trim() || initialData?.ordenNro || '';
+    const validacionOC = validarNumeroOC(ocRaw);
+    if (!validacionOC.valido) {
+      setAlertaValidacionOC(
+        validacionOC.alerta ||
+          '⚠️ Falta el número de Orden de Compra (OC). Por favor verifica la casilla "ORDEN DE COMPRA".'
+      );
+      const confirmarSinOC = window.confirm(
+        `⚠️ ALERTA DE VALIDACIÓN OC:\n\n${validacionOC.alerta}\n\n¿Deseas transmitir el pedido de todas formas marcando OC como "S/N"?`
+      );
+      if (!confirmarSinOC) {
+        return;
+      }
+    } else {
+      setAlertaValidacionOC(null);
+    }
+
     setTransmitiendo(true);
     try {
-      // 1. Si está en modo CONSOLIDADO y hay múltiples tiendas con cantidades en la orden:
-      // Se debe separar cada pedido por tienda para que cada uno llegue por separado a la sala de espera
-      // y tenga su propio número de correlativo asignado.
-      const pedidosParaEnviar: AlkostoOrder[] = [];
+      let pedidosPorEnviar: AlkostoOrder[] = [];
 
-      if (tiendaSeleccionada === 'CONSOLIDADO' && tiendasDisponibles.length > 0) {
-        tiendasDisponibles.forEach((tTag, idx) => {
-          // Filtrar items con cantidad > 0 para esta tienda
-          const itemsTienda: CodizulcaNotaPedidoItem[] = [];
-          filas.forEach(f => {
-            if (!f.codigo && !f.descripcion) return;
-            const cant = f.tiendas && f.tiendas[tTag] !== undefined 
-              ? Number(f.tiendas[tTag]) || 0 
-              : 0;
-            if (cant > 0) {
-              itemsTienda.push({
-                ...f,
-                cantSolicitada: cant,
-                subtotal: Number((cant * (f.precio || 0)).toFixed(2))
-              });
-            }
-          });
-
-          if (itemsTienda.length > 0) {
-            const suc = getSucursalByTag(tTag);
-            const totalBultos = itemsTienda.reduce((acc, it) => acc + (Number(it.cantSolicitada) || 0), 0);
-            const totalKilos = itemsTienda.reduce((acc, it) => {
-              const match = resolverProductoPorCodigoODescripcion(it.codigo, it.descripcion);
-              const kxBox = match ? match.kilosPorCaja : (it.unid === 'KG' ? 1 : 10);
-              return acc + (it.unid === 'KG' ? Number(it.cantSolicitada) : Number(it.cantSolicitada) * kxBox);
-            }, 0);
-            const totalUSD = itemsTienda.reduce((acc, it) => acc + (Number(it.subtotal) || 0), 0);
-
-            const pedidoTienda: AlkostoOrder = {
-              id: `alk-${tTag.toLowerCase()}-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
-              numeroPedido: 'AUTO',
-              ordenCompraAlkosto: ordenCompraRef.trim() || undefined,
-              sucursalCodigo: suc?.codigo || '7498',
-              sucursalNombre: suc?.nombre || tTag,
-              direccionEntrega: suc?.direccion || 'Entrega según orden de compra',
-              vendedora: vendedoraNombre.toUpperCase(),
-              ruta: ruta.toUpperCase(),
-              fechaPedido: fechaISO,
-              fechaEntregaEstimada: fechaISO,
-              items: itemsTienda.map((it, itemIdx) => {
-                const match = resolverProductoPorCodigoODescripcion(it.codigo, it.descripcion);
-                const kxBox = match ? match.kilosPorCaja : (it.unid === 'KG' ? 1 : 10);
-                const totalK = it.unid === 'KG' ? Number(it.cantSolicitada) : (Number(it.cantSolicitada) * kxBox);
-                return {
-                  id: `item-${it.renglon || itemIdx + 1}`,
-                  sku: it.skuCodizulca || (match ? match.sku : it.codigo),
-                  producto: it.descripcion,
-                  categoria: match ? match.categoria : 'CHARCUTERIA / CARNES',
-                  presentacion: it.unid || (match ? match.presentacion : 'CJ'),
-                  cantidadCajas: Number(it.cantSolicitada) || 0,
-                  kilosPorCaja: kxBox,
-                  totalKilos: totalK,
-                  precioUnitarioUSD: Number(it.precio) || 0,
-                  subtotalUSD: Number(it.subtotal) || 0
-                };
-              }),
-              totalBultos,
-              totalKilos,
-              totalUSD,
-              estado: 'ENVIADO',
-              transmitido_a_pedidos_manuales: true,
-              fecha_transmision: new Date().toISOString(),
-              condicionPago: 'Crédito 21 días',
-              observaciones: suc?.direccion || observaciones,
-              createdAt: new Date(Date.now() + idx * 40).toISOString()
-            };
-            pedidosParaEnviar.push(pedidoTienda);
-          }
+      if (opciones?.reintentarFallidos && opciones.reintentarFallidos.length > 0) {
+        pedidosPorEnviar = opciones.reintentarFallidos;
+      } else {
+        // Extraer el 100% de las sucursales/tiendas del documento OC bajo el Esquema de Datos Normalizado (Strict Payload)
+        const enviarLoteCompleto = opciones?.soloTiendaActual ? false : true;
+        const extraidos = extraerPedidosNormalizadosDeOC({
+          initialData,
+          filasActuales: filas,
+          tiendaSeleccionada,
+          enviarLoteCompleto,
+          idClienteSeleccionado: idCliente,
+          clienteNombreSeleccionado: clienteNombre,
+          direccionObservacionFallback: observaciones,
+          numero_oc: validacionOC.numero_oc,
+          vendedor: ruta || `${vendedoraNombre} / CUENTAS CLAVE 2`,
+          supervisor,
+          chofer,
+          cantidadCestas,
+          fechaISO,
+          nroPedido
         });
+        pedidosPorEnviar = extraidos.pedidos;
       }
 
-      // Si no se separaron por tienda (o si el usuario seleccionó una tienda específica como AK01, o no hay desglose):
-      if (pedidosParaEnviar.length === 0) {
-        const itemsValidos = filas.filter(f => (f.codigo || f.descripcion) && Number(f.cantSolicitada) > 0);
-        const suc = getSucursalByTag(tiendaSeleccionada);
-        const pedidoUnico: AlkostoOrder = {
-          id: `alk-doc-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
-          numeroPedido: nroPedido === 'AUTO' ? 'PENDIENTE' : nroPedido,
-          correlativo: nroPedido === 'AUTO' ? undefined : nroPedido,
-          ordenCompraAlkosto: ordenCompraRef.trim() || undefined,
-          sucursalCodigo: suc?.codigo || idCliente,
-          sucursalNombre: suc?.nombre || clienteNombre,
-          direccionEntrega: suc?.direccion || 'Entrega según orden de compra',
-          vendedora: vendedoraNombre.toUpperCase(),
-          ruta: ruta.toUpperCase(),
-          fechaPedido: fechaISO,
-          fechaEntregaEstimada: fechaISO,
-          items: itemsValidos.map(it => {
-            const match = resolverProductoPorCodigoODescripcion(it.codigo, it.descripcion);
-            const kxBox = match ? match.kilosPorCaja : (it.unid === 'KG' ? 1 : 10);
-            const totalK = it.unid === 'KG' ? Number(it.cantSolicitada) : (Number(it.cantSolicitada) * kxBox);
-            return {
-              id: `item-${it.renglon}`,
-              sku: it.skuCodizulca || (match ? match.sku : it.codigo),
-              producto: it.descripcion,
-              categoria: match ? match.categoria : 'CHARCUTERIA / CARNES',
-              presentacion: it.unid || (match ? match.presentacion : 'CJ'),
-              cantidadCajas: Number(it.cantSolicitada) || 0,
-              kilosPorCaja: kxBox,
-              totalKilos: totalK,
-              precioUnitarioUSD: Number(it.precio) || 0,
-              subtotalUSD: Number(it.subtotal) || 0
-            };
-          }),
-          totalBultos: totalBultosCajas,
-          totalKilos: itemsValidos.reduce((acc, it) => {
-            const match = resolverProductoPorCodigoODescripcion(it.codigo, it.descripcion);
-            const kxBox = match ? match.kilosPorCaja : (it.unid === 'KG' ? 1 : 10);
-            return acc + (it.unid === 'KG' ? Number(it.cantSolicitada) : Number(it.cantSolicitada) * kxBox);
-          }, 0),
-          totalUSD: totalGeneral,
-          estado: 'ENVIADO',
-          transmitido_a_pedidos_manuales: true,
-          fecha_transmision: new Date().toISOString(),
-          condicionPago: 'Crédito 21 días',
-          observaciones: observaciones,
-          createdAt: new Date().toISOString()
-        };
-        pedidosParaEnviar.push(pedidoUnico);
+      if (pedidosPorEnviar.length === 0) {
+        alert('No hay renglones con cantidad mayor a 0 para enviar. Por favor verifica las cantidades del formato.');
+        return;
       }
 
-      // Guardar secuencialmente cada pedido y transmitir directamente a la Sala de Espera de Pedidos Manuales
-      const guardados: AlkostoOrder[] = [];
-      for (const p of pedidosParaEnviar) {
-        const g = await saveAlkostoOrder(p);
-        guardados.push(g);
-        try {
-          await transmitirPedidoAlkosto(g);
-        } catch (tErr) {
-          console.warn("Transmisión Pedidos Manuales aviso:", tErr);
+      setProgresoEnvio({
+        actual: 1,
+        total: pedidosPorEnviar.length,
+        sucursal: pedidosPorEnviar[0].sucursal_cliente || pedidosPorEnviar[0].sucursalNombre
+      });
+
+      // 2. Envío secuencial estricto con await por cada pedido y verificación de integridad (N de N)
+      const resultado = await enviarLotePedidosAlkosto(
+        pedidosPorEnviar,
+        (actual, total, pedidoActual) => {
+          setProgresoEnvio({
+            actual,
+            total,
+            sucursal: pedidoActual.sucursal_cliente || pedidoActual.sucursalNombre
+          });
         }
+      );
+
+      // 3. Verificación estricta de integridad: N insertados === N por enviar
+      if (!resultado.integridadCompleta || resultado.pedidosInsertados.length !== pedidosPorEnviar.length) {
+        // Conservar ÚNICAMENTE los pedidos fallidos en pantalla mostrando el motivo exacto del error (NO limpiar ni desmontar)
+        setPedidosFallidosLote(resultado.pedidosFallidos);
+        const exitososCount = resultado.pedidosInsertados.length;
+        const fallidosCount = resultado.pedidosFallidos.length;
+        setMensajeExito(
+          exitososCount > 0
+            ? `Se enviaron ${exitososCount} de ${pedidosPorEnviar.length} pedidos. Quedan ${fallidosCount} pedido(s) pendientes por reintentar.`
+            : null
+        );
+        return;
       }
 
-      const correlativosList = guardados.map(g => g.correlativo || g.numeroPedido);
-      if (guardados.length > 1) {
-        setMensajeExito(`¡${guardados.length} pedidos transmitidos directamente a la Sala de Espera del Gestor de Pedidos Manuales! Correlativos: N° ${correlativosList.join(', N° ')}. Formato limpio listo para la siguiente OC.`);
+      // 100% de integridad verificada (ej. 7 de 7 insertados exitosamente)
+      setPedidosFallidosLote([]);
+      const correlativosList = resultado.pedidosInsertados.map(g => g.correlativo || g.numeroPedido);
+      if (resultado.pedidosInsertados.length > 1) {
+        setMensajeExito(
+          `¡${resultado.pedidosInsertados.length} de ${ pedidosPorEnviar.length } pedidos transmitidos íntegramente a la Sala de Espera (Cadenas Comerciales)! Correlativos: N° ${correlativosList.join(', N° ')}.`
+        );
       } else {
         const unicoCorrelativo = correlativosList[0] || 'AUTO';
         setNroPedido(unicoCorrelativo);
-        setMensajeExito(`¡Pedido transmitido directamente a la Sala de Espera del Gestor de Pedidos Manuales! Correlativo: N° ${unicoCorrelativo}. Tu app queda despejada.`);
+        setMensajeExito(
+          `¡Pedido transmitido directamente a la Sala de Espera (Cadenas Comerciales)! Correlativo: N° ${unicoCorrelativo}.`
+        );
       }
 
-      // Limpiar y resetear el formato inmediatamente para que quede listo para enviar otra OC
+      // Solo limpiar y desmontar tras verificar que pedidosInsertados.length === pedidosPorEnviar.length
       limpiarFormato();
 
       setTimeout(() => setMensajeExito(null), 6000);
@@ -784,6 +759,7 @@ export function CodizulcaNotaPedido({
       alert('Error al transmitir pedido: ' + err.message);
     } finally {
       setTransmitiendo(false);
+      setProgresoEnvio(null);
     }
   };
 
@@ -856,7 +832,15 @@ export function CodizulcaNotaPedido({
                 if (suc) {
                   setIdCliente(suc.codigo);
                   setClienteNombre(suc.nombre);
-                  setObservaciones(suc.direccion);
+                  setObservaciones(
+                    construirObservacionFormateada({
+                      sucursal_cliente: suc.nombre,
+                      ciudad_zona: suc.zona,
+                      cadena: normalizarCadenaEstricta(suc.tag || suc.codigo, suc.nombre),
+                      numero_oc: ordenCompraRef || initialData?.ordenNro || 'S/N',
+                      direccion_despacho: suc.direccion
+                    })
+                  );
                   if (suc.tag && tiendasDisponibles.includes(suc.tag)) {
                     setTiendaSeleccionada(suc.tag);
                     setFilas(buildFilasFromData(initialData, suc.tag, cadenaActiva));
@@ -888,7 +872,7 @@ export function CodizulcaNotaPedido({
                     : 'bg-neutral-900 text-neutral-400 hover:text-white border border-neutral-800'
                 }`}
               >
-                Consolidado Total
+                Consolidado Total {todasTiendasOC.length > 1 ? `(${todasTiendasOC.length} Sedes)` : ''}
               </button>
               {tiendasDisponibles.map(t => {
                 const sucInfo = getSucursalByTag(t);
@@ -912,18 +896,77 @@ export function CodizulcaNotaPedido({
           )}
         </div>
 
+        {/* ALERTA VISIBLE SI FALTA O ES INVÁLIDO EL NÚMERO DE OC */}
+        {alertaValidacionOC && (
+          <div className="bg-amber-950/80 border border-amber-700 text-amber-200 p-3 rounded-xl flex items-center gap-2 text-xs font-bold">
+            <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>{alertaValidacionOC}</span>
+          </div>
+        )}
+
+        {/* PANEL DE REINTENTO SI ALGÚN PEDIDO DEL LOTE FALLÓ POR RED O VALIDACIÓN */}
+        {pedidosFallidosLote.length > 0 && (
+          <div className="bg-red-950/90 border border-red-700 text-red-200 p-3.5 rounded-xl space-y-2 text-xs">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 font-black text-red-300 uppercase">
+                <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+                <span>Atención: {pedidosFallidosLote.length} pedido(s) no pudieron enviarse y se conservaron en pantalla:</span>
+              </div>
+              <button
+                type="button"
+                disabled={transmitiendo}
+                onClick={() =>
+                  handleTransmitirAOtroPrograma({
+                    reintentarFallidos: pedidosFallidosLote.map(f => f.pedido)
+                  })
+                }
+                className="bg-red-600 hover:bg-red-500 text-white px-3 py-1.5 rounded-lg font-black uppercase text-[11px] shrink-0 shadow"
+              >
+                🔄 Reintentar Fallidos ({pedidosFallidosLote.length})
+              </button>
+            </div>
+            <ul className="space-y-1 pl-5 list-disc text-[11px] text-red-200/90 font-mono">
+              {pedidosFallidosLote.map((f, i) => (
+                <li key={f.pedido.id || i}>
+                  <strong>{f.pedido.sucursal_cliente || f.pedido.sucursalNombre} (ID {f.pedido.sucursalCodigo}):</strong> {f.motivo}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         {/* FILA 3: BOTÓN DE TRANSMISIÓN DIRECTA A SALA DE ESPERA DE PEDIDOS MANUALES */}
-        <div className="w-full pt-1">
+        <div className="w-full pt-1 flex flex-col sm:flex-row gap-2">
           <button
             type="button"
-            onClick={handleTransmitirAOtroPrograma}
+            onClick={() => handleTransmitirAOtroPrograma({ soloTiendaActual: false })}
             disabled={transmitiendo}
-            className="w-full flex items-center justify-center gap-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 active:scale-[0.99] disabled:opacity-50 text-white py-3.5 px-6 rounded-xl text-sm font-black transition-all shadow-lg shadow-emerald-950/60 uppercase tracking-wide cursor-pointer"
-            title="Envía el pedido directamente a la Sala de Espera de Pedidos Manuales sin dejarlo en espera en tu app"
+            className="flex-1 flex items-center justify-center gap-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 active:scale-[0.99] disabled:opacity-50 text-white py-3.5 px-6 rounded-xl text-sm font-black transition-all shadow-lg shadow-emerald-950/60 uppercase tracking-wide cursor-pointer"
+            title="Envía el 100% de los pedidos de la Orden de Compra de forma secuencial y verificada a la Sala de Espera de Pedidos Manuales"
           >
             <Send className="w-4 h-4 shrink-0" />
-            <span>{transmitiendo ? 'Transmitiendo a Pedidos Manuales...' : '🚀 Transmitir Directo a Sala de Espera (Pedidos Manuales)'}</span>
+            <span>
+              {transmitiendo && progresoEnvio
+                ? `Enviando pedido ${progresoEnvio.actual} de ${progresoEnvio.total}... (${progresoEnvio.sucursal})`
+                : transmitiendo
+                  ? 'Transmitiendo a Pedidos Manuales...'
+                  : todasTiendasOC.length > 1
+                    ? `🚀 Transmitir Lote Completo OC (${todasTiendasOC.length} Pedidos a Sala de Espera)`
+                    : '🚀 Transmitir Directo a Sala de Espera (Pedidos Manuales)'}
+            </span>
           </button>
+
+          {todasTiendasOC.length > 1 && tiendaSeleccionada !== 'CONSOLIDADO' && (
+            <button
+              type="button"
+              onClick={() => handleTransmitirAOtroPrograma({ soloTiendaActual: true })}
+              disabled={transmitiendo}
+              className="bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-200 py-3 px-4 rounded-xl text-xs font-bold transition-all shrink-0 cursor-pointer"
+              title={`Enviar únicamente la sucursal seleccionada (${tiendaSeleccionada})`}
+            >
+              Enviar solo {tiendaSeleccionada}
+            </button>
+          )}
         </div>
       </div>
 
