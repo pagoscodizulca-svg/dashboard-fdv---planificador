@@ -12,6 +12,9 @@ import {
   extractPositionedTextFromAlkostoPdfBuffer,
   validateAndNormalizeAlkostoOC,
   normalizarUnidadMedidaAlkosto,
+  autocorregirTiendasPorFila,
+  extraerPedidosNormalizadosDeOC,
+  calcularResumenCuadreOC,
   AlkostoParseValidationError
 } from '../../src/services/alkostoOcParser';
 import { resolverProductoPorCodigoODescripcion } from '../../src/services/alkostoService';
@@ -256,6 +259,7 @@ describe('Unit & Regression: alkostoOcParser', () => {
 
   describe('Direct Binary PDF Parsing (Real PDF Files in Workspace/Downloads)', () => {
     const pdfCandidates = [
+      { file: 'ORDEN CODIZULCA 26-10.pdf', oc: '0000055773', subAk: 11321.85, subFc: 4149.02, count: 6 },
       { file: 'ORDEN CODIZULCA ASTURIA 19-10.pdf', oc: '0000055165', subAk: 11032.25, subFc: 3785.25, count: 5 },
       { file: 'ORDEN CODIZULCA 19-10.pdf', oc: '0000055175', subAk: 11429.70, subFc: 1513.63, count: 5 },
       { file: 'ORDEN CODIZULCA 13-10.pdf', oc: '0000054877', subAk: 15605.15, subFc: 2158.48, count: 6 },
@@ -437,6 +441,87 @@ describe('Unit & Regression: alkostoOcParser', () => {
       expect(recovered.items[0].skuCodizulca).toBe('1497');
       expect(recovered.items[0].unid).toBe('CJ');
       expect(recovered.items[0].totalCantidad).toBe(15);
+    });
+
+    it('should autocorrect OCR decimal-gluing (e.g. 200 -> 2.00 in AK10 for 7591210000513 when Total Cantidad is 3.00 and AK04 is 1.00)', () => {
+      const correctedStores = autocorregirTiendasPorFila(
+        { AK04: 1.0, AK10: 200 },
+        3.0
+      );
+      expect(correctedStores.AK04).toBe(1.0);
+      expect(correctedStores.AK10).toBe(2.0);
+    });
+
+    it('should strip PVP suffix even without space before slash and homologate all 6 SKUs of OC #0000055773', () => {
+      expect(limpiarDescripcionAlkosto('MORTADELA DE POLLO DEL CORRAL 1KG /3.78')).toBe('MORTADELA DE POLLO DEL CORRAL 1KG');
+      expect(limpiarDescripcionAlkosto('PAPAS FRITAS CONGELADAS MARQUISE 2,5KG /6.99')).toBe('PAPAS FRITAS CONGELADAS MARQUISE 2,5KG');
+      expect(limpiarDescripcionAlkosto('CREMA DE LECHE PURISIMA 500GR /5.89')).toBe('CREMA DE LECHE PURISIMA 500GR');
+      expect(limpiarDescripcionAlkosto('CREMA DE LECHE PURISIMA 250GR /3.70')).toBe('CREMA DE LECHE PURISIMA 250GR');
+
+      expect(resolverProductoPorCodigoODescripcion('7591289609129')?.sku).toBe('21');
+      expect(resolverProductoPorCodigoODescripcion('7591289400023')?.sku).toBe('047');
+      expect(resolverProductoPorCodigoODescripcion('5412873178161')?.sku).toBe('1360');
+      expect(resolverProductoPorCodigoODescripcion('100281')?.sku).toBe('100281');
+      expect(resolverProductoPorCodigoODescripcion('7591210000513')?.sku).toBe('7591210000513');
+      expect(resolverProductoPorCodigoODescripcion('7591210000544')?.sku).toBe('7591210000544');
+    });
+
+    it('should extract 16 active branch orders on OC #0000055773 with exact math balance and zero contamination after viewing AK01', () => {
+      const fullPath = path.resolve(process.cwd(), '..', 'ORDEN CODIZULCA 26-10.pdf');
+      if (!fs.existsSync(fullPath)) return;
+
+      const buf = fs.readFileSync(fullPath);
+      const text = extractPositionedTextFromAlkostoPdfBuffer(buf, zlib.inflateSync);
+      const parsedOC = parseAlkostoRawText(text!);
+
+      const resumen = calcularResumenCuadreOC(parsedOC);
+      expect(resumen).toBeTruthy();
+      expect(resumen!.numero_oc).toBe('0000055773');
+      expect(resumen!.alkostoCount).toBe(9);
+      expect(resumen!.familiaCount).toBe(7);
+      expect(resumen!.totalSucursalesActivas).toBe(16);
+      expect(resumen!.alkostoMonto).toBeCloseTo(11321.85, 2);
+      expect(resumen!.familiaMonto).toBeCloseTo(4149.02, 2);
+      expect(resumen!.totalCalculado).toBeCloseTo(15470.87, 2);
+      expect(resumen!.cuadreExacto).toBe(true);
+      expect(resumen!.textoResumen).toBe(
+        'OC #0000055773 | 16 Sucursales Activas (9 Alkosto: $11,321.85 | 7 Familia Center: $4,149.02) | Total OC: $15,470.87 ✓ Cuadre Exacto'
+      );
+
+      // Simular que el usuario seleccionó primero la pestaña AK01 (que solo tiene 3 renglones activos: 20x$36 + 10x$22.80 + 45x$10 = $1,398.00) y luego pulsó "Transmitir Lote Completo OC"
+      const filasVistaAK01 = [
+        { renglon: 1, unid: 'CJ', cantSolicitada: 20, cantDespachada: '', codigo: '21', descripcion: 'MORTADELA DE POLLO DEL CORRAL 1KG', precio: 36, subtotal: 720 },
+        { renglon: 2, unid: 'CJ', cantSolicitada: 10, cantDespachada: '', codigo: '1360', descripcion: 'PAPAS FRITAS CONGELADAS MARQUISE 2,5KG', precio: 22.8, subtotal: 228 },
+        { renglon: 3, unid: 'KG', cantSolicitada: 45, cantDespachada: '', codigo: '100281', descripcion: 'QUESO MOZZARELLA CORLASA X KG', precio: 10, subtotal: 450 }
+      ];
+
+      const lote = extraerPedidosNormalizadosDeOC({
+        initialData: parsedOC,
+        filasActuales: filasVistaAK01 as any,
+        tiendaSeleccionada: 'AK01',
+        enviarLoteCompleto: true,
+        idClienteSeleccionado: '7498',
+        clienteNombreSeleccionado: 'Alkosto 1 san Felipe',
+        direccionObservacionFallback: '',
+        numero_oc: '0000055773',
+        vendedor: 'SAIRU VALLES / CUENTAS CLAVE 2',
+        supervisor: 'PEDRO PEREZ',
+        chofer: 'TRANSPORTE CODIZULCA',
+        cantidadCestas: '0',
+        fechaISO: '2026-10-31',
+        nroPedido: 'AUTO'
+      });
+
+      expect(lote.pedidos).toHaveLength(16);
+      const ak01Order = lote.pedidos.find(p => p.sucursalTag === 'AK01');
+      expect(ak01Order).toBeDefined();
+      expect(ak01Order?.renglones).toHaveLength(3);
+      expect(ak01Order?.monto_pedido).toBeCloseTo(1398.00, 2);
+
+      const sumAll16 = Number(
+        lote.pedidos.reduce((acc, p) => acc + (p.monto_pedido || 0), 0).toFixed(2)
+      );
+      expect(sumAll16).toBeCloseTo(15470.87, 2);
     });
   });
 });

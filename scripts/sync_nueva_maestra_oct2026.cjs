@@ -9,7 +9,8 @@ const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || 'eyJhbGciOiJIUzI1N
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { persistSession: false } });
 
 const MAESTRA_XLSX_PATH = 'C:/Users/JAVIER CASTELLANOS/.gemini/antigravity/brain/436de5ef-5c42-4d81-8277-a4a5132cc05d/.user_uploaded/media_1792525962922_e8ff7148.xlsx';
-const GOOGLE_SHEET_URL = 'https://docs.google.com/spreadsheets/d/1PLzYEe9GG1vHb_wjd7HA93U6UQNtyP-uk8sxVfiN4sg/export?format=xlsx';
+const GOOGLE_SHEET_ID = String(process.env.GOOGLE_SHEET_ID || '1PLzYEe9GG1vHb_wjd7HA93U6UQNtyP-uk8sxVfiN4sg').replace(/^['"<]+|['">]+$/g, '').trim();
+const GOOGLE_SHEET_URL = `https://docs.google.com/spreadsheets/d/${GOOGLE_SHEET_ID}/export?format=xlsx&_cb=${Date.now()}`;
 
 // Columnas de resumen de supervisores al final de "Volumen por SKU" que NO son vendedores individuales
 const SUPERVISOR_SUMMARY_COLS = new Set(['ALI PEREZ', 'NELSON FINOL', 'JOHNATAN SOTO']);
@@ -215,7 +216,7 @@ async function main() {
         const vendorName = String(header0[c] || '').replace(/\s+/g, ' ').trim();
         if (!vendorName) continue;
         // Omitir columnas de totales de supervisor al final de la hoja (cols >= 89 o nombres de supervisor)
-        if (c >= 89 || SUPERVISOR_SUMMARY_COLS.has(vendorName.toUpperCase())) continue;
+        if (SUPERVISOR_SUMMARY_COLS.has(vendorName.toUpperCase())) continue;
 
         const metaKg = parseFloat(row[c]) || 0;
         const ejecutadoKg = parseFloat(row[c + 1]) || 0;

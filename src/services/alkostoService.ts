@@ -635,7 +635,7 @@ export const CATALOGO_ALKOSTO: CatalogoAlkostoItem[] = [
   },
   {
     sku: '7591210000513',
-    producto: 'CREMA DE LECHE PURISIMA 6 X 500 GRS',
+    producto: 'CREMA DE LECHE PURISIMA 500GR',
     categoria: 'LACTEOS',
     presentacion: 'Caja (6 und x 500g)',
     kilosPorCaja: 3.0,
@@ -643,6 +643,18 @@ export const CATALOGO_ALKOSTO: CatalogoAlkostoItem[] = [
     codigoBarra: '7591210000513',
     codigosCadena: ['7591210000513'],
     sinonimos: ['CREMA DE LECHE PURISIMA 500GR', 'CREMA DE LECHE PURISIMA 6 X 500 GRS', '7591210000513'],
+    unidadSugerida: 'CJ'
+  },
+  {
+    sku: '7591210000544',
+    producto: 'CREMA DE LECHE PURISIMA 250GR',
+    categoria: 'LACTEOS',
+    presentacion: 'Caja (12 und x 250g)',
+    kilosPorCaja: 3.0,
+    precioSugeridoUSD: 30.60,
+    codigoBarra: '7591210000544',
+    codigosCadena: ['7591210000544'],
+    sinonimos: ['CREMA DE LECHE PURISIMA 250GR', 'CREMA DE LECHE PURISIMA 12 X 250 GRS', '7591210000544'],
     unidadSugerida: 'CJ'
   },
   {
@@ -1045,14 +1057,96 @@ export async function transmitirPedidoAlkosto(order: AlkostoOrder): Promise<{ su
 }
 
 /**
+ * Sanitiza un pedido de sucursal antes de enviarlo:
+ * - Filtra cualquier renglón residual con `cantidad <= 0` o `isNaN(cantidad)`.
+ * - Calcula `monto_pedido` como la suma exacta de `round(cantidad * precio_unitario, 2)` de los renglones activos.
+ */
+export function sanitizarPedidoSucursalAntesDeEnviar(pedido: AlkostoOrder): AlkostoOrder | null {
+  const itemsActivos = (Array.isArray(pedido.items) ? pedido.items : [])
+    .filter(it => {
+      const cant = Number(it.cantidadCajas);
+      return Number.isFinite(cant) && !Number.isNaN(cant) && cant > 0;
+    })
+    .map(it => {
+      const cant = Number(it.cantidadCajas);
+      const precio = Number.isFinite(Number(it.precioUnitarioUSD)) ? Number(it.precioUnitarioUSD) : 0;
+      const sub = Number((cant * precio).toFixed(2));
+      return {
+        ...it,
+        cantidadCajas: cant,
+        precioUnitarioUSD: precio,
+        subtotalUSD: sub
+      };
+    });
+
+  const renglonesBase = Array.isArray(pedido.renglones) && pedido.renglones.length > 0
+    ? pedido.renglones
+    : itemsActivos.map(it => ({
+        codigo: it.sku,
+        descripcion: it.producto,
+        unidad_medida: it.presentacion,
+        cantidad: it.cantidadCajas,
+        precio_unitario: it.precioUnitarioUSD,
+        subtotal: it.subtotalUSD
+      }));
+
+  const renglonesActivos = renglonesBase
+    .filter(r => {
+      const cant = Number(r.cantidad);
+      return Number.isFinite(cant) && !Number.isNaN(cant) && cant > 0;
+    })
+    .map(r => {
+      const cant = Number(r.cantidad);
+      const precio = Number.isFinite(Number(r.precio_unitario)) ? Number(r.precio_unitario) : 0;
+      const sub = Number((cant * precio).toFixed(2));
+      return {
+        ...r,
+        cantidad: cant,
+        precio_unitario: precio,
+        subtotal: sub
+      };
+    });
+
+  if (renglonesActivos.length === 0 && itemsActivos.length === 0) {
+    return null;
+  }
+
+  const montoPedidoExacto = Number(
+    renglonesActivos.reduce((acc, r) => acc + Number((r.cantidad * r.precio_unitario).toFixed(2)), 0).toFixed(2)
+  );
+  const totalBultosExacto = Number(
+    renglonesActivos.reduce((acc, r) => acc + r.cantidad, 0).toFixed(2)
+  );
+
+  return {
+    ...pedido,
+    items: itemsActivos,
+    renglones: renglonesActivos,
+    total_renglones: renglonesActivos.length,
+    totalBultos: totalBultosExacto,
+    totalUSD: montoPedidoExacto,
+    monto_pedido: montoPedidoExacto,
+    strict_payload: pedido.strict_payload
+      ? {
+          ...pedido.strict_payload,
+          renglones: renglonesActivos,
+          total_renglones: renglonesActivos.length,
+          monto_pedido: montoPedidoExacto
+        }
+      : undefined
+  };
+}
+
+/**
  * Envía un único pedido de forma transaccional con reintentos automáticos (hasta 3 intentos)
  * y emite los logs de auditoría requeridos en consola (`[ENVIO_FDV]`).
  */
 export async function enviarPedidoAlkostoTransaccional(
-  pedido: AlkostoOrder,
+  pedidoInput: AlkostoOrder,
   indiceActual: number,
   totalLote: number
 ): Promise<AlkostoOrder> {
+  const pedido = sanitizarPedidoSucursalAntesDeEnviar(pedidoInput) || pedidoInput;
   const maxIntentos = 3;
   let ultimoError: Error | null = null;
 
@@ -1119,7 +1213,7 @@ export async function enviarPedidoAlkostoTransaccional(
 }
 
 /**
- * Envía un lote de N pedidos de forma estrictamente secuencial (`for ... of` con `await`)
+ * Envía un lote de N pedidos activos de forma estrictamente secuencial (`for (const [index, pedido] of pedidosActivos.entries())` con `await`)
  * verificando la integridad de cada pedido (N de N) y reportando progreso en vivo.
  */
 export async function enviarLotePedidosAlkosto(
@@ -1130,18 +1224,23 @@ export async function enviarLotePedidosAlkosto(
   pedidosFallidos: Array<{ pedido: AlkostoOrder; motivo: string }>;
   integridadCompleta: boolean;
 }> {
+  // Filtrar y sanitizar estrictamente cualquier pedido sin renglones con cantidad > 0
+  const pedidosActivos = pedidosPorEnviar
+    .map(p => sanitizarPedidoSucursalAntesDeEnviar(p))
+    .filter((p): p is AlkostoOrder => p !== null && (p.total_renglones ?? p.items.length) > 0 && (p.monto_pedido ?? p.totalUSD) > 0);
+
   const pedidosInsertados: AlkostoOrder[] = [];
   const pedidosFallidos: Array<{ pedido: AlkostoOrder; motivo: string }> = [];
-  const total = pedidosPorEnviar.length;
+  const total = pedidosActivos.length;
 
-  console.log(`[ENVIO_FDV] Iniciando transmisión transaccional de lote: ${total} pedido(s) por enviar...`);
+  console.log(`[ENVIO_FDV] Iniciando transmisión transaccional de lote: ${total} sucursal(es) activa(s) por enviar...`);
 
   // Asignar correlativos consecutivos preliminares sin colisión antes de iniciar el bucle secuencial
   const baseCache = getLocalCache();
   let nextCorrNum = parseInt(calcularSiguienteCorrelativo(baseCache), 10) || 1;
 
-  for (let i = 0; i < total; i++) {
-    const pedido = { ...pedidosPorEnviar[i] };
+  for (const [index, pedidoRaw] of pedidosActivos.entries()) {
+    const pedido = { ...pedidoRaw };
     if (!pedido.correlativo || pedido.correlativo === 'AUTO' || pedido.numeroPedido === 'AUTO' || pedido.numeroPedido === 'PENDIENTE') {
       const assignedCorr = String(nextCorrNum).padStart(4, '0');
       pedido.correlativo = assignedCorr;
@@ -1150,11 +1249,11 @@ export async function enviarLotePedidosAlkosto(
     }
 
     if (onProgress) {
-      onProgress(i + 1, total, pedido);
+      onProgress(index + 1, total, pedido);
     }
 
     try {
-      const confirmado = await enviarPedidoAlkostoTransaccional(pedido, i + 1, total);
+      const confirmado = await enviarPedidoAlkostoTransaccional(pedido, index + 1, total);
       pedidosInsertados.push(confirmado);
       // Ajustar nextCorrNum si el servidor asignó un correlativo mayor
       const serverCorrNum = parseInt(String(confirmado.correlativo || ''), 10);
@@ -1164,13 +1263,13 @@ export async function enviarLotePedidosAlkosto(
     } catch (err: any) {
       const motivo = err?.message || 'Error de red o validación en el servidor';
       console.error(
-        `[ENVIO_FDV] ERROR en Pedido ${i + 1}/${total} (${pedido.sucursal_cliente || pedido.sucursalNombre}): ${motivo}`
+        `[ENVIO_FDV] ERROR en Pedido ${index + 1}/${total} (${pedido.sucursal_cliente || pedido.sucursalNombre}): ${motivo}`
       );
       pedidosFallidos.push({ pedido, motivo });
     }
   }
 
-  const integridadCompleta = pedidosInsertados.length === total && pedidosFallidos.length === 0;
+  const integridadCompleta = total > 0 && pedidosInsertados.length === total && pedidosFallidos.length === 0;
   console.log(
     `[ENVIO_FDV] Resultado de lote: ${pedidosInsertados.length}/${total} insertados exitosamente | Fallidos: ${pedidosFallidos.length} | Integridad 100%: ${integridadCompleta}`
   );

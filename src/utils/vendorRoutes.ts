@@ -233,7 +233,7 @@ export const VENDOR_PROFILES: Record<string, VendorProfile> = {
     canonicalUsername: 'MARIANGEL GONZALEZ',
     displayName: 'Mariangel González',
     routes: [
-      { id: 'MARIANGEL GONZALEZ', label: 'Ruta Mariangel González', aliases: ['MARIANGEL GONZALEZ', 'MARIANGEL GONZÁLEZ'] }
+      { id: 'MARIANGEL GONZALEZ', label: 'Ruta Mariangel González', aliases: ['MARIANGEL GONZALEZ', 'MARIANGEL GONZÁLEZ', 'MARIANGEL'] }
     ]
   },
   'VICTOR CAMPOS': {
@@ -302,6 +302,8 @@ VENDOR_PROFILES['JOHNATAN'] = mikelProfile;
 VENDOR_PROFILES['JONATHAN'] = mikelProfile;
 VENDOR_PROFILES['JHONATAN'] = mikelProfile;
 VENDOR_PROFILES['JAIDER MEDINA'] = VENDOR_PROFILES['JAIDER MEDINA - FOOD SERVICE NORTE'];
+VENDOR_PROFILES['FOOD SERVICE NORTE'] = VENDOR_PROFILES['JAIDER MEDINA - FOOD SERVICE NORTE'];
+VENDOR_PROFILES['MARIANGEL'] = VENDOR_PROFILES['MARIANGEL GONZALEZ'];
 
 // Perfiles de Supervisores (Alí Pérez ya NO es vendedor, sino únicamente Supervisor de los 3 vendedores de su antigua ruta)
 export const SUPERVISOR_PROFILES: Record<string, SupervisorProfile> = {

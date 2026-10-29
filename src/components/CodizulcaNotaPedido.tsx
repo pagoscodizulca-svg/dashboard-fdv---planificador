@@ -17,10 +17,12 @@ import {
 } from '../services/alkostoService';
 import {
   normalizarUnidadMedidaAlkosto,
+  limpiarDescripcionAlkosto,
   extraerPedidosNormalizadosDeOC,
   validarNumeroOC,
   construirObservacionFormateada,
-  normalizarCadenaEstricta
+  normalizarCadenaEstricta,
+  calcularResumenCuadreOC
 } from '../services/alkostoOcParser';
 
 interface CodizulcaNotaPedidoProps {
@@ -92,7 +94,8 @@ function extractItemsList(data: any): any[] {
   return [];
 }
 
-// Construye las filas de la tabla poblándolas exactamente a partir de la data de la Orden de Compra
+// Construye las filas de la tabla poblándolas exactamente a partir de la data de la Orden de Compra.
+// FASE 2: Exclusión estricta de ceros (cantidad > 0) y Homologación de Código EAN a SKU Interno sin truncar.
 function buildFilasFromData(
   data: ParsedOrdenCompraAlkosto | null | undefined,
   tienda: string = 'CONSOLIDADO',
@@ -100,110 +103,12 @@ function buildFilasFromData(
 ): CodizulcaNotaPedidoItem[] {
   const itemsList = extractItemsList(data);
   const totalItems = itemsList.length;
-  const numRows = Math.max(15, totalItems);
   const result: CodizulcaNotaPedidoItem[] = [];
   const chainPrefix = cadena === 'FAMILIA_CENTER' ? 'FC' : 'AK';
 
-  for (let i = 0; i < numRows; i++) {
-    if (i < totalItems) {
-      const it = itemsList[i];
-      let cant = parseNumeroSeguro(it.totalCantidad) || 
-                 parseNumeroSeguro((it as any).total_cantidad) || 
-                 parseNumeroSeguro((it as any).cantidad) || 
-                 parseNumeroSeguro((it as any).cant) || 
-                 parseNumeroSeguro((it as any).cantidadSolicitada) || 
-                 parseNumeroSeguro((it as any).total) || 
-                 parseNumeroSeguro((it as any).cajas) || 
-                 parseNumeroSeguro((it as any).bultos) || 0;
-
-      // Si se selecciona una tienda individual (ej. AK01, FC01...), usar la cantidad de esa tienda
-      if (tienda !== 'CONSOLIDADO') {
-        if (it.tiendas && it.tiendas[tienda] !== undefined) {
-          cant = parseNumeroSeguro(it.tiendas[tienda]);
-        } else if ((it as any)[tienda] !== undefined) {
-          cant = parseNumeroSeguro((it as any)[tienda]);
-        } else {
-          cant = 0;
-        }
-      } else if (it.tiendas && typeof it.tiendas === 'object' && Object.keys(it.tiendas).length > 0) {
-        // En CONSOLIDADO: sumar estrictamente las tiendas de la cadena activa (AK para Alkosto, FC para Familia Center)
-        const chainEntries = Object.entries(it.tiendas).filter(([tk]) => tk.toUpperCase().startsWith(chainPrefix));
-        const hasOtherChainEntries = Object.keys(it.tiendas).some(tk => !tk.toUpperCase().startsWith(chainPrefix));
-        if (chainEntries.length > 0) {
-          cant = chainEntries.reduce((sum: number, [, v]: [string, any]) => sum + parseNumeroSeguro(v), 0);
-        } else if (hasOtherChainEntries) {
-          cant = 0;
-        }
-      }
-
-      const rawCode = String(
-        it.codigo || 
-        it.skuCodizulca || 
-        (it as any).sku || 
-        (it as any).codigoArticulo || 
-        (it as any).codigo_articulo || 
-        (it as any).codigoBarra || 
-        (it as any).ean || 
-        ''
-      ).trim();
-      const rawDesc = String(
-        it.descripcion || 
-        (it as any).descripcion_producto || 
-        (it as any).producto || 
-        (it as any).nombre || 
-        (it as any).articulo || 
-        (it as any).item || 
-        (it as any).detalle || 
-        ''
-      )
-        .replace(/\s+\/\s*\d+(?:[.,]\d+)?\s*$/, '')
-        .trim();
-      const match = resolverProductoPorCodigoODescripcion(rawCode, rawDesc);
-
-      const finalSku = (match ? match.sku : '') || (it.skuCodizulca && it.skuCodizulca.length <= 6 ? it.skuCodizulca : '') || (rawCode.length <= 6 ? rawCode : '') || rawCode;
-      const finalBarcode = it.codigoBarra || (it as any).barcode || match?.codigoBarra || '';
-      // Preservar la descripción exacta leída de la orden; si no viene, usar la del catálogo
-      const finalDesc = rawDesc || (match ? match.producto : '');
-      const finalUnid = normalizarUnidadMedidaAlkosto(
-        it.unid || (it as any).unidad,
-        finalDesc,
-        parseNumeroSeguro(it.emp),
-        match?.unidadSugerida
-      );
-      
-      let finalPrecio = parseNumeroSeguro(it.costoUnitario) || 
-                        parseNumeroSeguro((it as any).costo_unitario) || 
-                        parseNumeroSeguro((it as any).costoBruto) || 
-                        parseNumeroSeguro((it as any).precio) || 
-                        parseNumeroSeguro((it as any).precioUnitario) || 
-                        (match ? match.precioSugeridoUSD : 0);
-      let sub = parseNumeroSeguro((it as any).totalRenglon) || 
-                parseNumeroSeguro((it as any).total_renglon) || 
-                parseNumeroSeguro((it as any).subtotal) || 
-                parseNumeroSeguro((it as any).total);
-      if (!finalPrecio && sub > 0 && cant > 0) {
-        finalPrecio = Number((sub / cant).toFixed(2));
-      }
-      if (finalPrecio > 0) {
-        sub = Number((cant * finalPrecio).toFixed(2));
-      }
-
-      const rawDespachada = (it as any).cantDespachada ?? (it as any).cantidadDespachada ?? '';
-
-      result.push({
-        renglon: i + 1,
-        unid: finalUnid,
-        cantSolicitada: cant,
-        cantDespachada: rawDespachada !== '' && rawDespachada !== null && rawDespachada !== undefined ? String(rawDespachada) : '',
-        codigo: finalSku,
-        skuCodizulca: finalSku,
-        codigoBarra: finalBarcode,
-        descripcion: finalDesc,
-        precio: finalPrecio,
-        subtotal: sub,
-        tiendas: it.tiendas
-      });
-    } else {
+  // Si no hay OC cargada (modo formulario manual en blanco), generar las 15 filas vacías del formato físico
+  if (totalItems === 0) {
+    for (let i = 0; i < 15; i++) {
       result.push({
         renglon: i + 1,
         unid: '',
@@ -215,6 +120,118 @@ function buildFilasFromData(
         subtotal: 0
       });
     }
+    return result;
+  }
+
+  for (let i = 0; i < totalItems; i++) {
+    const it = itemsList[i];
+    let cant = parseNumeroSeguro(it.totalCantidad) || 
+               parseNumeroSeguro((it as any).total_cantidad) || 
+               parseNumeroSeguro((it as any).cantidad) || 
+               parseNumeroSeguro((it as any).cant) || 
+               parseNumeroSeguro((it as any).cantidadSolicitada) || 
+               parseNumeroSeguro((it as any).total) || 
+               parseNumeroSeguro((it as any).cajas) || 
+               parseNumeroSeguro((it as any).bultos) || 0;
+
+    // Si se selecciona una tienda individual (ej. AK01, FC01...), usar la cantidad de esa tienda
+    if (tienda !== 'CONSOLIDADO') {
+      if (it.tiendas && it.tiendas[tienda] !== undefined) {
+        cant = parseNumeroSeguro(it.tiendas[tienda]);
+      } else if ((it as any)[tienda] !== undefined) {
+        cant = parseNumeroSeguro((it as any)[tienda]);
+      } else {
+        cant = 0;
+      }
+    } else if (it.tiendas && typeof it.tiendas === 'object' && Object.keys(it.tiendas).length > 0) {
+      // En CONSOLIDADO: sumar estrictamente las tiendas activas de la cadena seleccionada (AK para Alkosto, FC para Familia Center)
+      const chainEntries = Object.entries(it.tiendas).filter(
+        ([tk]) => tk.toUpperCase().startsWith(chainPrefix) && tk.toUpperCase() !== 'AKOP' && tk.toUpperCase() !== 'FCOP' && tk.toUpperCase() !== 'CI'
+      );
+      const hasOtherChainEntries = Object.keys(it.tiendas).some(tk => !tk.toUpperCase().startsWith(chainPrefix));
+      if (chainEntries.length > 0) {
+        cant = chainEntries.reduce((sum: number, [, v]: [string, any]) => sum + parseNumeroSeguro(v), 0);
+      } else if (hasOtherChainEntries) {
+        cant = 0;
+      }
+    }
+
+    // FASE 2.1: Exclusión estricta de ceros (cantidad > 0). Nunca renderizar ni enviar filas con CANT vacía o en 0.
+    if (!Number.isFinite(cant) || Number.isNaN(cant) || cant <= 0) {
+      continue;
+    }
+
+    const rawCode = String(
+      it.codigo || 
+      it.skuCodizulca || 
+      (it as any).sku || 
+      (it as any).codigoArticulo || 
+      (it as any).codigo_articulo || 
+      (it as any).codigoBarra || 
+      (it as any).ean || 
+      ''
+    ).trim();
+    const rawDesc = limpiarDescripcionAlkosto(
+      String(
+        it.descripcion || 
+        (it as any).descripcion_producto || 
+        (it as any).producto || 
+        (it as any).nombre || 
+        (it as any).articulo || 
+        (it as any).item || 
+        (it as any).detalle || 
+        ''
+      )
+    );
+    const match = resolverProductoPorCodigoODescripcion(rawCode, rawDesc);
+
+    // FASE 2.2: Homologar a SKU interno o conservar el EAN completo sin truncar en UI
+    const finalSku =
+      (match ? match.sku : '') ||
+      (it.skuCodizulca ? String(it.skuCodizulca).trim() : '') ||
+      rawCode;
+    const finalBarcode = it.codigoBarra || (it as any).barcode || match?.codigoBarra || '';
+    // Usar la descripción limpia homologada del catálogo o la limpia de la OC (sin sufijo /PVP)
+    const finalDesc = (match ? match.producto : '') || rawDesc;
+    const finalUnid = normalizarUnidadMedidaAlkosto(
+      it.unid || (it as any).unidad,
+      finalDesc,
+      parseNumeroSeguro(it.emp),
+      match?.unidadSugerida
+    );
+    
+    let finalPrecio = parseNumeroSeguro(it.costoUnitario) || 
+                      parseNumeroSeguro((it as any).costo_unitario) || 
+                      parseNumeroSeguro((it as any).costoBruto) || 
+                      parseNumeroSeguro((it as any).precio) || 
+                      parseNumeroSeguro((it as any).precioUnitario) || 
+                      (match ? match.precioSugeridoUSD : 0);
+    let sub = parseNumeroSeguro((it as any).totalRenglon) || 
+              parseNumeroSeguro((it as any).total_renglon) || 
+              parseNumeroSeguro((it as any).subtotal) || 
+              parseNumeroSeguro((it as any).total);
+    if (!finalPrecio && sub > 0 && cant > 0) {
+      finalPrecio = Number((sub / cant).toFixed(2));
+    }
+    if (finalPrecio > 0) {
+      sub = Number((cant * finalPrecio).toFixed(2));
+    }
+
+    const rawDespachada = (it as any).cantDespachada ?? (it as any).cantidadDespachada ?? '';
+
+    result.push({
+      renglon: result.length + 1,
+      unid: finalUnid,
+      cantSolicitada: Number(cant.toFixed(2)),
+      cantDespachada: rawDespachada !== '' && rawDespachada !== null && rawDespachada !== undefined ? String(rawDespachada) : '',
+      codigo: finalSku,
+      skuCodizulca: finalSku,
+      codigoBarra: finalBarcode,
+      descripcion: finalDesc,
+      precio: Number(finalPrecio.toFixed(4)),
+      subtotal: Number(sub.toFixed(2)),
+      tiendas: it.tiendas
+    });
   }
 
   return result;
@@ -294,7 +311,7 @@ export function CodizulcaNotaPedido({
   const [alertaValidacionOC, setAlertaValidacionOC] = useState<string | null>(null);
   const [guardando, setGuardando] = useState(false);
   const [transmitiendo, setTransmitiendo] = useState(false);
-  const [progresoEnvio, setProgresoEnvio] = useState<{ actual: number; total: number; sucursal: string } | null>(null);
+  const [progresoEnvio, setProgresoEnvio] = useState<{ actual: number; total: number; tag: string; sucursal: string; monto: number } | null>(null);
   const [pedidosFallidosLote, setPedidosFallidosLote] = useState<Array<{ pedido: AlkostoOrder; motivo: string }>>([]);
   const [todasTiendasOC, setTodasTiendasOC] = useState<string[]>([]);
 
@@ -353,13 +370,13 @@ export function CodizulcaNotaPedido({
 
       const rawItems = extractItemsList(initialData);
 
-      // Extraer el 100% de las tiendas con cantidad > 0 en todas las páginas/cadenas del documento (AK y FC)
+      // Extraer el 100% de las tiendas con cantidad > 0 en todas las páginas/cadenas del documento (AK y FC), excluyendo AKOP, FCOP y CI
       const allTagsWithQty = new Set<string>();
       rawItems.forEach((it: any) => {
         if (it.tiendas && typeof it.tiendas === 'object') {
           Object.entries(it.tiendas).forEach(([tk, val]) => {
             const uTag = tk.trim().toUpperCase();
-            if (uTag !== 'CI' && parseNumeroSeguro(val) > 0) {
+            if (uTag !== 'CI' && uTag !== 'AKOP' && uTag !== 'FCOP' && parseNumeroSeguro(val) > 0) {
               allTagsWithQty.add(uTag);
             }
           });
@@ -368,9 +385,7 @@ export function CodizulcaNotaPedido({
       const tagsList = Array.from(allTagsWithQty);
       const orderedAllTags = [
         ...CADENAS_ABREVIATURAS.ALKOSTO,
-        'AKOP',
-        ...CADENAS_ABREVIATURAS.FAMILIA_CENTER,
-        'FCOP'
+        ...CADENAS_ABREVIATURAS.FAMILIA_CENTER
       ].filter(t => allTagsWithQty.has(t));
       setTodasTiendasOC(orderedAllTags);
 
@@ -704,7 +719,9 @@ export function CodizulcaNotaPedido({
       setProgresoEnvio({
         actual: 1,
         total: pedidosPorEnviar.length,
-        sucursal: pedidosPorEnviar[0].sucursal_cliente || pedidosPorEnviar[0].sucursalNombre
+        tag: pedidosPorEnviar[0].sucursalTag || pedidosPorEnviar[0].sucursalCodigo || '',
+        sucursal: pedidosPorEnviar[0].sucursal_cliente || pedidosPorEnviar[0].sucursalNombre,
+        monto: Number(pedidosPorEnviar[0].monto_pedido ?? pedidosPorEnviar[0].totalNeto ?? 0)
       });
 
       // 2. Envío secuencial estricto con await por cada pedido y verificación de integridad (N de N)
@@ -714,7 +731,9 @@ export function CodizulcaNotaPedido({
           setProgresoEnvio({
             actual,
             total,
-            sucursal: pedidoActual.sucursal_cliente || pedidoActual.sucursalNombre
+            tag: pedidoActual.sucursalTag || pedidoActual.sucursalCodigo || '',
+            sucursal: pedidoActual.sucursal_cliente || pedidoActual.sucursalNombre,
+            monto: Number(pedidoActual.monto_pedido ?? pedidoActual.totalNeto ?? 0)
           });
         }
       );
@@ -762,6 +781,9 @@ export function CodizulcaNotaPedido({
       setProgresoEnvio(null);
     }
   };
+
+  // FASE 4: Validación Pre-Envío en Interfaz (cuadre matemático exacto del PDF antes de transmitir)
+  const resumenCuadreOC = initialData ? calcularResumenCuadreOC(initialData, ordenCompraRef) : null;
 
   return (
     <div className="space-y-4">
@@ -935,6 +957,19 @@ export function CodizulcaNotaPedido({
           </div>
         )}
 
+        {/* FASE 4: INDICADOR DE VALIDACIÓN PRE-ENVÍO Y CUADRE MATEMÁTICO DEL PDF */}
+        {resumenCuadreOC && resumenCuadreOC.totalSucursalesActivas > 0 && (
+          <div
+            className={`px-3.5 py-2.5 rounded-xl border text-xs font-mono font-bold flex items-center justify-between gap-2 ${
+              resumenCuadreOC.cuadreExacto
+                ? 'bg-emerald-950/70 border-emerald-700/80 text-emerald-300'
+                : 'bg-amber-950/70 border-amber-700/80 text-amber-300'
+            }`}
+          >
+            <span>{resumenCuadreOC.textoResumen}</span>
+          </div>
+        )}
+
         {/* FILA 3: BOTÓN DE TRANSMISIÓN DIRECTA A SALA DE ESPERA DE PEDIDOS MANUALES */}
         <div className="w-full pt-1 flex flex-col sm:flex-row gap-2">
           <button
@@ -947,7 +982,7 @@ export function CodizulcaNotaPedido({
             <Send className="w-4 h-4 shrink-0" />
             <span>
               {transmitiendo && progresoEnvio
-                ? `Enviando pedido ${progresoEnvio.actual} de ${progresoEnvio.total}... (${progresoEnvio.sucursal})`
+                ? `Transmitiendo sucursal ${progresoEnvio.actual} de ${progresoEnvio.total} (${progresoEnvio.tag || progresoEnvio.sucursal} - $${progresoEnvio.monto.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})...`
                 : transmitiendo
                   ? 'Transmitiendo a Pedidos Manuales...'
                   : todasTiendasOC.length > 1
@@ -1093,7 +1128,7 @@ export function CodizulcaNotaPedido({
                     CANT. SOLICITADA
                   </th>
                   <th className="p-1 text-center w-28">CANTIDAD DESPACHADA</th>
-                  <th className="p-1 text-center w-24">SKU</th>
+                  <th className="p-1 text-center w-36">SKU</th>
                   <th className="p-1 text-center">DESCRIPCION DEL PRODUCTO</th>
                   <th className="p-1 text-center w-24">PRECIO</th>
                   <th className="p-1 text-center w-28">SUB TOTAL</th>

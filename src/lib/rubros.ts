@@ -1,9 +1,9 @@
 /**
  * Clasificación de artículos en los 5 rubros clave del mes.
  *
- * Replica EXACTAMENTE la regla que ya usa `syncWorkbookToSupabase` en server.ts
- * (hoja "Volumen por SKU") para que el historial sea comparable con el mes en curso.
- * Si el negocio cambia la definición de un rubro, se corrige aquí y se vuelve a cargar el historial.
+ * Replica EXACTAMENTE la regla unificada entre el motor de sincronización
+ * de Google Sheets (hoja "Volumen por SKU") y el historial de ventas,
+ * garantizando 100% de paridad entre servidor y cliente.
  */
 
 export type RubroCodigo =
@@ -49,11 +49,25 @@ export const RUBRO_LABEL: Record<RubroCodigo, string> = {
   OTROS: 'Otros'
 };
 
-const SKUS_MORTADELA = new Set(['1464', '1462', '1512', '1521', '1561', '1522', '1563', '1562', '1564', '1519', '1496']);
-const SKUS_POLLO = new Set(['630', '870', '393']);
+export const RUBRO_SERVER_CATEGORY: Record<RubroCodigo, string> = {
+  ACEITE: 'ACEITE',
+  AZUCAR: 'AZÚCAR',
+  POLLO: 'POLLO',
+  ESTANDAR_ASTURIAS: 'ESTANDAR Y SUPERIOR ASTURIAS',
+  MORTADELA_SALPICAO: 'MORTADELA SALPICAO Y ASTURIAS',
+  OTROS: 'OTROS'
+};
+
+const SKUS_MORTADELA = new Set([
+  '1464', '1462', '1512', '1521', '1561', '1522', '1563', '1562', '1564', '1519', '1496', '1511', '1599'
+]);
+const SKUS_POLLO = new Set([
+  '630', '629', '870', '393', 'POLLO', 'FILET', 'MUSLO', 'ALAS'
+]);
 
 export function clasificarRubro(sku: string, nombre: string): RubroCodigo {
   const s = String(sku || '').trim();
+  const sU = s.toUpperCase();
   const n = String(nombre || '').toUpperCase();
 
   if (s === '1461' || s === '1463' || n.includes('ESTANDAR ASTURIAS') || n.includes('SUPERIOR ASTURIAS')) {
@@ -62,11 +76,13 @@ export function clasificarRubro(sku: string, nombre: string): RubroCodigo {
   if (n.includes('MORTADELA') || n.includes('MORT.') || n.includes('SALPICAO') || SKUS_MORTADELA.has(s)) {
     return 'MORTADELA_SALPICAO';
   }
-  if (n.includes('ACEITE')) return 'ACEITE';
-  if (n.includes('AZUCAR') || n.includes('AZÚCAR')) return 'AZUCAR';
+  if (sU === 'ACEITE' || n.includes('ACEITE')) return 'ACEITE';
+  if (sU === 'AZUCAR' || sU === 'AZÚCAR' || n.includes('AZUCAR') || n.includes('AZÚCAR')) return 'AZUCAR';
   if (
     SKUS_POLLO.has(s) ||
+    SKUS_POLLO.has(sU) ||
     n.includes('POLLO ENTERO') ||
+    n.includes('POLLO TODAS') ||
     n.includes('FILET') ||
     n.includes('MUSLO') ||
     n.includes('ALAS DESPRESADAS') ||
@@ -76,4 +92,8 @@ export function clasificarRubro(sku: string, nombre: string): RubroCodigo {
     return 'POLLO';
   }
   return 'OTROS';
+}
+
+export function clasificarRubroServerLabel(sku: string, nombre: string): string {
+  return RUBRO_SERVER_CATEGORY[clasificarRubro(sku, nombre)];
 }

@@ -1,6 +1,15 @@
 import React, { useEffect, useState, useMemo, useCallback, Suspense, lazy } from 'react';
 import { Role, VolumenData, ActivacionData } from './types';
-import { fetchVolumenData, fetchActivacionData, fetchMetasActivacion, triggerSheetsSync, clearSheetsCache } from './services/googleSheetsService';
+import {
+  fetchVolumenData,
+  fetchActivacionData,
+  fetchMetasActivacion,
+  triggerSheetsSync,
+  clearSheetsCache,
+  getCachedSheetsSnapshot,
+  getLastSyncMetadata,
+  SheetsSyncMeta
+} from './services/googleSheetsService';
 import { Lock, User as UserIcon, AlertCircle, ShieldCheck } from 'lucide-react';
 import { Target, Package, Users, UserCircle, ScanText, ChevronDown, LogOut, Activity, Route, Sparkles, ShoppingCart } from 'lucide-react';
 import { supabase, hasValidSupabaseConfig } from './lib/supabase';
@@ -89,6 +98,9 @@ export default function App() {
   const [metasActivacion, setMetasActivacion] = useState<any[]>([]);
   const [degustacionesList, setDegustacionesList] = useState<Degustacion[]>([]);
   const [loading, setLoading] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [lastSyncAt, setLastSyncAt] = useState<string | null>(() => getLastSyncMetadata().lastSyncAt);
+  const [syncStatusHint, setSyncStatusHint] = useState<string>('');
   const [session, setSession] = useState<any>(null);
   const [authUsuario, setAuthUsuario] = useState('');
   const [authPassword, setAuthPassword] = useState('');
@@ -226,18 +238,47 @@ export default function App() {
     }
   }, [userRole, loggedInVendor, currentVendorProfile, currentSupervisorProfile, activeVendedorId]);
 
+  useEffect(() => {
+    const onSyncMeta = (event: Event) => {
+      const custom = event as CustomEvent<SheetsSyncMeta>;
+      if (custom?.detail?.lastSyncAt) {
+        setLastSyncAt(custom.detail.lastSyncAt);
+      }
+    };
+    window.addEventListener('fdv-sheets-sync-meta', onSyncMeta);
+    return () => window.removeEventListener('fdv-sheets-sync-meta', onSyncMeta);
+  }, []);
+
   const loadData = useCallback(async (force = false, showLoader = false) => {
     if (!localStorage.getItem('dashboard_fdv_token')) {
       setLoading(false);
+      setIsSyncing(false);
       return;
     }
-    if (showLoader) setLoading(true);
+
+    const targetVendor = userRole === 'ADMIN'
+      ? undefined
+      : userRole === 'SUPERVISOR'
+      ? `SUPERVISOR:${loggedInVendor}`
+      : (loggedInVendor || undefined);
+
+    // Estrategia Stale-While-Revalidate (SWR):
+    // 1. Pintar al instante desde caché local (0 ms) para que el vendedor trabaje sin espera
+    const swrSnapshot = getCachedSheetsSnapshot(targetVendor);
+    if (swrSnapshot.hasCache) {
+      setVolumenData((prev) => (prev.length === 0 ? swrSnapshot.volumen : prev));
+      setActivacionData((prev) => (prev.length === 0 ? swrSnapshot.activacion : prev));
+      setMetasActivacion((prev) => (prev.length === 0 ? swrSnapshot.metas : prev));
+      if (swrSnapshot.lastSyncAt) {
+        setLastSyncAt((prev) => prev || swrSnapshot.lastSyncAt);
+      }
+    } else if (showLoader) {
+      setLoading(true);
+    }
+
+    // 2. Revalidar en segundo plano contra Google Sheets / Servidor y refrescar vista apenas lleguen cambios
+    setIsSyncing(true);
     try {
-      const targetVendor = userRole === 'ADMIN'
-        ? undefined
-        : userRole === 'SUPERVISOR'
-        ? `SUPERVISOR:${loggedInVendor}`
-        : (loggedInVendor || undefined);
       const [vol, act, metas] = await Promise.all([
         fetchVolumenData(force, targetVendor),
         fetchActivacionData(force, targetVendor),
@@ -246,10 +287,13 @@ export default function App() {
       setVolumenData(vol);
       setActivacionData(act);
       setMetasActivacion(metas);
+      const latestMeta = getLastSyncMetadata();
+      setLastSyncAt(latestMeta.lastSyncAt || new Date().toISOString());
     } catch (err) {
       console.error("Error al sincronizar datos automáticamente", err);
     } finally {
       setLoading(false);
+      setIsSyncing(false);
     }
   }, [userRole, loggedInVendor]);
 
@@ -263,19 +307,32 @@ export default function App() {
     }
   }, [loading]);
 
-  useEffect(() => {
-    (window as any).refreshData = async () => {
-      setLoading(true);
-      try {
-        if (userRole === 'ADMIN') {
-          await triggerSheetsSync();
-        }
-      } catch (e) {
-        console.warn("Manual sheets sync error:", e);
+  const handleManualSync = useCallback(async () => {
+    if (isSyncing) return;
+    setIsSyncing(true);
+    setSyncStatusHint('Consultando Google Sheets...');
+    try {
+      const syncRes = await triggerSheetsSync((attempt, maxAttempts) => {
+        setSyncStatusHint(`Señal móvil inestable, reintentando (${attempt}/${maxAttempts})...`);
+      });
+      if (syncRes?.timestamp) {
+        setLastSyncAt(syncRes.timestamp);
       }
-      await loadData(true, true);
-    };
-  }, [userRole, loadData]);
+      await loadData(true, false);
+      setSyncStatusHint('');
+    } catch (e) {
+      console.warn("Manual sheets sync error:", e);
+      setSyncStatusHint('Sin señal estable: mostrando respaldo local');
+      await loadData(false, false);
+      setTimeout(() => setSyncStatusHint(''), 5000);
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [isSyncing, loadData]);
+
+  useEffect(() => {
+    (window as any).refreshData = handleManualSync;
+  }, [handleManualSync]);
 
   // Cargar datos al estar autenticado y mantener sincronizado cada 60s
   useEffect(() => {
@@ -404,7 +461,7 @@ export default function App() {
 
   const handleLogout = () => {
     clearAuthSession();
-    clearSheetsCache();
+    clearSheetsCache(true);
     setIsLoggedIn(false);
     setAuthUsuario('');
     setAuthPassword('');
@@ -415,6 +472,8 @@ export default function App() {
     setVolumenData([]);
     setActivacionData([]);
     setMetasActivacion([]);
+    setLastSyncAt(null);
+    setSyncStatusHint('');
   };
 
   const handleRouteChange = (newRouteId: string) => {
@@ -931,7 +990,14 @@ export default function App() {
 
       <main className="max-w-7xl mx-auto space-y-6">
         <Suspense fallback={<div className="h-20 bg-neutral-900/40 border border-neutral-800/80 rounded-2xl animate-pulse" />}>
-          {activeTab !== 'COBROS_OCR' && <RecorridoMes onSync={() => (window as any).refreshData()} loading={loading} />}
+          {activeTab !== 'COBROS_OCR' && (
+            <RecorridoMes
+              onSync={handleManualSync}
+              loading={loading || isSyncing}
+              lastSyncAt={lastSyncAt}
+              syncStatusHint={syncStatusHint}
+            />
+          )}
         </Suspense>
 
         <Suspense fallback={

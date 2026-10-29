@@ -150,9 +150,93 @@ export function parseNumeroEstricto(val: unknown, defaultVal = 0): number {
 export function limpiarDescripcionAlkosto(desc: string): string {
   if (!desc) return '';
   return String(desc)
-    .replace(/\s+\/\s*\d+(?:[.,]\d+)?\s*$/, '')
+    .replace(/\s*\/\s*\d+(?:[.,]\d+)?\s*$/, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/**
+ * Regla de Autocorrector Matemático por Fila:
+ * Si el OCR pega decimales en una celda de tienda (ej. lee "200" en lugar de "2.00" en AK10
+ * para el código 7591210000513 cuando Total Cantidad de la fila es 3.00 y AK04 tiene 1.00),
+ * corrige automáticamente el valor verificando que la suma de las tiendas cuadre con `totalCantidad`.
+ */
+export function autocorregirTiendasPorFila(
+  tiendas: Record<string, number>,
+  totalCantidad: number
+): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const [k, v] of Object.entries(tiendas || {})) {
+    const num = parseNumeroEstricto(v, 0);
+    if (num > 0 && k.toUpperCase() !== 'CI' && k.toUpperCase() !== 'AKOP' && k.toUpperCase() !== 'FCOP') {
+      result[k.toUpperCase()] = num;
+    } else if (num > 0 && (k.toUpperCase() === 'AKOP' || k.toUpperCase() === 'FCOP')) {
+      result[k.toUpperCase()] = num;
+    }
+  }
+
+  if (!totalCantidad || totalCantidad <= 0) return result;
+
+  const entries = Object.entries(result);
+  if (entries.length === 0) return result;
+
+  const currentSum = entries.reduce((acc, [, v]) => acc + v, 0);
+  if (Math.abs(currentSum - totalCantidad) <= 0.05) {
+    return result;
+  }
+
+  // Solo autocorregir cuando la suma excede totalCantidad por un factor decimal pegado (100x o 10x)
+  if (currentSum > totalCantidad) {
+    // Caso 1: Una sola celda tiene el punto decimal pegado (ej. 200 -> 2.00 o 20 -> 2.00)
+    for (const [tag, val] of entries) {
+      for (const divisor of [100, 10]) {
+        if (val >= divisor) {
+          const candidateVal = Number((val / divisor).toFixed(2));
+          const candidateSum = currentSum - val + candidateVal;
+          if (Math.abs(candidateSum - totalCantidad) <= 0.05) {
+            result[tag] = candidateVal;
+            return result;
+          }
+        }
+      }
+    }
+
+    // Caso 2: Todas las celdas >= 100 (o >= 10) de la fila perdieron los 2 decimales (.00)
+    for (const divisor of [100, 10]) {
+      const scaledEntries = entries.map(([tag, val]) => [
+        tag,
+        val >= divisor && val % (divisor / 10) === 0 ? Number((val / divisor).toFixed(2)) : val
+      ] as const);
+      const scaledSum = scaledEntries.reduce((acc, [, v]) => acc + v, 0);
+      if (Math.abs(scaledSum - totalCantidad) <= 0.05) {
+        const corrected: Record<string, number> = {};
+        scaledEntries.forEach(([tag, v]) => {
+          if (v > 0) corrected[tag] = v;
+        });
+        return corrected;
+      }
+    }
+
+    // Caso 3: Dos celdas con decimales pegados (búsqueda combinatoria sobre celdas con val > totalCantidad)
+    const suspectTags = entries.filter(([, val]) => val > totalCantidad).map(([tag]) => tag);
+    if (suspectTags.length >= 2 && suspectTags.length <= 6) {
+      const trial = { ...result };
+      for (const tag of suspectTags) {
+        const v = trial[tag];
+        if (v / 100 <= totalCantidad) {
+          trial[tag] = Number((v / 100).toFixed(2));
+        } else if (v / 10 <= totalCantidad) {
+          trial[tag] = Number((v / 10).toFixed(2));
+        }
+      }
+      const trialSum = Object.values(trial).reduce((acc, v) => acc + v, 0);
+      if (Math.abs(trialSum - totalCantidad) <= 0.05) {
+        return trial;
+      }
+    }
+  }
+
+  return result;
 }
 
 /**
@@ -379,10 +463,12 @@ export function mapNumericCellsToRow(
     });
   }
 
+  const correctedTiendas = autocorregirTiendasPorFila(tiendas, totalCantidad);
+
   return {
     iva,
     emp,
-    tiendas,
+    tiendas: correctedTiendas,
     totalCantidad,
     costoBruto,
     costoUnitario,
@@ -411,6 +497,7 @@ export function parseAlkostoRawText(rawText: string): ParsedOrdenCompraAlkosto {
   let observaciones = '';
   let subtotalAlkosto = 0;
   let subtotalFamiliaCenter = 0;
+  let subtotalGeneral = 0;
   const cadenasDetectadas: Array<'ALKOSTO' | 'FAMILIA_CENTER' | 'VECINO_CENTER'> = [];
 
   // Mapa para fusionar productos por código limpio preservando sus tiendas AK y FC
@@ -495,6 +582,9 @@ export function parseAlkostoRawText(rawText: string): ParsedOrdenCompraAlkosto {
     const subFcMatch = pageText.match(/SubTotal\s*\(\s*FC\s*\)\s*([\d.,]+)/i);
     if (subFcMatch) subtotalFamiliaCenter = parseNumeroEstricto(subFcMatch[1], 0);
 
+    const subGenMatch = pageText.match(/Sub\s*Total\s*:\s*([\d.,]+)/i);
+    if (subGenMatch) subtotalGeneral = parseNumeroEstricto(subGenMatch[1], 0);
+
     // Ignorar los renglones de VECINO CENTER para las notas de Alkosto / Familia Center,
     // a menos que el documento sea exclusivamente de otra tienda.
     if (pageChain === 'VECINO_CENTER') continue;
@@ -512,21 +602,37 @@ export function parseAlkostoRawText(rawText: string): ParsedOrdenCompraAlkosto {
       if (!prodHeaderMatch) continue;
 
       const rawCode = prodHeaderMatch[1].trim();
-      const rawDescPart = prodHeaderMatch[2].trim();
+      let rawDescPart = prodHeaderMatch[2].trim();
 
       // Evitar falsos positivos con el RIF/Código de proveedor (409876136) o seriales
       if (rawCode === '409876136' || /^267319/.test(rawCode) || rawDescPart.toUpperCase().startsWith('CODIZULCA')) {
         continue;
       }
 
-      // Buscar la línea inmediatamente siguiente que contiene los valores numéricos del renglón
-      const nextLine = lines[i + 1] || '';
-      const numTokens = nextLine.match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || [];
+      // Buscar la línea siguiente que contiene los valores numéricos del renglón (soportando salto de línea en la descripción)
+      let nextLineIdx = i + 1;
+      let nextLine = lines[nextLineIdx] || '';
+      let numTokens = nextLine.match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || [];
+      if (
+        numTokens.length < 8 &&
+        nextLine &&
+        !/^(\d{4,14})\s+[A-ZÁÉÍÓÚÑ]/i.test(nextLine) &&
+        !/^SubTotal/i.test(nextLine) &&
+        lines[i + 2]
+      ) {
+        const secondNextTokens = lines[i + 2].match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || [];
+        if (secondNextTokens.length >= 8) {
+          rawDescPart = `${rawDescPart} ${nextLine}`.trim();
+          nextLineIdx = i + 2;
+          nextLine = lines[nextLineIdx];
+          numTokens = secondNextTokens;
+        }
+      }
       if (numTokens.length < 8) continue;
 
       const mapped = mapNumericCellsToRow(numTokens, pageChain);
       if (!mapped) continue;
-      i++; // Consumir la línea numérica
+      i = nextLineIdx; // Consumir la(s) línea(s) procesadas
 
       const cleanDesc = limpiarDescripcionAlkosto(rawDescPart);
       const catalogMatch = resolverProductoPorCodigoODescripcion(rawCode, cleanDesc);
@@ -606,6 +712,12 @@ export function parseAlkostoRawText(rawText: string): ParsedOrdenCompraAlkosto {
       ? subtotalFamiliaCenter
       : mergedItems.reduce((acc, it) => acc + it.totalRenglon, 0));
 
+  const computedSubtotalGeneral = subtotalGeneral > 0
+    ? subtotalGeneral
+    : (subtotalAlkosto > 0 || subtotalFamiliaCenter > 0)
+      ? Number(((subtotalAlkosto || 0) + (subtotalFamiliaCenter || 0)).toFixed(2))
+      : Number(computedSubtotal.toFixed(2));
+
   const result: ParsedOrdenCompraAlkosto = {
     clienteCadena: primaryCadena,
     cadenasDetectadas,
@@ -621,6 +733,7 @@ export function parseAlkostoRawText(rawText: string): ParsedOrdenCompraAlkosto {
     subtotal: Number(computedSubtotal.toFixed(2)),
     subtotalAlkosto: subtotalAlkosto > 0 ? subtotalAlkosto : undefined,
     subtotalFamiliaCenter: subtotalFamiliaCenter > 0 ? subtotalFamiliaCenter : undefined,
+    subtotalGeneral: computedSubtotalGeneral > 0 ? computedSubtotalGeneral : undefined,
     items: mergedItems
   };
 
@@ -857,8 +970,8 @@ export function validateAndNormalizeAlkostoOC(
 
   // 3. Validar y normalizar Número de Orden de Compra
   const rawOrdenNro = String(
-    pickProp(root, ['ordenNro', 'ORDEN DE COMPRA', 'ordenCompra', 'orden_compra', 'numeroOrden', 'nroOrden', 'nro_orden', 'oc']) ??
-    pickProp(rawInput, ['ordenNro', 'ORDEN DE COMPRA', 'ordenCompra', 'numeroOrden', 'nroOrden', 'oc']) ??
+    pickProp(root, ['ordenNro', 'numero_oc', 'ORDEN DE COMPRA', 'ordenCompra', 'orden_compra', 'numeroOrden', 'nroOrden', 'nro_orden', 'oc']) ??
+    pickProp(rawInput, ['ordenNro', 'numero_oc', 'ORDEN DE COMPRA', 'ordenCompra', 'numeroOrden', 'nroOrden', 'oc']) ??
     (typeof root.orden === 'string' ? root.orden : '') ??
     ''
   ).trim();
@@ -872,7 +985,7 @@ export function validateAndNormalizeAlkostoOC(
   }
 
   // 4. Normalizar y validar cada renglón
-  const normalizedItems: ParsedOrdenCompraAlkosto['items'] = [];
+  const rawNormalizedItems: ParsedOrdenCompraAlkosto['items'] = [];
 
   itemsToValidate.forEach((it: any, idx: number) => {
     const renglonNum = Number(pickProp(it, ['renglon', 'N°', 'nro', 'numero'])) || idx + 1;
@@ -964,7 +1077,7 @@ export function validateAndNormalizeAlkostoOC(
     }
 
     // Normalizar tiendas (AK01..AK10, FC01..FC07, etc.)
-    const cleanTiendas: Record<string, number> = {};
+    let cleanTiendas: Record<string, number> = {};
     if (it.tiendas && typeof it.tiendas === 'object') {
       for (const [tag, val] of Object.entries(it.tiendas)) {
         const uTag = tag.trim().toUpperCase();
@@ -978,7 +1091,7 @@ export function validateAndNormalizeAlkostoOC(
           });
           continue;
         }
-        if (numVal > 0 && ALL_VALID_STORE_TAGS.has(uTag) && uTag !== 'CI') {
+        if (numVal > 0 && ALL_VALID_STORE_TAGS.has(uTag) && uTag !== 'CI' && uTag !== 'AKOP' && uTag !== 'FCOP') {
           cleanTiendas[uTag] = numVal;
         }
       }
@@ -987,7 +1100,7 @@ export function validateAndNormalizeAlkostoOC(
     // También soportar tiendas en la raíz del item (it.AK01, it.FC01)
     for (const [k, val] of Object.entries(it)) {
       const uKey = k.trim().toUpperCase();
-      if (ALL_VALID_STORE_TAGS.has(uKey) && uKey !== 'CI') {
+      if (ALL_VALID_STORE_TAGS.has(uKey) && uKey !== 'CI' && uKey !== 'AKOP' && uKey !== 'FCOP') {
         const numVal = parseNumeroEstricto(val, 0);
         if (numVal > 0) {
           cleanTiendas[uKey] = numVal;
@@ -1005,15 +1118,6 @@ export function validateAndNormalizeAlkostoOC(
       match?.unidadSugerida
     );
 
-    // Calcular suma de tiendas por cadena
-    const sumAkTiendas = Object.entries(cleanTiendas)
-      .filter(([tk]) => tk.startsWith('AK'))
-      .reduce((acc, [, v]) => acc + v, 0);
-    const sumFcTiendas = Object.entries(cleanTiendas)
-      .filter(([tk]) => tk.startsWith('FC'))
-      .reduce((acc, [, v]) => acc + v, 0);
-    const sumAllTiendas = Object.values(cleanTiendas).reduce((acc, v) => acc + v, 0);
-
     let totalCant = parseNumeroEstricto(
       pickProp(it, [
         'totalCantidad',
@@ -1029,6 +1133,49 @@ export function validateAndNormalizeAlkostoOC(
       ]),
       0
     );
+
+    const totalCantAkExplicit = parseNumeroEstricto(
+      pickProp(it, ['totalCantidadAlkosto', 'total_cantidad_alkosto']),
+      0
+    );
+    const totalCantFcExplicit = parseNumeroEstricto(
+      pickProp(it, ['totalCantidadFamilia', 'total_cantidad_familia', 'totalCantidadFamiliaCenter', 'total_cantidad_familia_center']),
+      0
+    );
+
+    // Aplicar Regla de Autocorrector Matemático por Fila contra decimales pegados (ej. 200 -> 2.00)
+    if (totalCantAkExplicit > 0 || totalCantFcExplicit > 0) {
+      const akMap: Record<string, number> = {};
+      const fcMap: Record<string, number> = {};
+      const otherMap: Record<string, number> = {};
+      for (const [tk, tv] of Object.entries(cleanTiendas)) {
+        if (tk.startsWith('AK')) akMap[tk] = tv;
+        else if (tk.startsWith('FC')) fcMap[tk] = tv;
+        else otherMap[tk] = tv;
+      }
+      const fixedAk = totalCantAkExplicit > 0 ? autocorregirTiendasPorFila(akMap, totalCantAkExplicit) : akMap;
+      const fixedFc = totalCantFcExplicit > 0 ? autocorregirTiendasPorFila(fcMap, totalCantFcExplicit) : fcMap;
+      cleanTiendas = { ...fixedAk, ...fixedFc, ...otherMap };
+    } else if (totalCant > 0) {
+      const akKeys = Object.keys(cleanTiendas).filter(tk => tk.startsWith('AK'));
+      const fcKeys = Object.keys(cleanTiendas).filter(tk => tk.startsWith('FC'));
+      if (akKeys.length > 0 && fcKeys.length === 0) {
+        cleanTiendas = autocorregirTiendasPorFila(cleanTiendas, totalCant);
+      } else if (fcKeys.length > 0 && akKeys.length === 0) {
+        cleanTiendas = autocorregirTiendasPorFila(cleanTiendas, totalCant);
+      } else {
+        cleanTiendas = autocorregirTiendasPorFila(cleanTiendas, totalCant);
+      }
+    }
+
+    // Calcular suma de tiendas por cadena tras autocorrección
+    const sumAkTiendas = Object.entries(cleanTiendas)
+      .filter(([tk]) => tk.startsWith('AK'))
+      .reduce((acc, [, v]) => acc + v, 0);
+    const sumFcTiendas = Object.entries(cleanTiendas)
+      .filter(([tk]) => tk.startsWith('FC'))
+      .reduce((acc, [, v]) => acc + v, 0);
+    const sumAllTiendas = Object.values(cleanTiendas).reduce((acc, v) => acc + v, 0);
 
     const cantDespachadaRaw = pickProp(it, ['cantDespachada', 'CANTIDAD DESPACHADA', 'cantidadDespachada', 'cantidad_despachada']) ?? '';
     const cantDespachadaClean = cantDespachadaRaw !== '' && cantDespachadaRaw !== null && cantDespachadaRaw !== undefined
@@ -1051,7 +1198,7 @@ export function validateAndNormalizeAlkostoOC(
       const matchesFc = sumFcTiendas > 0 && Math.abs(sumFcTiendas - totalCant) <= 0.05;
 
       if (totalCant === 0) {
-        totalCant = sumAllTiendas;
+        totalCant = sumAkTiendas > 0 && sumFcTiendas === 0 ? sumAkTiendas : sumAllTiendas;
       } else if (!matchesAll && !matchesAk && !matchesFc) {
         if (strictMath) {
           issues.push({
@@ -1132,8 +1279,8 @@ export function validateAndNormalizeAlkostoOC(
       });
     }
 
-    normalizedItems.push({
-      renglon: normalizedItems.length + 1,
+    rawNormalizedItems.push({
+      renglon: rawNormalizedItems.length + 1,
       codigo: finalCodigo,
       skuCodizulca: finalSku,
       codigoBarra: finalBarcode,
@@ -1159,6 +1306,34 @@ export function validateAndNormalizeAlkostoOC(
     );
   }
 
+  // Fusionar renglones por código si la IA devolvió filas separadas para la Página 1 (Alkosto) y la Página 2 (Familia Center)
+  const mergedByCodeMap = new Map<string, ParsedOrdenCompraAlkosto['items'][0]>();
+  for (const item of rawNormalizedItems) {
+    const hasStores = item.tiendas && Object.keys(item.tiendas).length > 0;
+    const key = hasStores ? item.codigo : `${item.codigo}#${item.renglon}`;
+    const existing = mergedByCodeMap.get(key);
+    if (existing && hasStores) {
+      const mergedTiendas: Record<string, number> = { ...(existing.tiendas || {}) };
+      for (const [tk, tv] of Object.entries(item.tiendas || {})) {
+        mergedTiendas[tk] = (mergedTiendas[tk] || 0) + tv;
+      }
+      const sumAk = Object.entries(mergedTiendas)
+        .filter(([tk]) => tk.startsWith('AK'))
+        .reduce((acc, [, v]) => acc + v, 0);
+      const sumAll = Object.values(mergedTiendas).reduce((acc, v) => acc + v, 0);
+      const primaryCant = sumAk > 0 ? sumAk : sumAll;
+      existing.tiendas = mergedTiendas;
+      existing.totalCantidad = primaryCant;
+      existing.totalRenglon = Number((primaryCant * existing.costoUnitario).toFixed(2));
+    } else {
+      mergedByCodeMap.set(key, {
+        ...item,
+        renglon: mergedByCodeMap.size + 1
+      });
+    }
+  }
+  const normalizedItems = Array.from(mergedByCodeMap.values());
+
   // Determinar cadena principal: priorizar ALKOSTO si hay tiendas AK, o FAMILIA_CENTER si solo hay tiendas FC
   const allStoreTags = new Set<string>();
   normalizedItems.forEach(it => {
@@ -1175,7 +1350,8 @@ export function validateAndNormalizeAlkostoOC(
   const cantidadCestasClean = pickProp(root, ['cantidadCestas', 'CANTIDAD DE CESTAS']) ?? pickProp(rawInput, ['cantidadCestas', 'CANTIDAD DE CESTAS']);
   const nroPedidoClean = String(pickProp(root, ['nroPedido', 'N° DE PEDIDO', 'numeroPedido']) ?? pickProp(rawInput, ['nroPedido', 'N° DE PEDIDO']) ?? '').trim();
   const observacionesClean = String(pickProp(root, ['observaciones', 'OBSERVACIONES']) ?? pickProp(rawInput, ['observaciones', 'OBSERVACIONES']) ?? '').trim();
-  const fechaExtraida = String(pickProp(root, ['fechaEntrega', 'FECHA', 'fecha', 'entrega', 'fechaEmision']) ?? '').trim();
+  const fechaEmisionExtraida = String(pickProp(root, ['fechaEmision', 'fecha_emision']) ?? '').trim();
+  const fechaEntregaExtraida = String(pickProp(root, ['fechaEntrega', 'fecha_entrega', 'FECHA', 'fecha', 'entrega', 'fechaEmision', 'fecha_emision']) ?? '').trim();
 
   let clienteCadena = String(root.clienteCadena || rawInput.clienteCadena || '').trim().toUpperCase();
   if (hasAk && !clienteCadena) {
@@ -1190,6 +1366,36 @@ export function validateAndNormalizeAlkostoOC(
       ? 'FAMILIA_CENTER'
       : 'ALKOSTO';
   }
+
+  // Calcular subtotales por cadena a partir de las tiendas si no vinieron explícitos
+  const calcSubtotalAlkosto = Number(
+    normalizedItems.reduce((acc, it) => {
+      const akQty = Object.entries(it.tiendas || {})
+        .filter(([tk]) => tk.startsWith('AK'))
+        .reduce((s, [, v]) => s + v, 0);
+      return acc + Number((akQty * (it.costoUnitario || 0)).toFixed(2));
+    }, 0).toFixed(2)
+  );
+  const calcSubtotalFamilia = Number(
+    normalizedItems.reduce((acc, it) => {
+      const fcQty = Object.entries(it.tiendas || {})
+        .filter(([tk]) => tk.startsWith('FC'))
+        .reduce((s, [, v]) => s + v, 0);
+      return acc + Number((fcQty * (it.costoUnitario || 0)).toFixed(2));
+    }, 0).toFixed(2)
+  );
+
+  const explicitSubAk = parseNumeroEstricto(pickProp(root, ['subtotalAlkosto', 'subtotal_alkosto']), 0);
+  const explicitSubFc = parseNumeroEstricto(pickProp(root, ['subtotalFamiliaCenter', 'subtotal_familia_center']), 0);
+  const explicitSubGen = parseNumeroEstricto(pickProp(root, ['subtotalGeneral', 'subtotal_general']), 0);
+
+  const finalSubAk = explicitSubAk > 0 ? explicitSubAk : (calcSubtotalAlkosto > 0 ? calcSubtotalAlkosto : undefined);
+  const finalSubFc = explicitSubFc > 0 ? explicitSubFc : (calcSubtotalFamilia > 0 ? calcSubtotalFamilia : undefined);
+  const finalSubGen = explicitSubGen > 0
+    ? explicitSubGen
+    : (finalSubAk || finalSubFc)
+      ? Number(((finalSubAk || 0) + (finalSubFc || 0)).toFixed(2))
+      : undefined;
 
   const subtotalCalc = normalizedItems.reduce((acc, it) => acc + (it.totalRenglon || 0), 0);
   const rawSubtotal = parseNumeroEstricto(root.subtotal ?? root.total, 0);
@@ -1206,16 +1412,17 @@ export function validateAndNormalizeAlkostoOC(
     nroPedido: nroPedidoClean || undefined,
     ordenNro: rawOrdenNro || 'S/N',
     sede: String(root.sede || (clienteCadena === 'FAMILIA_CENTER' ? 'FCOP' : 'AKOP')).trim(),
-    fechaEmision: normalizarFechaAlkosto(root.fechaEmision || fechaExtraida || ''),
-    fechaEntrega: normalizarFechaAlkosto(root.fechaEntrega || root.entrega || fechaExtraida || ''),
-    diasCredito: parseNumeroEstricto(root.diasCredito, 15),
-    tasaCambio: parseNumeroEstricto(root.tasaCambio, 0),
+    fechaEmision: normalizarFechaAlkosto(fechaEmisionExtraida || fechaEntregaExtraida || ''),
+    fechaEntrega: normalizarFechaAlkosto(fechaEntregaExtraida || ''),
+    diasCredito: parseNumeroEstricto(pickProp(root, ['diasCredito', 'dias_credito']), 15),
+    tasaCambio: parseNumeroEstricto(pickProp(root, ['tasaCambio', 'tasa_cambio']), 0),
     proveedorNombre: String(root.proveedorNombre || 'CODIZULCA, C.A.').trim(),
     proveedorRif: String(root.proveedorRif || 'J409876136').trim(),
     observaciones: observacionesClean || undefined,
     subtotal: rawSubtotal > 0 ? rawSubtotal : Number(subtotalCalc.toFixed(2)),
-    subtotalAlkosto: root.subtotalAlkosto,
-    subtotalFamiliaCenter: root.subtotalFamiliaCenter,
+    subtotalAlkosto: finalSubAk,
+    subtotalFamiliaCenter: finalSubFc,
+    subtotalGeneral: finalSubGen,
     items: normalizedItems
   };
 }
@@ -1461,6 +1668,7 @@ export function construirPedidoNormalizadoSucursal(params: {
 
   const alkostoOrder: AlkostoOrder = {
     id: uniqueId,
+    sucursalTag: suc?.tag || (/^(AK|FC)\d{2}$/i.test(params.storeTagOrCode) ? params.storeTagOrCode.toUpperCase() : undefined),
     numeroPedido: params.explicitCorrelativo || 'AUTO',
     correlativo: params.explicitCorrelativo,
     ordenCompraAlkosto: numeroOcFinal !== 'S/N' ? numeroOcFinal : undefined,
@@ -1547,19 +1755,21 @@ export function extraerPedidosNormalizadosDeOC(params: {
   // ni las tiendas de otra cadena (ej. FC01..FC07 cuando se visualiza AK) ni las ediciones hechas en tabla.
   const rawItemsFromOC = Array.isArray(initialData?.items) ? initialData!.items : [];
 
-  // Orden oficial determinista de todas las sucursales posibles (AK01..AK10, AKOP, FC01..FC07, FCOP)
+  // Orden oficial determinista de las 17 sucursales comerciales (AK01..AK10 y FC01..FC07)
   const orderedCandidateTags = [
     ...SUCURSALES_ALKOSTO.map(s => s.tag!).filter(Boolean),
-    'AKOP',
-    ...SUCURSALES_FAMILIA_CENTER.map(s => s.tag!).filter(Boolean),
-    'FCOP'
+    ...SUCURSALES_FAMILIA_CENTER.map(s => s.tag!).filter(Boolean)
   ];
 
-  // Mapa por código o índice para reconciliar precios/descripciones editados en filasActuales con las tiendas de initialData
+  // Mapa por código o SKU para reconciliar ediciones manuales en filasActuales sin contaminar por índice
   const editedByCode = new Map<string, CodizulcaNotaPedidoItem>();
   filasActuales.forEach(f => {
-    const key = String(f.codigo || f.skuCodizulca || '').trim().toUpperCase();
-    if (key) editedByCode.set(key, f);
+    const skuKey = String(f.skuCodizulca || f.codigo || '').trim().toUpperCase();
+    const codKey = String(f.codigo || '').trim().toUpperCase();
+    const barKey = String(f.codigoBarra || '').trim().toUpperCase();
+    if (skuKey) editedByCode.set(skuKey, f);
+    if (codKey) editedByCode.set(codKey, f);
+    if (barKey) editedByCode.set(barKey, f);
   });
 
   // Fuente maestra de filas con tiendas
@@ -1581,9 +1791,13 @@ export function extraerPedidosNormalizadosDeOC(params: {
       const match = resolverProductoPorCodigoODescripcion(ocItem.codigo, ocItem.descripcion);
       const skuKey = String(ocItem.skuCodizulca || (match ? match.sku : ocItem.codigo) || '').trim().toUpperCase();
       const rawKey = String(ocItem.codigo || '').trim().toUpperCase();
-      const editedRow = editedByCode.get(skuKey) || editedByCode.get(rawKey) || filasActuales[idx];
+      const barKey = String(ocItem.codigoBarra || match?.codigoBarra || '').trim().toUpperCase();
+
+      // Solo cruzar por clave exacta de producto (NUNCA usar filasActuales[idx] cuando la vista está filtrada por tienda)
+      const editedRow = editedByCode.get(skuKey) || editedByCode.get(rawKey) || (barKey ? editedByCode.get(barKey) : undefined);
       if (skuKey) usedEditedKeys.add(skuKey);
       if (rawKey) usedEditedKeys.add(rawKey);
+      if (barKey) usedEditedKeys.add(barKey);
 
       const mergedTiendas: Record<string, number> = {
         ...(ocItem.tiendas || {}),
@@ -1594,8 +1808,7 @@ export function extraerPedidosNormalizadosDeOC(params: {
       if (
         tiendaSeleccionada !== 'CONSOLIDADO' &&
         editedRow &&
-        (editedRow.codigo || editedRow.descripcion) &&
-        parseNumeroEstricto(editedRow.cantSolicitada, 0) >= 0
+        (editedRow.codigo || editedRow.descripcion)
       ) {
         const editedQty = parseNumeroEstricto(editedRow.cantSolicitada, 0);
         if (editedQty > 0) {
@@ -1603,13 +1816,26 @@ export function extraerPedidosNormalizadosDeOC(params: {
         }
       }
 
+      const finalSku = editedRow?.codigo || ocItem.skuCodizulca || (match ? match.sku : ocItem.codigo);
+      const finalDesc = limpiarDescripcionAlkosto(editedRow?.descripcion || ocItem.descripcion || (match ? match.producto : ''));
+      const finalUnid = normalizarUnidadMedidaAlkosto(
+        editedRow?.unid || ocItem.unid,
+        finalDesc,
+        ocItem.emp,
+        match?.unidadSugerida
+      );
+      const finalPrecio =
+        parseNumeroEstricto(editedRow?.precio, 0) ||
+        parseNumeroEstricto(ocItem.costoUnitario, 0) ||
+        (match?.precioSugeridoUSD ?? 0);
+
       masterRows.push({
         renglon: idx + 1,
-        codigo: editedRow?.codigo || ocItem.skuCodizulca || (match ? match.sku : ocItem.codigo),
-        skuCodizulca: editedRow?.skuCodizulca || ocItem.skuCodizulca || (match ? match.sku : ocItem.codigo),
-        descripcion: editedRow?.descripcion || ocItem.descripcion,
-        unid: editedRow?.unid || ocItem.unid || (match?.unidadSugerida ?? 'CJ'),
-        precio: parseNumeroEstricto(editedRow?.precio, 0) || parseNumeroEstricto(ocItem.costoUnitario, 0) || (match?.precioSugeridoUSD ?? 0),
+        codigo: finalSku,
+        skuCodizulca: finalSku,
+        descripcion: finalDesc,
+        unid: finalUnid,
+        precio: finalPrecio,
         cantSolicitada: parseNumeroEstricto(editedRow?.cantSolicitada, 0) || parseNumeroEstricto(ocItem.totalCantidad, 0),
         tiendas: mergedTiendas
       });
@@ -1617,31 +1843,35 @@ export function extraerPedidosNormalizadosDeOC(params: {
   }
 
   // Agregar cualquier fila extra que la vendedora haya insertado manualmente en la tabla y que no estuviera en rawItemsFromOC
-  filasActuales.forEach((f, idx) => {
+  filasActuales.forEach(f => {
     if (!f.codigo && !f.descripcion) return;
+    const cant = parseNumeroEstricto(f.cantSolicitada, 0);
+    if (cant <= 0) return;
     const key = String(f.codigo || f.skuCodizulca || '').trim().toUpperCase();
-    if (rawItemsFromOC.length > 0 && (usedEditedKeys.has(key) || idx < rawItemsFromOC.length)) {
+    if (rawItemsFromOC.length > 0 && usedEditedKeys.has(key)) {
       return;
     }
     masterRows.push({
       renglon: f.renglon || masterRows.length + 1,
       codigo: f.codigo,
       skuCodizulca: f.skuCodizulca || f.codigo,
-      descripcion: f.descripcion,
+      descripcion: limpiarDescripcionAlkosto(f.descripcion),
       unid: f.unid || 'CJ',
       precio: parseNumeroEstricto(f.precio, 0),
-      cantSolicitada: parseNumeroEstricto(f.cantSolicitada, 0),
+      cantSolicitada: cant,
       tiendas: f.tiendas
     });
   });
 
   // Identificar el 100% de las tiendas con cantidad > 0 en toda la Orden de Compra
+  // (excluyendo columnas con 0.00 en todos los productos o columnas administrativas como AKOP, FCOP, CI)
   const detectedStoresSet = new Set<string>();
   masterRows.forEach(r => {
     if (r.tiendas && typeof r.tiendas === 'object') {
       Object.entries(r.tiendas).forEach(([tag, val]) => {
         const uTag = tag.trim().toUpperCase();
-        if (uTag !== 'CI' && parseNumeroEstricto(val, 0) > 0) {
+        const numVal = parseNumeroEstricto(val, 0);
+        if (uTag !== 'CI' && uTag !== 'AKOP' && uTag !== 'FCOP' && Number.isFinite(numVal) && !Number.isNaN(numVal) && numVal > 0) {
           detectedStoresSet.add(uTag);
         }
       });
@@ -1672,7 +1902,8 @@ export function extraerPedidosNormalizadosDeOC(params: {
       const storeFilas = masterRows
         .map(r => {
           const cant = r.tiendas ? parseNumeroEstricto(r.tiendas[storeTag], 0) : 0;
-          if (cant <= 0) return null;
+          if (!Number.isFinite(cant) || Number.isNaN(cant) || cant <= 0) return null;
+          const precio = Number.isFinite(r.precio) ? r.precio : 0;
           return {
             renglon: r.renglon,
             codigo: r.codigo,
@@ -1680,8 +1911,8 @@ export function extraerPedidosNormalizadosDeOC(params: {
             descripcion: r.descripcion,
             unid: r.unid,
             cantidad: cant,
-            precio_unitario: r.precio,
-            subtotal: Number((cant * r.precio).toFixed(2))
+            precio_unitario: precio,
+            subtotal: Number((cant * precio).toFixed(2))
           };
         })
         .filter((x): x is NonNullable<typeof x> => x !== null);
@@ -1709,17 +1940,24 @@ export function extraerPedidosNormalizadosDeOC(params: {
   // Caso de orden manual de una sola sucursal (sin desglose de matriz `tiendas`)
   if (pedidos.length === 0) {
     const validRows = filasActuales
-      .filter(f => (f.codigo || f.descripcion) && parseNumeroEstricto(f.cantSolicitada, 0) > 0)
-      .map(f => ({
-        renglon: f.renglon,
-        codigo: f.codigo,
-        skuCodizulca: f.skuCodizulca,
-        descripcion: f.descripcion,
-        unid: f.unid,
-        cantidad: parseNumeroEstricto(f.cantSolicitada, 0),
-        precio_unitario: parseNumeroEstricto(f.precio, 0),
-        subtotal: parseNumeroEstricto(f.subtotal, 0)
-      }));
+      .filter(f => {
+        const cant = parseNumeroEstricto(f.cantSolicitada, 0);
+        return (f.codigo || f.descripcion) && Number.isFinite(cant) && !Number.isNaN(cant) && cant > 0;
+      })
+      .map(f => {
+        const cant = parseNumeroEstricto(f.cantSolicitada, 0);
+        const precio = parseNumeroEstricto(f.precio, 0);
+        return {
+          renglon: f.renglon,
+          codigo: f.codigo,
+          skuCodizulca: f.skuCodizulca,
+          descripcion: limpiarDescripcionAlkosto(f.descripcion),
+          unid: f.unid,
+          cantidad: cant,
+          precio_unitario: precio,
+          subtotal: Number((cant * precio).toFixed(2))
+        };
+      });
 
     if (validRows.length > 0) {
       const storeRef = tiendaSeleccionada !== 'CONSOLIDADO' ? tiendaSeleccionada : idClienteSeleccionado;
@@ -1751,5 +1989,105 @@ export function extraerPedidosNormalizadosDeOC(params: {
     strictPayloads,
     tiendasConPedido,
     alertaOC
+  };
+}
+
+/**
+ * Calcula el resumen de validación matemática pre-envío para una Orden de Compra (FASE 4):
+ * Ejemplo:
+ * "OC #0000055773 | 16 Sucursales Activas (9 Alkosto: $11,321.85 | 7 Familia Center: $4,149.02) | Total OC: $15,470.87 ✓ Cuadre Exacto"
+ */
+export function calcularResumenCuadreOC(
+  data: ParsedOrdenCompraAlkosto | null | undefined,
+  ordenNroOverride?: string
+): {
+  numero_oc: string;
+  totalSucursalesActivas: number;
+  alkostoCount: number;
+  alkostoMonto: number;
+  familiaCount: number;
+  familiaMonto: number;
+  totalCalculado: number;
+  totalEsperadoPDF: number;
+  cuadreExacto: boolean;
+  textoResumen: string;
+} | null {
+  if (!data || !Array.isArray(data.items) || data.items.length === 0) return null;
+
+  const numero_oc = String(ordenNroOverride || data.ordenNro || 'S/N').trim();
+  const akStoresTotals = new Map<string, number>();
+  const fcStoresTotals = new Map<string, number>();
+
+  for (const item of data.items) {
+    const precio = parseNumeroEstricto(item.costoUnitario, 0);
+    if (!item.tiendas || typeof item.tiendas !== 'object') continue;
+    for (const [rawTag, rawQty] of Object.entries(item.tiendas)) {
+      const tag = rawTag.trim().toUpperCase();
+      if (tag === 'CI' || tag === 'AKOP' || tag === 'FCOP') continue;
+      const qty = parseNumeroEstricto(rawQty, 0);
+      if (!Number.isFinite(qty) || Number.isNaN(qty) || qty <= 0) continue;
+      const lineSub = Number((qty * precio).toFixed(2));
+      if (tag.startsWith('AK')) {
+        akStoresTotals.set(tag, Number(((akStoresTotals.get(tag) || 0) + lineSub).toFixed(2)));
+      } else if (tag.startsWith('FC')) {
+        fcStoresTotals.set(tag, Number(((fcStoresTotals.get(tag) || 0) + lineSub).toFixed(2)));
+      }
+    }
+  }
+
+  const alkostoCount = akStoresTotals.size;
+  const familiaCount = fcStoresTotals.size;
+  const totalSucursalesActivas = alkostoCount + familiaCount;
+
+  if (totalSucursalesActivas === 0) return null;
+
+  const alkostoMonto = Number(
+    Array.from(akStoresTotals.values()).reduce((a, b) => a + b, 0).toFixed(2)
+  );
+  const familiaMonto = Number(
+    Array.from(fcStoresTotals.values()).reduce((a, b) => a + b, 0).toFixed(2)
+  );
+  const totalCalculado = Number((alkostoMonto + familiaMonto).toFixed(2));
+
+  const subAkPdf = parseNumeroEstricto(data.subtotalAlkosto, 0);
+  const subFcPdf = parseNumeroEstricto(data.subtotalFamiliaCenter, 0);
+  const subGenPdf = parseNumeroEstricto(data.subtotalGeneral, 0);
+
+  const totalEsperadoPDF = subGenPdf > 0
+    ? subGenPdf
+    : (subAkPdf > 0 || subFcPdf > 0)
+      ? Number(((subAkPdf > 0 ? subAkPdf : alkostoMonto) + (subFcPdf > 0 ? subFcPdf : familiaMonto)).toFixed(2))
+      : totalCalculado;
+
+  const cuadreAk = subAkPdf > 0 ? Math.abs(alkostoMonto - subAkPdf) <= 0.05 : true;
+  const cuadreFc = subFcPdf > 0 ? Math.abs(familiaMonto - subFcPdf) <= 0.05 : true;
+  const cuadreTotal = Math.abs(totalCalculado - totalEsperadoPDF) <= 0.05;
+  const cuadreExacto = cuadreAk && cuadreFc && cuadreTotal;
+
+  const fmtUSD = (n: number) =>
+    `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  const partesCadena: string[] = [];
+  if (alkostoCount > 0) {
+    partesCadena.push(`${alkostoCount} Alkosto: ${fmtUSD(alkostoMonto)}`);
+  }
+  if (familiaCount > 0) {
+    partesCadena.push(`${familiaCount} Familia Center: ${fmtUSD(familiaMonto)}`);
+  }
+
+  const estadoTexto = cuadreExacto ? '✓ Cuadre Exacto' : `⚠️ Diferencia vs PDF (${fmtUSD(totalEsperadoPDF)})`;
+  const textoResumen = `OC #${numero_oc} | ${totalSucursalesActivas} Sucursales Activas (${partesCadena.join(' | ')}) | Total OC: ${fmtUSD(totalCalculado)} ${estadoTexto}`;
+
+  return {
+    numero_oc,
+    totalSucursalesActivas,
+    alkostoCount,
+    alkostoMonto,
+    familiaCount,
+    familiaMonto,
+    totalCalculado,
+    totalEsperadoPDF,
+    cuadreExacto,
+    textoResumen
   };
 }

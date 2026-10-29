@@ -7,7 +7,10 @@ const SUPABASE_URL = process.env.SUPABASE_URL || 'https://nudltbgyewyiklqdyujk.s
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const GOOGLE_SHEET_URL = 'https://docs.google.com/spreadsheets/d/1PLzYEe9GG1vHb_wjd7HA93U6UQNtyP-uk8sxVfiN4sg/export?format=xlsx';
+const GOOGLE_SHEET_ID = String(process.env.GOOGLE_SHEET_ID || '1PLzYEe9GG1vHb_wjd7HA93U6UQNtyP-uk8sxVfiN4sg').replace(/^['"<]+|['">]+$/g, '').trim();
+const GOOGLE_SHEET_URL = `https://docs.google.com/spreadsheets/d/${GOOGLE_SHEET_ID}/export?format=xlsx&_cb=${Date.now()}`;
+const SUPERVISOR_SUMMARY_COLS = new Set(['ALI PEREZ', 'NELSON FINOL', 'JOHNATAN SOTO']);
+const PERIODO_ACTUAL = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
 
 async function syncAll() {
   console.log('================================================================');
@@ -61,14 +64,14 @@ async function syncAll() {
 
       for (let c = 2; c < header0.length; c += 3) {
         const vendorName = String(header0[c] || '').replace(/\s+/g, ' ').trim();
-        if (!vendorName) continue;
+        if (!vendorName || SUPERVISOR_SUMMARY_COLS.has(vendorName.toUpperCase())) continue;
 
         const metaKg = parseFloat(row[c]) || 0;
         const ejecutadoKg = parseFloat(row[c + 1]) || 0;
 
         if (metaKg > 0 || ejecutadoKg > 0) {
           volumenRows.push({
-            periodo: '2026-10',
+            periodo: PERIODO_ACTUAL,
             sku,
             articulo,
             categoria: cat,
@@ -88,7 +91,7 @@ async function syncAll() {
   const { error: delVolErr } = await supabase
     .from('ventas_volumen')
     .delete()
-    .eq('periodo', '2026-10');
+    .eq('periodo', PERIODO_ACTUAL);
   if (delVolErr) console.warn('Advertencia limpiando ventas_volumen:', delVolErr.message);
 
   for (let i = 0; i < volumenRows.length; i += 100) {

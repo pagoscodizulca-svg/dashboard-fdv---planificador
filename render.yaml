@@ -8,3 +8,5 @@ services:
     envVars:
       - key: NODE_VERSION
         value: 22
+      - key: GOOGLE_SHEET_ID
+        value: 1PLzYEe9GG1vHb_wjd7HA93U6UQNtyP-uk8sxVfiN4sg

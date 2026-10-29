@@ -177,6 +177,7 @@ export interface AlkostoOrder {
   createdAt: string;
   updatedAt?: string;
   // Campos del Esquema de Datos Normalizado (Strict Payload)
+  sucursalTag?: string;
   cadena?: 'ALKOSTO' | 'FAMILIA CENTER';
   sucursal_cliente?: string;
   numero_oc?: string;
@@ -186,6 +187,7 @@ export interface AlkostoOrder {
   renglones?: StrictOrderRenglon[];
   total_renglones?: number;
   monto_pedido?: number;
+  totalNeto?: number;
   origen?: 'APP FDV' | string;
   strict_payload?: StrictOrderPayload;
 }
@@ -226,6 +228,7 @@ export interface ParsedOrdenCompraAlkosto {
   subtotal: number;
   subtotalAlkosto?: number;
   subtotalFamiliaCenter?: number;
+  subtotalGeneral?: number;
   items: Array<{
     renglon: number;
     codigo: string;

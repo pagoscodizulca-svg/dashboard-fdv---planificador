@@ -626,7 +626,7 @@ var CATALOGO_ALKOSTO = [
   },
   {
     sku: "7591210000513",
-    producto: "CREMA DE LECHE PURISIMA 6 X 500 GRS",
+    producto: "CREMA DE LECHE PURISIMA 500GR",
     categoria: "LACTEOS",
     presentacion: "Caja (6 und x 500g)",
     kilosPorCaja: 3,
@@ -634,6 +634,18 @@ var CATALOGO_ALKOSTO = [
     codigoBarra: "7591210000513",
     codigosCadena: ["7591210000513"],
     sinonimos: ["CREMA DE LECHE PURISIMA 500GR", "CREMA DE LECHE PURISIMA 6 X 500 GRS", "7591210000513"],
+    unidadSugerida: "CJ"
+  },
+  {
+    sku: "7591210000544",
+    producto: "CREMA DE LECHE PURISIMA 250GR",
+    categoria: "LACTEOS",
+    presentacion: "Caja (12 und x 250g)",
+    kilosPorCaja: 3,
+    precioSugeridoUSD: 30.6,
+    codigoBarra: "7591210000544",
+    codigosCadena: ["7591210000544"],
+    sinonimos: ["CREMA DE LECHE PURISIMA 250GR", "CREMA DE LECHE PURISIMA 12 X 250 GRS", "7591210000544"],
     unidadSugerida: "CJ"
   },
   {
@@ -848,7 +860,70 @@ function parseNumeroEstricto(val, defaultVal = 0) {
 }
 function limpiarDescripcionAlkosto(desc) {
   if (!desc) return "";
-  return String(desc).replace(/\s+\/\s*\d+(?:[.,]\d+)?\s*$/, "").replace(/\s+/g, " ").trim();
+  return String(desc).replace(/\s*\/\s*\d+(?:[.,]\d+)?\s*$/, "").replace(/\s+/g, " ").trim();
+}
+function autocorregirTiendasPorFila(tiendas, totalCantidad) {
+  const result = {};
+  for (const [k, v] of Object.entries(tiendas || {})) {
+    const num = parseNumeroEstricto(v, 0);
+    if (num > 0 && k.toUpperCase() !== "CI" && k.toUpperCase() !== "AKOP" && k.toUpperCase() !== "FCOP") {
+      result[k.toUpperCase()] = num;
+    } else if (num > 0 && (k.toUpperCase() === "AKOP" || k.toUpperCase() === "FCOP")) {
+      result[k.toUpperCase()] = num;
+    }
+  }
+  if (!totalCantidad || totalCantidad <= 0) return result;
+  const entries = Object.entries(result);
+  if (entries.length === 0) return result;
+  const currentSum = entries.reduce((acc, [, v]) => acc + v, 0);
+  if (Math.abs(currentSum - totalCantidad) <= 0.05) {
+    return result;
+  }
+  if (currentSum > totalCantidad) {
+    for (const [tag, val] of entries) {
+      for (const divisor of [100, 10]) {
+        if (val >= divisor) {
+          const candidateVal = Number((val / divisor).toFixed(2));
+          const candidateSum = currentSum - val + candidateVal;
+          if (Math.abs(candidateSum - totalCantidad) <= 0.05) {
+            result[tag] = candidateVal;
+            return result;
+          }
+        }
+      }
+    }
+    for (const divisor of [100, 10]) {
+      const scaledEntries = entries.map(([tag, val]) => [
+        tag,
+        val >= divisor && val % (divisor / 10) === 0 ? Number((val / divisor).toFixed(2)) : val
+      ]);
+      const scaledSum = scaledEntries.reduce((acc, [, v]) => acc + v, 0);
+      if (Math.abs(scaledSum - totalCantidad) <= 0.05) {
+        const corrected = {};
+        scaledEntries.forEach(([tag, v]) => {
+          if (v > 0) corrected[tag] = v;
+        });
+        return corrected;
+      }
+    }
+    const suspectTags = entries.filter(([, val]) => val > totalCantidad).map(([tag]) => tag);
+    if (suspectTags.length >= 2 && suspectTags.length <= 6) {
+      const trial = { ...result };
+      for (const tag of suspectTags) {
+        const v = trial[tag];
+        if (v / 100 <= totalCantidad) {
+          trial[tag] = Number((v / 100).toFixed(2));
+        } else if (v / 10 <= totalCantidad) {
+          trial[tag] = Number((v / 10).toFixed(2));
+        }
+      }
+      const trialSum = Object.values(trial).reduce((acc, v) => acc + v, 0);
+      if (Math.abs(trialSum - totalCantidad) <= 0.05) {
+        return trial;
+      }
+    }
+  }
+  return result;
 }
 function normalizarUnidadMedidaAlkosto(rawUnid, descripcion, emp, catalogUnid) {
   const clean = String(rawUnid || "").trim().toUpperCase().replace(/[.\-_/]/g, "");
@@ -1021,10 +1096,11 @@ function mapNumericCellsToRow(rawTokens, pageChain, explicitStoreHeaders) {
       }
     });
   }
+  const correctedTiendas = autocorregirTiendasPorFila(tiendas, totalCantidad);
   return {
     iva,
     emp,
-    tiendas,
+    tiendas: correctedTiendas,
     totalCantidad,
     costoBruto,
     costoUnitario,
@@ -1045,6 +1121,7 @@ function parseAlkostoRawText(rawText) {
   let observaciones = "";
   let subtotalAlkosto = 0;
   let subtotalFamiliaCenter = 0;
+  let subtotalGeneral = 0;
   const cadenasDetectadas = [];
   const itemsByCode = /* @__PURE__ */ new Map();
   for (const pageText of pageChunks) {
@@ -1097,6 +1174,8 @@ function parseAlkostoRawText(rawText) {
     if (subAkMatch) subtotalAlkosto = parseNumeroEstricto(subAkMatch[1], 0);
     const subFcMatch = pageText.match(/SubTotal\s*\(\s*FC\s*\)\s*([\d.,]+)/i);
     if (subFcMatch) subtotalFamiliaCenter = parseNumeroEstricto(subFcMatch[1], 0);
+    const subGenMatch = pageText.match(/Sub\s*Total\s*:\s*([\d.,]+)/i);
+    if (subGenMatch) subtotalGeneral = parseNumeroEstricto(subGenMatch[1], 0);
     if (pageChain === "VECINO_CENTER") continue;
     const lines = pageText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     for (let i = 0; i < lines.length; i++) {
@@ -1104,16 +1183,26 @@ function parseAlkostoRawText(rawText) {
       const prodHeaderMatch = line.match(/^(\d{4,14})\s+([A-ZÁÉÍÓÚÑ0-9][\s\S]+)$/i);
       if (!prodHeaderMatch) continue;
       const rawCode = prodHeaderMatch[1].trim();
-      const rawDescPart = prodHeaderMatch[2].trim();
+      let rawDescPart = prodHeaderMatch[2].trim();
       if (rawCode === "409876136" || /^267319/.test(rawCode) || rawDescPart.toUpperCase().startsWith("CODIZULCA")) {
         continue;
       }
-      const nextLine = lines[i + 1] || "";
-      const numTokens = nextLine.match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || [];
+      let nextLineIdx = i + 1;
+      let nextLine = lines[nextLineIdx] || "";
+      let numTokens = nextLine.match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || [];
+      if (numTokens.length < 8 && nextLine && !/^(\d{4,14})\s+[A-ZÁÉÍÓÚÑ]/i.test(nextLine) && !/^SubTotal/i.test(nextLine) && lines[i + 2]) {
+        const secondNextTokens = lines[i + 2].match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || [];
+        if (secondNextTokens.length >= 8) {
+          rawDescPart = `${rawDescPart} ${nextLine}`.trim();
+          nextLineIdx = i + 2;
+          nextLine = lines[nextLineIdx];
+          numTokens = secondNextTokens;
+        }
+      }
       if (numTokens.length < 8) continue;
       const mapped = mapNumericCellsToRow(numTokens, pageChain);
       if (!mapped) continue;
-      i++;
+      i = nextLineIdx;
       const cleanDesc = limpiarDescripcionAlkosto(rawDescPart);
       const catalogMatch = resolverProductoPorCodigoODescripcion(rawCode, cleanDesc);
       const finalSku = catalogMatch ? catalogMatch.sku : rawCode;
@@ -1174,6 +1263,7 @@ function parseAlkostoRawText(rawText) {
   });
   const primaryCadena = cadenasDetectadas.includes("ALKOSTO") ? "ALKOSTO" : cadenasDetectadas.includes("FAMILIA_CENTER") ? "FAMILIA_CENTER" : "ALKOSTO";
   const computedSubtotal = primaryCadena === "ALKOSTO" && subtotalAlkosto > 0 ? subtotalAlkosto : primaryCadena === "FAMILIA_CENTER" && subtotalFamiliaCenter > 0 ? subtotalFamiliaCenter : mergedItems.reduce((acc, it) => acc + it.totalRenglon, 0);
+  const computedSubtotalGeneral = subtotalGeneral > 0 ? subtotalGeneral : subtotalAlkosto > 0 || subtotalFamiliaCenter > 0 ? Number(((subtotalAlkosto || 0) + (subtotalFamiliaCenter || 0)).toFixed(2)) : Number(computedSubtotal.toFixed(2));
   const result = {
     clienteCadena: primaryCadena,
     cadenasDetectadas,
@@ -1189,6 +1279,7 @@ function parseAlkostoRawText(rawText) {
     subtotal: Number(computedSubtotal.toFixed(2)),
     subtotalAlkosto: subtotalAlkosto > 0 ? subtotalAlkosto : void 0,
     subtotalFamiliaCenter: subtotalFamiliaCenter > 0 ? subtotalFamiliaCenter : void 0,
+    subtotalGeneral: computedSubtotalGeneral > 0 ? computedSubtotalGeneral : void 0,
     items: mergedItems
   };
   return validateAndNormalizeAlkostoOC(result, { strictMath: true });
@@ -1363,7 +1454,7 @@ function validateAndNormalizeAlkostoOC(rawInput, options = {}) {
   });
   const itemsToValidate = nonEmptyRawItems.length > 0 ? nonEmptyRawItems : rawItems;
   const rawOrdenNro = String(
-    pickProp(root, ["ordenNro", "ORDEN DE COMPRA", "ordenCompra", "orden_compra", "numeroOrden", "nroOrden", "nro_orden", "oc"]) ?? pickProp(rawInput, ["ordenNro", "ORDEN DE COMPRA", "ordenCompra", "numeroOrden", "nroOrden", "oc"]) ?? (typeof root.orden === "string" ? root.orden : "") ?? ""
+    pickProp(root, ["ordenNro", "numero_oc", "ORDEN DE COMPRA", "ordenCompra", "orden_compra", "numeroOrden", "nroOrden", "nro_orden", "oc"]) ?? pickProp(rawInput, ["ordenNro", "numero_oc", "ORDEN DE COMPRA", "ordenCompra", "numeroOrden", "nroOrden", "oc"]) ?? (typeof root.orden === "string" ? root.orden : "") ?? ""
   ).trim();
   if (requireOrdenNro && !rawOrdenNro) {
     issues.push({
@@ -1372,7 +1463,7 @@ function validateAndNormalizeAlkostoOC(rawInput, options = {}) {
       severity: "ERROR"
     });
   }
-  const normalizedItems = [];
+  const rawNormalizedItems = [];
   itemsToValidate.forEach((it, idx) => {
     const renglonNum = Number(pickProp(it, ["renglon", "N\xB0", "nro", "numero"])) || idx + 1;
     if (!it || typeof it !== "object") {
@@ -1451,7 +1542,7 @@ function validateAndNormalizeAlkostoOC(rawInput, options = {}) {
       });
       return;
     }
-    const cleanTiendas = {};
+    let cleanTiendas = {};
     if (it.tiendas && typeof it.tiendas === "object") {
       for (const [tag, val] of Object.entries(it.tiendas)) {
         const uTag = tag.trim().toUpperCase();
@@ -1465,14 +1556,14 @@ function validateAndNormalizeAlkostoOC(rawInput, options = {}) {
           });
           continue;
         }
-        if (numVal > 0 && ALL_VALID_STORE_TAGS.has(uTag) && uTag !== "CI") {
+        if (numVal > 0 && ALL_VALID_STORE_TAGS.has(uTag) && uTag !== "CI" && uTag !== "AKOP" && uTag !== "FCOP") {
           cleanTiendas[uTag] = numVal;
         }
       }
     }
     for (const [k, val] of Object.entries(it)) {
       const uKey = k.trim().toUpperCase();
-      if (ALL_VALID_STORE_TAGS.has(uKey) && uKey !== "CI") {
+      if (ALL_VALID_STORE_TAGS.has(uKey) && uKey !== "CI" && uKey !== "AKOP" && uKey !== "FCOP") {
         const numVal = parseNumeroEstricto(val, 0);
         if (numVal > 0) {
           cleanTiendas[uKey] = numVal;
@@ -1487,9 +1578,6 @@ function validateAndNormalizeAlkostoOC(rawInput, options = {}) {
       empNum,
       match?.unidadSugerida
     );
-    const sumAkTiendas = Object.entries(cleanTiendas).filter(([tk]) => tk.startsWith("AK")).reduce((acc, [, v]) => acc + v, 0);
-    const sumFcTiendas = Object.entries(cleanTiendas).filter(([tk]) => tk.startsWith("FC")).reduce((acc, [, v]) => acc + v, 0);
-    const sumAllTiendas = Object.values(cleanTiendas).reduce((acc, v) => acc + v, 0);
     let totalCant = parseNumeroEstricto(
       pickProp(it, [
         "totalCantidad",
@@ -1505,6 +1593,40 @@ function validateAndNormalizeAlkostoOC(rawInput, options = {}) {
       ]),
       0
     );
+    const totalCantAkExplicit = parseNumeroEstricto(
+      pickProp(it, ["totalCantidadAlkosto", "total_cantidad_alkosto"]),
+      0
+    );
+    const totalCantFcExplicit = parseNumeroEstricto(
+      pickProp(it, ["totalCantidadFamilia", "total_cantidad_familia", "totalCantidadFamiliaCenter", "total_cantidad_familia_center"]),
+      0
+    );
+    if (totalCantAkExplicit > 0 || totalCantFcExplicit > 0) {
+      const akMap = {};
+      const fcMap = {};
+      const otherMap = {};
+      for (const [tk, tv] of Object.entries(cleanTiendas)) {
+        if (tk.startsWith("AK")) akMap[tk] = tv;
+        else if (tk.startsWith("FC")) fcMap[tk] = tv;
+        else otherMap[tk] = tv;
+      }
+      const fixedAk = totalCantAkExplicit > 0 ? autocorregirTiendasPorFila(akMap, totalCantAkExplicit) : akMap;
+      const fixedFc = totalCantFcExplicit > 0 ? autocorregirTiendasPorFila(fcMap, totalCantFcExplicit) : fcMap;
+      cleanTiendas = { ...fixedAk, ...fixedFc, ...otherMap };
+    } else if (totalCant > 0) {
+      const akKeys = Object.keys(cleanTiendas).filter((tk) => tk.startsWith("AK"));
+      const fcKeys = Object.keys(cleanTiendas).filter((tk) => tk.startsWith("FC"));
+      if (akKeys.length > 0 && fcKeys.length === 0) {
+        cleanTiendas = autocorregirTiendasPorFila(cleanTiendas, totalCant);
+      } else if (fcKeys.length > 0 && akKeys.length === 0) {
+        cleanTiendas = autocorregirTiendasPorFila(cleanTiendas, totalCant);
+      } else {
+        cleanTiendas = autocorregirTiendasPorFila(cleanTiendas, totalCant);
+      }
+    }
+    const sumAkTiendas = Object.entries(cleanTiendas).filter(([tk]) => tk.startsWith("AK")).reduce((acc, [, v]) => acc + v, 0);
+    const sumFcTiendas = Object.entries(cleanTiendas).filter(([tk]) => tk.startsWith("FC")).reduce((acc, [, v]) => acc + v, 0);
+    const sumAllTiendas = Object.values(cleanTiendas).reduce((acc, v) => acc + v, 0);
     const cantDespachadaRaw = pickProp(it, ["cantDespachada", "CANTIDAD DESPACHADA", "cantidadDespachada", "cantidad_despachada"]) ?? "";
     const cantDespachadaClean = cantDespachadaRaw !== "" && cantDespachadaRaw !== null && cantDespachadaRaw !== void 0 ? String(parseNumeroEstricto(cantDespachadaRaw, 0) || cantDespachadaRaw).trim() : "";
     if (totalCant < 0) {
@@ -1520,7 +1642,7 @@ function validateAndNormalizeAlkostoOC(rawInput, options = {}) {
       const matchesAk = sumAkTiendas > 0 && Math.abs(sumAkTiendas - totalCant) <= 0.05;
       const matchesFc = sumFcTiendas > 0 && Math.abs(sumFcTiendas - totalCant) <= 0.05;
       if (totalCant === 0) {
-        totalCant = sumAllTiendas;
+        totalCant = sumAkTiendas > 0 && sumFcTiendas === 0 ? sumAkTiendas : sumAllTiendas;
       } else if (!matchesAll && !matchesAk && !matchesFc) {
         if (strictMath) {
           issues.push({
@@ -1595,8 +1717,8 @@ function validateAndNormalizeAlkostoOC(rawInput, options = {}) {
         severity: "ERROR"
       });
     }
-    normalizedItems.push({
-      renglon: normalizedItems.length + 1,
+    rawNormalizedItems.push({
+      renglon: rawNormalizedItems.length + 1,
       codigo: finalCodigo,
       skuCodizulca: finalSku,
       codigoBarra: finalBarcode,
@@ -1620,6 +1742,30 @@ function validateAndNormalizeAlkostoOC(rawInput, options = {}) {
       "SCHEMA_VALIDATION_FAILED"
     );
   }
+  const mergedByCodeMap = /* @__PURE__ */ new Map();
+  for (const item of rawNormalizedItems) {
+    const hasStores = item.tiendas && Object.keys(item.tiendas).length > 0;
+    const key = hasStores ? item.codigo : `${item.codigo}#${item.renglon}`;
+    const existing = mergedByCodeMap.get(key);
+    if (existing && hasStores) {
+      const mergedTiendas = { ...existing.tiendas || {} };
+      for (const [tk, tv] of Object.entries(item.tiendas || {})) {
+        mergedTiendas[tk] = (mergedTiendas[tk] || 0) + tv;
+      }
+      const sumAk = Object.entries(mergedTiendas).filter(([tk]) => tk.startsWith("AK")).reduce((acc, [, v]) => acc + v, 0);
+      const sumAll = Object.values(mergedTiendas).reduce((acc, v) => acc + v, 0);
+      const primaryCant = sumAk > 0 ? sumAk : sumAll;
+      existing.tiendas = mergedTiendas;
+      existing.totalCantidad = primaryCant;
+      existing.totalRenglon = Number((primaryCant * existing.costoUnitario).toFixed(2));
+    } else {
+      mergedByCodeMap.set(key, {
+        ...item,
+        renglon: mergedByCodeMap.size + 1
+      });
+    }
+  }
+  const normalizedItems = Array.from(mergedByCodeMap.values());
   const allStoreTags = /* @__PURE__ */ new Set();
   normalizedItems.forEach((it) => {
     if (it.tiendas) Object.keys(it.tiendas).forEach((t) => allStoreTags.add(t));
@@ -1634,7 +1780,8 @@ function validateAndNormalizeAlkostoOC(rawInput, options = {}) {
   const cantidadCestasClean = pickProp(root, ["cantidadCestas", "CANTIDAD DE CESTAS"]) ?? pickProp(rawInput, ["cantidadCestas", "CANTIDAD DE CESTAS"]);
   const nroPedidoClean = String(pickProp(root, ["nroPedido", "N\xB0 DE PEDIDO", "numeroPedido"]) ?? pickProp(rawInput, ["nroPedido", "N\xB0 DE PEDIDO"]) ?? "").trim();
   const observacionesClean = String(pickProp(root, ["observaciones", "OBSERVACIONES"]) ?? pickProp(rawInput, ["observaciones", "OBSERVACIONES"]) ?? "").trim();
-  const fechaExtraida = String(pickProp(root, ["fechaEntrega", "FECHA", "fecha", "entrega", "fechaEmision"]) ?? "").trim();
+  const fechaEmisionExtraida = String(pickProp(root, ["fechaEmision", "fecha_emision"]) ?? "").trim();
+  const fechaEntregaExtraida = String(pickProp(root, ["fechaEntrega", "fecha_entrega", "FECHA", "fecha", "entrega", "fechaEmision", "fecha_emision"]) ?? "").trim();
   let clienteCadena = String(root.clienteCadena || rawInput.clienteCadena || "").trim().toUpperCase();
   if (hasAk && !clienteCadena) {
     clienteCadena = "ALKOSTO";
@@ -1644,6 +1791,24 @@ function validateAndNormalizeAlkostoOC(rawInput, options = {}) {
     const sedeStr = String(root.sede || "").toUpperCase();
     clienteCadena = sedeStr.startsWith("FC") || /FAMILIA/i.test(String(root.proveedorNombre || "")) || /FAMILIA/i.test(clienteNombreClean) ? "FAMILIA_CENTER" : "ALKOSTO";
   }
+  const calcSubtotalAlkosto = Number(
+    normalizedItems.reduce((acc, it) => {
+      const akQty = Object.entries(it.tiendas || {}).filter(([tk]) => tk.startsWith("AK")).reduce((s, [, v]) => s + v, 0);
+      return acc + Number((akQty * (it.costoUnitario || 0)).toFixed(2));
+    }, 0).toFixed(2)
+  );
+  const calcSubtotalFamilia = Number(
+    normalizedItems.reduce((acc, it) => {
+      const fcQty = Object.entries(it.tiendas || {}).filter(([tk]) => tk.startsWith("FC")).reduce((s, [, v]) => s + v, 0);
+      return acc + Number((fcQty * (it.costoUnitario || 0)).toFixed(2));
+    }, 0).toFixed(2)
+  );
+  const explicitSubAk = parseNumeroEstricto(pickProp(root, ["subtotalAlkosto", "subtotal_alkosto"]), 0);
+  const explicitSubFc = parseNumeroEstricto(pickProp(root, ["subtotalFamiliaCenter", "subtotal_familia_center"]), 0);
+  const explicitSubGen = parseNumeroEstricto(pickProp(root, ["subtotalGeneral", "subtotal_general"]), 0);
+  const finalSubAk = explicitSubAk > 0 ? explicitSubAk : calcSubtotalAlkosto > 0 ? calcSubtotalAlkosto : void 0;
+  const finalSubFc = explicitSubFc > 0 ? explicitSubFc : calcSubtotalFamilia > 0 ? calcSubtotalFamilia : void 0;
+  const finalSubGen = explicitSubGen > 0 ? explicitSubGen : finalSubAk || finalSubFc ? Number(((finalSubAk || 0) + (finalSubFc || 0)).toFixed(2)) : void 0;
   const subtotalCalc = normalizedItems.reduce((acc, it) => acc + (it.totalRenglon || 0), 0);
   const rawSubtotal = parseNumeroEstricto(root.subtotal ?? root.total, 0);
   return {
@@ -1658,16 +1823,17 @@ function validateAndNormalizeAlkostoOC(rawInput, options = {}) {
     nroPedido: nroPedidoClean || void 0,
     ordenNro: rawOrdenNro || "S/N",
     sede: String(root.sede || (clienteCadena === "FAMILIA_CENTER" ? "FCOP" : "AKOP")).trim(),
-    fechaEmision: normalizarFechaAlkosto(root.fechaEmision || fechaExtraida || ""),
-    fechaEntrega: normalizarFechaAlkosto(root.fechaEntrega || root.entrega || fechaExtraida || ""),
-    diasCredito: parseNumeroEstricto(root.diasCredito, 15),
-    tasaCambio: parseNumeroEstricto(root.tasaCambio, 0),
+    fechaEmision: normalizarFechaAlkosto(fechaEmisionExtraida || fechaEntregaExtraida || ""),
+    fechaEntrega: normalizarFechaAlkosto(fechaEntregaExtraida || ""),
+    diasCredito: parseNumeroEstricto(pickProp(root, ["diasCredito", "dias_credito"]), 15),
+    tasaCambio: parseNumeroEstricto(pickProp(root, ["tasaCambio", "tasa_cambio"]), 0),
     proveedorNombre: String(root.proveedorNombre || "CODIZULCA, C.A.").trim(),
     proveedorRif: String(root.proveedorRif || "J409876136").trim(),
     observaciones: observacionesClean || void 0,
     subtotal: rawSubtotal > 0 ? rawSubtotal : Number(subtotalCalc.toFixed(2)),
-    subtotalAlkosto: root.subtotalAlkosto,
-    subtotalFamiliaCenter: root.subtotalFamiliaCenter,
+    subtotalAlkosto: finalSubAk,
+    subtotalFamiliaCenter: finalSubFc,
+    subtotalGeneral: finalSubGen,
     items: normalizedItems
   };
 }
@@ -1712,6 +1878,69 @@ function construirObservacionFormateada(params) {
     rawDir = params.ciudad_zona?.trim() || sucursalClean || "Entrega seg\xFAn Orden de Compra";
   }
   return `${sucursalClean} | OC ${cadenaNorm}: ${ocVal} | Dir: ${rawDir}`;
+}
+function calcularResumenCuadreOC(data, ordenNroOverride) {
+  if (!data || !Array.isArray(data.items) || data.items.length === 0) return null;
+  const numero_oc = String(ordenNroOverride || data.ordenNro || "S/N").trim();
+  const akStoresTotals = /* @__PURE__ */ new Map();
+  const fcStoresTotals = /* @__PURE__ */ new Map();
+  for (const item of data.items) {
+    const precio = parseNumeroEstricto(item.costoUnitario, 0);
+    if (!item.tiendas || typeof item.tiendas !== "object") continue;
+    for (const [rawTag, rawQty] of Object.entries(item.tiendas)) {
+      const tag = rawTag.trim().toUpperCase();
+      if (tag === "CI" || tag === "AKOP" || tag === "FCOP") continue;
+      const qty = parseNumeroEstricto(rawQty, 0);
+      if (!Number.isFinite(qty) || Number.isNaN(qty) || qty <= 0) continue;
+      const lineSub = Number((qty * precio).toFixed(2));
+      if (tag.startsWith("AK")) {
+        akStoresTotals.set(tag, Number(((akStoresTotals.get(tag) || 0) + lineSub).toFixed(2)));
+      } else if (tag.startsWith("FC")) {
+        fcStoresTotals.set(tag, Number(((fcStoresTotals.get(tag) || 0) + lineSub).toFixed(2)));
+      }
+    }
+  }
+  const alkostoCount = akStoresTotals.size;
+  const familiaCount = fcStoresTotals.size;
+  const totalSucursalesActivas = alkostoCount + familiaCount;
+  if (totalSucursalesActivas === 0) return null;
+  const alkostoMonto = Number(
+    Array.from(akStoresTotals.values()).reduce((a, b) => a + b, 0).toFixed(2)
+  );
+  const familiaMonto = Number(
+    Array.from(fcStoresTotals.values()).reduce((a, b) => a + b, 0).toFixed(2)
+  );
+  const totalCalculado = Number((alkostoMonto + familiaMonto).toFixed(2));
+  const subAkPdf = parseNumeroEstricto(data.subtotalAlkosto, 0);
+  const subFcPdf = parseNumeroEstricto(data.subtotalFamiliaCenter, 0);
+  const subGenPdf = parseNumeroEstricto(data.subtotalGeneral, 0);
+  const totalEsperadoPDF = subGenPdf > 0 ? subGenPdf : subAkPdf > 0 || subFcPdf > 0 ? Number(((subAkPdf > 0 ? subAkPdf : alkostoMonto) + (subFcPdf > 0 ? subFcPdf : familiaMonto)).toFixed(2)) : totalCalculado;
+  const cuadreAk = subAkPdf > 0 ? Math.abs(alkostoMonto - subAkPdf) <= 0.05 : true;
+  const cuadreFc = subFcPdf > 0 ? Math.abs(familiaMonto - subFcPdf) <= 0.05 : true;
+  const cuadreTotal = Math.abs(totalCalculado - totalEsperadoPDF) <= 0.05;
+  const cuadreExacto = cuadreAk && cuadreFc && cuadreTotal;
+  const fmtUSD = (n) => `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const partesCadena = [];
+  if (alkostoCount > 0) {
+    partesCadena.push(`${alkostoCount} Alkosto: ${fmtUSD(alkostoMonto)}`);
+  }
+  if (familiaCount > 0) {
+    partesCadena.push(`${familiaCount} Familia Center: ${fmtUSD(familiaMonto)}`);
+  }
+  const estadoTexto = cuadreExacto ? "\u2713 Cuadre Exacto" : `\u26A0\uFE0F Diferencia vs PDF (${fmtUSD(totalEsperadoPDF)})`;
+  const textoResumen = `OC #${numero_oc} | ${totalSucursalesActivas} Sucursales Activas (${partesCadena.join(" | ")}) | Total OC: ${fmtUSD(totalCalculado)} ${estadoTexto}`;
+  return {
+    numero_oc,
+    totalSucursalesActivas,
+    alkostoCount,
+    alkostoMonto,
+    familiaCount,
+    familiaMonto,
+    totalCalculado,
+    totalEsperadoPDF,
+    cuadreExacto,
+    textoResumen
+  };
 }
 
 // src/utils/vendorRoutes.ts
@@ -1913,7 +2142,7 @@ var VENDOR_PROFILES = {
     canonicalUsername: "MARIANGEL GONZALEZ",
     displayName: "Mariangel Gonz\xE1lez",
     routes: [
-      { id: "MARIANGEL GONZALEZ", label: "Ruta Mariangel Gonz\xE1lez", aliases: ["MARIANGEL GONZALEZ", "MARIANGEL GONZ\xC1LEZ"] }
+      { id: "MARIANGEL GONZALEZ", label: "Ruta Mariangel Gonz\xE1lez", aliases: ["MARIANGEL GONZALEZ", "MARIANGEL GONZ\xC1LEZ", "MARIANGEL"] }
     ]
   },
   "VICTOR CAMPOS": {
@@ -1980,6 +2209,8 @@ VENDOR_PROFILES["JOHNATAN"] = mikelProfile;
 VENDOR_PROFILES["JONATHAN"] = mikelProfile;
 VENDOR_PROFILES["JHONATAN"] = mikelProfile;
 VENDOR_PROFILES["JAIDER MEDINA"] = VENDOR_PROFILES["JAIDER MEDINA - FOOD SERVICE NORTE"];
+VENDOR_PROFILES["FOOD SERVICE NORTE"] = VENDOR_PROFILES["JAIDER MEDINA - FOOD SERVICE NORTE"];
+VENDOR_PROFILES["MARIANGEL"] = VENDOR_PROFILES["MARIANGEL GONZALEZ"];
 var SUPERVISOR_PROFILES = {
   "ALI PEREZ": {
     canonicalUsername: "ALI PEREZ",
@@ -2066,6 +2297,1059 @@ function getVendorProfile(username) {
   };
 }
 
+// src/lib/rubros.ts
+var RUBRO_SERVER_CATEGORY = {
+  ACEITE: "ACEITE",
+  AZUCAR: "AZ\xDACAR",
+  POLLO: "POLLO",
+  ESTANDAR_ASTURIAS: "ESTANDAR Y SUPERIOR ASTURIAS",
+  MORTADELA_SALPICAO: "MORTADELA SALPICAO Y ASTURIAS",
+  OTROS: "OTROS"
+};
+var SKUS_MORTADELA = /* @__PURE__ */ new Set([
+  "1464",
+  "1462",
+  "1512",
+  "1521",
+  "1561",
+  "1522",
+  "1563",
+  "1562",
+  "1564",
+  "1519",
+  "1496",
+  "1511",
+  "1599"
+]);
+var SKUS_POLLO = /* @__PURE__ */ new Set([
+  "630",
+  "629",
+  "870",
+  "393",
+  "POLLO",
+  "FILET",
+  "MUSLO",
+  "ALAS"
+]);
+function clasificarRubro(sku, nombre) {
+  const s = String(sku || "").trim();
+  const sU = s.toUpperCase();
+  const n = String(nombre || "").toUpperCase();
+  if (s === "1461" || s === "1463" || n.includes("ESTANDAR ASTURIAS") || n.includes("SUPERIOR ASTURIAS")) {
+    return "ESTANDAR_ASTURIAS";
+  }
+  if (n.includes("MORTADELA") || n.includes("MORT.") || n.includes("SALPICAO") || SKUS_MORTADELA.has(s)) {
+    return "MORTADELA_SALPICAO";
+  }
+  if (sU === "ACEITE" || n.includes("ACEITE")) return "ACEITE";
+  if (sU === "AZUCAR" || sU === "AZ\xDACAR" || n.includes("AZUCAR") || n.includes("AZ\xDACAR")) return "AZUCAR";
+  if (SKUS_POLLO.has(s) || SKUS_POLLO.has(sU) || n.includes("POLLO ENTERO") || n.includes("POLLO TODAS") || n.includes("FILET") || n.includes("MUSLO") || n.includes("ALAS DESPRESADAS") || n.includes("HIGADO") || n.includes("MOLLEJA")) {
+    return "POLLO";
+  }
+  return "OTROS";
+}
+function clasificarRubroServerLabel(sku, nombre) {
+  return RUBRO_SERVER_CATEGORY[clasificarRubro(sku, nombre)];
+}
+
+// src/services/googleSheetsParser.ts
+var DEFAULT_GOOGLE_SHEET_ID = "1PLzYEe9GG1vHb_wjd7HA93U6UQNtyP-uk8sxVfiN4sg";
+function sanitizeGoogleSheetId(raw) {
+  if (!raw) return DEFAULT_GOOGLE_SHEET_ID;
+  let cleaned = String(raw).trim().replace(/^['"<]+|['">]+$/g, "").trim();
+  if (!cleaned || /PEGA_AQUI/i.test(cleaned)) {
+    return DEFAULT_GOOGLE_SHEET_ID;
+  }
+  const urlMatch = cleaned.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  if (urlMatch && urlMatch[1]) {
+    return urlMatch[1];
+  }
+  return cleaned;
+}
+function getGoogleSheetId(envOverride) {
+  const procEnv = typeof process !== "undefined" && process.env ? process.env : {};
+  const raw = envOverride?.GOOGLE_SHEET_ID || envOverride?.VITE_GOOGLE_SHEET_ID || procEnv.GOOGLE_SHEET_ID || procEnv.VITE_GOOGLE_SHEET_ID;
+  return sanitizeGoogleSheetId(raw);
+}
+function buildGoogleSheetExportUrl(sheetId, format = "xlsx", gid) {
+  const id = sanitizeGoogleSheetId(sheetId || getGoogleSheetId());
+  const gidParam = gid !== void 0 && gid !== null && String(gid).trim() !== "" ? `&gid=${encodeURIComponent(String(gid))}` : "";
+  return `https://docs.google.com/spreadsheets/d/${id}/export?format=${format}${gidParam}&_cb=${Date.now()}`;
+}
+function parseCsvRfc4180(csvText) {
+  if (!csvText) return [];
+  const text = csvText.charCodeAt(0) === 65279 ? csvText.slice(1) : csvText;
+  const rows = [];
+  let currentRow = [];
+  let currentField = "";
+  let inQuotes = false;
+  let i = 0;
+  const len = text.length;
+  while (i < len) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (i + 1 < len && text[i + 1] === '"') {
+          currentField += '"';
+          i += 2;
+        } else {
+          inQuotes = false;
+          i++;
+        }
+      } else {
+        currentField += ch;
+        i++;
+      }
+      continue;
+    }
+    if (ch === '"' && currentField.length === 0) {
+      inQuotes = true;
+      i++;
+    } else if (ch === ",") {
+      currentRow.push(currentField);
+      currentField = "";
+      i++;
+    } else if (ch === "\r") {
+      currentRow.push(currentField);
+      currentField = "";
+      rows.push(currentRow);
+      currentRow = [];
+      if (i + 1 < len && text[i + 1] === "\n") {
+        i += 2;
+      } else {
+        i++;
+      }
+    } else if (ch === "\n") {
+      currentRow.push(currentField);
+      currentField = "";
+      rows.push(currentRow);
+      currentRow = [];
+      i++;
+    } else {
+      currentField += ch;
+      i++;
+    }
+  }
+  if (inQuotes || currentField.length > 0 || currentRow.length > 0) {
+    currentRow.push(currentField);
+    rows.push(currentRow);
+  }
+  return rows;
+}
+function normalizeHeaderKey(raw) {
+  if (raw === null || raw === void 0) return "";
+  return String(raw).replace(/Ã‘|Ã±/g, "n").replace(/Ã¡|Ã€/g, "a").replace(/Ã©|Ã‰/g, "e").replace(/Ã­|Ã /g, "i").replace(/Ã³|Ã“/g, "o").replace(/Ãº|Ãš/g, "u").normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+function isRowCompletelyEmpty(row) {
+  if (!row || !Array.isArray(row) || row.length === 0) return true;
+  for (let i = 0; i < row.length; i++) {
+    const cell = row[i];
+    if (cell !== null && cell !== void 0 && String(cell).trim() !== "") {
+      return false;
+    }
+  }
+  return true;
+}
+function normalizeClientCode(raw) {
+  if (raw === null || raw === void 0) return { rawClean: "", canonical: "" };
+  const rawClean = String(raw).replace(/^[#\s]+/, "").trim();
+  if (!rawClean) return { rawClean: "", canonical: "" };
+  const canonical = rawClean.replace(/^0+/, "") || "0";
+  return { rawClean, canonical };
+}
+function parseLocaleNumber(raw, fallback = 0) {
+  if (typeof raw === "number") {
+    return Number.isFinite(raw) ? raw : fallback;
+  }
+  if (raw === null || raw === void 0 || typeof raw === "boolean") {
+    return fallback;
+  }
+  let s = String(raw).replace(/\u00A0/g, " ").trim();
+  if (!s) return fallback;
+  if (/^[-–—]+$/.test(s) || /^(n\/?a|#n\/?d|#n\/?a|#value!|#ref!|#div\/0!|null|undefined|sin\s*dato)$/i.test(s)) {
+    return fallback;
+  }
+  let isNegative = false;
+  if (/^\(.*\)$/.test(s)) {
+    isNegative = true;
+    s = s.slice(1, -1).trim();
+  }
+  s = s.replace(/[$\u20AC\u00A3%]/g, "").replace(/\b(bs\.?|usd|kg|kgs|cj|cajas|und)\b/gi, "").replace(/\s+/g, "");
+  if (s.startsWith("-")) {
+    isNegative = !isNegative;
+    s = s.slice(1);
+  } else if (s.startsWith("+")) {
+    s = s.slice(1);
+  }
+  if (!s || /^[-–—]+$/.test(s)) return fallback;
+  const lastComma = s.lastIndexOf(",");
+  const lastDot = s.lastIndexOf(".");
+  if (lastComma !== -1 && lastDot !== -1) {
+    if (lastComma > lastDot) {
+      s = s.replace(/\./g, "").replace(",", ".");
+    } else {
+      s = s.replace(/,/g, "");
+    }
+  } else if (lastComma !== -1) {
+    const commaCount = (s.match(/,/g) || []).length;
+    if (commaCount > 1) {
+      s = s.replace(/,/g, "");
+    } else {
+      const [intPart, fracPart] = s.split(",");
+      if (intPart === "0" || fracPart.length !== 3) {
+        s = `${intPart}.${fracPart}`;
+      } else {
+        s = `${intPart}${fracPart}`;
+      }
+    }
+  } else if (lastDot !== -1) {
+    const dotCount = (s.match(/\./g) || []).length;
+    if (dotCount > 1) {
+      s = s.replace(/\./g, "");
+    }
+  }
+  const parsed = Number(s);
+  if (!Number.isFinite(parsed)) return fallback;
+  const result = isNegative ? -parsed : parsed;
+  return Object.is(result, -0) ? 0 : result;
+}
+function parseSheetDate(raw) {
+  if (raw === null || raw === void 0) return null;
+  if (raw instanceof Date) {
+    if (Number.isNaN(raw.getTime())) return null;
+    return raw.toISOString().slice(0, 10);
+  }
+  const isValidYmd = (y, m, d) => {
+    if (y < 1900 || y > 2150 || m < 1 || m > 12 || d < 1 || d > 31) return null;
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) {
+      return null;
+    }
+    return `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  };
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    if (raw < 2e4 || raw > 9e4) return null;
+    const utcMs = Math.round((Math.floor(raw) - 25569) * 86400 * 1e3);
+    const dt = new Date(utcMs);
+    if (Number.isNaN(dt.getTime())) return null;
+    return dt.toISOString().slice(0, 10);
+  }
+  const s = String(raw).trim();
+  if (!s) return null;
+  if (/^\d{5}(\.\d+)?$/.test(s)) {
+    const serial = Number(s);
+    if (serial >= 2e4 && serial <= 9e4) {
+      const utcMs = Math.round((Math.floor(serial) - 25569) * 86400 * 1e3);
+      const dt = new Date(utcMs);
+      if (!Number.isNaN(dt.getTime())) return dt.toISOString().slice(0, 10);
+    }
+  }
+  const isoMatch = s.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[T\s].*)?$/);
+  if (isoMatch) {
+    return isValidYmd(Number(isoMatch[1]), Number(isoMatch[2]), Number(isoMatch[3]));
+  }
+  const dmyMatch = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})(?:\s.*)?$/);
+  if (dmyMatch) {
+    const day = Number(dmyMatch[1]);
+    const month = Number(dmyMatch[2]);
+    let year = Number(dmyMatch[3]);
+    if (year < 100) year += 2e3;
+    return isValidYmd(year, month, day);
+  }
+  return null;
+}
+function resolveSheetByAliases(workbook, exactAliases, substringAliases = [], excludeSubstrings = []) {
+  if (!workbook || !Array.isArray(workbook.SheetNames)) return null;
+  const exactNorm = new Set(exactAliases.map(normalizeHeaderKey).filter(Boolean));
+  const subNorm = substringAliases.map(normalizeHeaderKey).filter(Boolean);
+  const exclNorm = excludeSubstrings.map(normalizeHeaderKey).filter(Boolean);
+  for (const name of workbook.SheetNames) {
+    const norm = normalizeHeaderKey(name);
+    if (exactNorm.has(norm)) {
+      return { sheetName: name, sheet: workbook.Sheets[name] };
+    }
+  }
+  for (const name of workbook.SheetNames) {
+    const norm = normalizeHeaderKey(name);
+    if (exclNorm.some((ex) => norm.includes(ex))) continue;
+    if (subNorm.some((sub) => norm.includes(sub))) {
+      return { sheetName: name, sheet: workbook.Sheets[name] };
+    }
+  }
+  return null;
+}
+function mapHeaderColumns(headerRow, schema, fallbacks) {
+  const normalizedHeaders = (headerRow || []).map(normalizeHeaderKey);
+  const result = {};
+  for (const key of Object.keys(schema)) {
+    const aliases = schema[key].map(normalizeHeaderKey);
+    let foundIdx = -1;
+    for (const alias of aliases) {
+      const idx = normalizedHeaders.indexOf(alias);
+      if (idx !== -1) {
+        foundIdx = idx;
+        break;
+      }
+    }
+    if (foundIdx === -1) {
+      for (const alias of aliases) {
+        const idx = normalizedHeaders.findIndex((h) => h && (h.includes(alias) || alias.includes(h)));
+        if (idx !== -1) {
+          foundIdx = idx;
+          break;
+        }
+      }
+    }
+    if (foundIdx === -1 && fallbacks && typeof fallbacks[key] === "number") {
+      foundIdx = fallbacks[key];
+    }
+    result[key] = foundIdx;
+  }
+  return result;
+}
+function isSupervisorSummaryHeader(vendorRaw) {
+  const clean = String(vendorRaw || "").replace(/\s+/g, " ").trim().toUpperCase();
+  if (!clean) return false;
+  if (SUPERVISOR_SUMMARY_COLUMNS.has(clean)) return true;
+  const norm = normalizeVendorName(clean);
+  return SUPERVISOR_SUMMARY_COLUMNS.has(norm);
+}
+function formatVolumenVendorDisplay(vendorName) {
+  const vendorUpper = vendorName.toUpperCase();
+  const isMikelRoute1 = vendorUpper === "MIKELANGELO DIAZ1" || vendorUpper.includes("MIKELANGELO DIAZ 1") || vendorUpper.includes("MIKELANGELO DIAZ - PRINCIPAL");
+  const isMikelVilla = (vendorUpper.includes("MIKELANGELO") || vendorUpper.includes("SOTO") || vendorUpper.includes("DIAZ")) && vendorUpper.includes("VILLA");
+  const isJohnatanHistorical = (vendorUpper === "JOHNATAN SOTO" || vendorUpper === "JHONATAN SOTO") && !vendorUpper.includes("VILLA");
+  if (isMikelRoute1) {
+    return {
+      finalVendedorId: "MIKELANGELO DIAZ1",
+      finalVendedorNombre: "Mikelangelo Diaz (Principal)",
+      finalVendedorEmail: "Mikelangelodiaz@gmail.com"
+    };
+  }
+  if (isMikelVilla) {
+    return {
+      finalVendedorId: "MIKELANGELO DIAZ - VILLA DEL ROS",
+      finalVendedorNombre: "Mikelangelo Diaz (Villa del Rosario)",
+      finalVendedorEmail: "Mikelangelodiaz@gmail.com"
+    };
+  }
+  if (isJohnatanHistorical) {
+    return {
+      finalVendedorId: "JOHNATAN SOTO (HISTORICO)",
+      finalVendedorNombre: "Johnatan Soto (Hist\xF3rico)"
+    };
+  }
+  if (/mikelangelo/i.test(vendorName)) {
+    return {
+      finalVendedorId: vendorName,
+      finalVendedorNombre: "Mikelangelo Diaz",
+      finalVendedorEmail: "Mikelangelodiaz@gmail.com"
+    };
+  }
+  return {
+    finalVendedorId: vendorName,
+    finalVendedorNombre: vendorName
+  };
+}
+function parseTruthySheetFlag(raw) {
+  if (typeof raw === "boolean") return raw;
+  if (typeof raw === "number") return raw > 0;
+  if (raw === null || raw === void 0) return false;
+  const norm = normalizeHeaderKey(raw);
+  return norm === "si" || norm === "yes" || norm === "true" || norm === "1" || norm === "activo" || norm === "x";
+}
+function extractSheetRows(XLSX, sheet) {
+  if (!sheet) return [];
+  return XLSX.utils.sheet_to_json(sheet, {
+    header: 1,
+    defval: null,
+    blankrows: true,
+    raw: true
+  });
+}
+function parseWorkbookFull(XLSX, workbook, options) {
+  const { periodo, masterClients = [] } = options;
+  const warnings = [];
+  const metrics = {};
+  const volumenSupabaseRows = [];
+  const volumenApiRows = [];
+  const volResolved = resolveSheetByAliases(workbook, ["volumen_por_sku"], ["volumen", "sku"]);
+  if (volResolved) {
+    const rows = extractSheetRows(XLSX, volResolved.sheet);
+    const tabMetric = {
+      sheetName: volResolved.sheetName,
+      totalRowsInSheet: rows.length,
+      headerRows: rows.length >= 2 ? 2 : rows.length,
+      emptyRowsSkipped: 0,
+      summaryRowsSkipped: 0,
+      incompleteRowsLogged: 0,
+      validRecordsRead: 0
+    };
+    if (rows.length >= 2) {
+      const header0 = rows[0] || [];
+      const header1 = rows[1] || [];
+      const maxHeaderCols = Math.max(header0.length, header1.length);
+      const baseCols = mapHeaderColumns(
+        header1,
+        {
+          sku: ["cod", "codigo", "sku", "id_articulo", "cod_articulo"],
+          articulo: ["articulo", "producto", "descripcion", "nombre"]
+        },
+        { sku: 0, articulo: 1 }
+      );
+      const vendorBlocks = [];
+      const headerStarts = [];
+      for (let c = 0; c < maxHeaderCols; c++) {
+        if (c === baseCols.sku || c === baseCols.articulo) continue;
+        const h0 = header0[c];
+        if (h0 !== null && h0 !== void 0 && String(h0).trim() !== "") {
+          headerStarts.push(c);
+        }
+      }
+      for (let bIdx = 0; bIdx < headerStarts.length; bIdx++) {
+        const startCol = headerStarts[bIdx];
+        const endCol = bIdx + 1 < headerStarts.length ? headerStarts[bIdx + 1] : Math.min(startCol + 3, maxHeaderCols);
+        const vendorName = String(header0[startCol] || "").replace(/\s+/g, " ").trim();
+        if (!vendorName) continue;
+        if (isSupervisorSummaryHeader(vendorName)) continue;
+        let cuotaCol = startCol;
+        let ejecutadoCol = startCol + 1;
+        for (let subC = startCol; subC < endCol; subC++) {
+          const subNorm = normalizeHeaderKey(header1[subC]);
+          if (subNorm === "cuota" || subNorm === "cuota_kg" || subNorm === "meta" || subNorm === "meta_kg") {
+            cuotaCol = subC;
+          } else if (subNorm === "kg" || subNorm === "venta_kg" || subNorm === "venta" || subNorm === "ejecutado" || subNorm === "ejecutado_kg") {
+            ejecutadoCol = subC;
+          }
+        }
+        vendorBlocks.push({ vendorName, cuotaCol, ejecutadoCol });
+      }
+      let idCounter = 1;
+      for (let r = 2; r < rows.length; r++) {
+        const row = rows[r];
+        if (isRowCompletelyEmpty(row)) {
+          tabMetric.emptyRowsSkipped++;
+          continue;
+        }
+        const rawSku = row[baseCols.sku];
+        const rawArticulo = row[baseCols.articulo];
+        const sku = rawSku !== null && rawSku !== void 0 ? String(rawSku).trim() : "";
+        const articulo = rawArticulo !== null && rawArticulo !== void 0 ? String(rawArticulo).trim() : "";
+        if (!sku) {
+          if (!articulo) {
+            tabMetric.summaryRowsSkipped++;
+          } else {
+            tabMetric.incompleteRowsLogged++;
+            warnings.push({
+              sheet: volResolved.sheetName,
+              row: r + 1,
+              reason: `Fila con art\xEDculo "${articulo}" sin c\xF3digo SKU en columna Cod`
+            });
+          }
+          continue;
+        }
+        if (!articulo) {
+          warnings.push({
+            sheet: volResolved.sheetName,
+            row: r + 1,
+            reason: `SKU "${sku}" tiene nombre de art\xEDculo vac\xEDo`
+          });
+        }
+        const cat = clasificarRubroServerLabel(sku, articulo);
+        for (const block of vendorBlocks) {
+          const metaKg = parseLocaleNumber(row[block.cuotaCol], 0);
+          const ejecutadoKg = parseLocaleNumber(row[block.ejecutadoCol], 0);
+          if (metaKg > 0 || ejecutadoKg > 0) {
+            tabMetric.validRecordsRead++;
+            volumenSupabaseRows.push({
+              periodo,
+              sku,
+              articulo,
+              categoria: cat,
+              vendedor_id: block.vendorName,
+              vendedor_nombre: block.vendorName,
+              meta_kg: metaKg,
+              ejecutado_kg: ejecutadoKg,
+              zona: "General"
+            });
+            const display = formatVolumenVendorDisplay(block.vendorName);
+            volumenApiRows.push({
+              id: String(idCounter++),
+              vendedorId: display.finalVendedorId,
+              vendedorNombre: display.finalVendedorNombre,
+              vendedorEmail: display.finalVendedorEmail,
+              sku,
+              skuId: sku,
+              articulo,
+              cliente: display.finalVendedorNombre,
+              categoria: cat,
+              meta: metaKg,
+              metaKg,
+              ejecutado: ejecutadoKg,
+              ejecutadoKg,
+              zona: "General",
+              lat: 10.6427,
+              lng: -71.6125
+            });
+          }
+        }
+      }
+    }
+    metrics[volResolved.sheetName] = tabMetric;
+  }
+  const readProductPurchaseSheet = (exactAliases, substringAliases) => {
+    const clientMap = /* @__PURE__ */ new Map();
+    const resolved = resolveSheetByAliases(
+      workbook,
+      exactAliases,
+      substringAliases,
+      ["grid", "volumen", "activacion_por_cliente", "usuarios", "degustaciones"]
+    );
+    if (!resolved) return clientMap;
+    const rows = extractSheetRows(XLSX, resolved.sheet);
+    const tabMetric = {
+      sheetName: resolved.sheetName,
+      totalRowsInSheet: rows.length,
+      headerRows: rows.length > 0 ? 1 : 0,
+      emptyRowsSkipped: 0,
+      summaryRowsSkipped: 0,
+      incompleteRowsLogged: 0,
+      validRecordsRead: 0
+    };
+    if (rows.length > 1) {
+      const cols = mapHeaderColumns(
+        rows[0] || [],
+        {
+          codigo: ["id_cliente", "codigo", "cod_cliente", "cliente_codigo", "id", "cod"],
+          cliente: ["cliente", "razon_social", "nombre_cliente", "nombre"],
+          cajas: ["cajas", "cantidad", "bultos", "unidades", "compra"]
+        },
+        { codigo: 0, cliente: 1, cajas: 2 }
+      );
+      for (let r = 1; r < rows.length; r++) {
+        const row = rows[r];
+        if (isRowCompletelyEmpty(row)) {
+          tabMetric.emptyRowsSkipped++;
+          continue;
+        }
+        const { rawClean, canonical } = normalizeClientCode(row[cols.codigo]);
+        if (!canonical) {
+          tabMetric.incompleteRowsLogged++;
+          warnings.push({
+            sheet: resolved.sheetName,
+            row: r + 1,
+            reason: `Fila de compra sin Id Cliente v\xE1lido (Cliente="${String(row[cols.cliente] ?? "").trim()}")`
+          });
+          continue;
+        }
+        const cajas = parseLocaleNumber(row[cols.cajas], 0);
+        const addVal = cajas > 0 ? cajas : 1;
+        tabMetric.validRecordsRead++;
+        const nextTotal = +((clientMap.get(canonical) || 0) + addVal).toFixed(4);
+        clientMap.set(canonical, nextTotal);
+        if (rawClean && rawClean !== canonical) {
+          clientMap.set(rawClean, nextTotal);
+        }
+      }
+    }
+    metrics[resolved.sheetName] = tabMetric;
+    return clientMap;
+  };
+  const productMaps = {
+    ACEITE: readProductPurchaseSheet(["aceite"], ["aceite"]),
+    AZUCAR: readProductPurchaseSheet(["azucar"], ["azucar"]),
+    POLLO: readProductPurchaseSheet(["pollo"], ["pollo"]),
+    ESTANDAR_ASTURIAS: readProductPurchaseSheet(["jamon_asturias", "estandar_asturias"], ["jamon", "asturias"]),
+    MORTADELA_SALPICAO: readProductPurchaseSheet(["enteros_ligeros", "mortadela_salpicao"], ["ligeros", "salpicao", "mortadela"])
+  };
+  const actResolved = resolveSheetByAliases(
+    workbook,
+    ["activacion_por_cliente", "clientes"],
+    ["activacion_por_cliente", "activacion_cliente"]
+  );
+  const sheetClientsByCanonical = /* @__PURE__ */ new Map();
+  if (actResolved) {
+    const rows = extractSheetRows(XLSX, actResolved.sheet);
+    const tabMetric = {
+      sheetName: actResolved.sheetName,
+      totalRowsInSheet: rows.length,
+      headerRows: rows.length > 0 ? 1 : 0,
+      emptyRowsSkipped: 0,
+      summaryRowsSkipped: 0,
+      incompleteRowsLogged: 0,
+      validRecordsRead: 0
+    };
+    if (rows.length > 1) {
+      const cols = mapHeaderColumns(
+        rows[0] || [],
+        {
+          codigo: ["codigo", "id_cliente", "cliente_codigo", "cod", "id"],
+          razonSocial: ["razon_social", "cliente", "nombre_cliente", "nombre"],
+          vendedor: ["vendedor", "ruta", "ejecutivo", "vendedor_nombre"],
+          aceite: ["aceite"],
+          azucar: ["azucar"],
+          pollo: ["pollo", "arroz"],
+          asturias: ["estandar_y_superior_asturias", "jamon_asturias", "estandar_asturias"],
+          salpicao: ["mortadela_salpicao_y_asturias", "enteros_ligeros", "mortadela_salpicao"]
+        },
+        {
+          codigo: 0,
+          razonSocial: 1,
+          vendedor: 2,
+          aceite: 3,
+          azucar: 4,
+          pollo: 5,
+          asturias: 6,
+          salpicao: 7
+        }
+      );
+      for (let r = 1; r < rows.length; r++) {
+        const row = rows[r];
+        if (isRowCompletelyEmpty(row)) {
+          tabMetric.emptyRowsSkipped++;
+          continue;
+        }
+        const { rawClean, canonical } = normalizeClientCode(row[cols.codigo]);
+        const razonSocial = String(row[cols.razonSocial] ?? "").trim();
+        const rawVendor = String(row[cols.vendedor] ?? "").replace(/\s+/g, " ").trim();
+        if (!canonical || !rawVendor) {
+          tabMetric.incompleteRowsLogged++;
+          warnings.push({
+            sheet: actResolved.sheetName,
+            row: r + 1,
+            reason: `Fila incompleta en Activaci\xF3n por Cliente (CODIGO="${rawClean}", VENDEDOR="${rawVendor}")`
+          });
+          continue;
+        }
+        const flagAceite = cols.aceite >= 0 ? parseTruthySheetFlag(row[cols.aceite]) : false;
+        const flagAzucar = cols.azucar >= 0 ? parseTruthySheetFlag(row[cols.azucar]) : false;
+        const flagPollo = cols.pollo >= 0 ? parseTruthySheetFlag(row[cols.pollo]) : false;
+        const flagAsturias = cols.asturias >= 0 ? parseTruthySheetFlag(row[cols.asturias]) : false;
+        const flagSalpicao = cols.salpicao >= 0 ? parseTruthySheetFlag(row[cols.salpicao]) : false;
+        const mappedVendor = rawVendor.toUpperCase() === "FOOD SERVICE NORTE" ? "JAIDER MEDINA - FOOD SERVICE NORTE" : rawVendor;
+        if (sheetClientsByCanonical.has(canonical)) {
+          const prev = sheetClientsByCanonical.get(canonical);
+          prev.flagAceite = prev.flagAceite || flagAceite;
+          prev.flagAzucar = prev.flagAzucar || flagAzucar;
+          prev.flagPollo = prev.flagPollo || flagPollo;
+          prev.flagAsturias = prev.flagAsturias || flagAsturias;
+          prev.flagSalpicao = prev.flagSalpicao || flagSalpicao;
+          warnings.push({
+            sheet: actResolved.sheetName,
+            row: r + 1,
+            reason: `C\xF3digo de cliente duplicado #${rawClean} ("${razonSocial}") consolidado en registro \xFAnico`
+          });
+          continue;
+        }
+        tabMetric.validRecordsRead++;
+        sheetClientsByCanonical.set(canonical, {
+          rawCode: rawClean,
+          canonicalCode: canonical,
+          razonSocial,
+          vendedor: mappedVendor,
+          flagAceite,
+          flagAzucar,
+          flagPollo,
+          flagAsturias,
+          flagSalpicao
+        });
+      }
+    }
+    metrics[actResolved.sheetName] = tabMetric;
+  }
+  const mergedClientsMap = /* @__PURE__ */ new Map();
+  for (const mc of masterClients) {
+    const { rawClean, canonical } = normalizeClientCode(mc.cliente_codigo);
+    if (!canonical) continue;
+    const sheetMatch = sheetClientsByCanonical.get(canonical);
+    if (!mergedClientsMap.has(canonical)) {
+      mergedClientsMap.set(canonical, {
+        dbId: mc.id,
+        codigo: rawClean || canonical,
+        canonical,
+        razonSocial: String(mc.cliente_nombre || sheetMatch?.razonSocial || "").trim(),
+        vendedorId: String(mc.vendedor_id || mc.vendedor_nombre || "").replace(/\s+/g, " ").trim(),
+        vendedorNombre: String(mc.vendedor_nombre || mc.vendedor_id || "").replace(/\s+/g, " ").trim(),
+        isNewFromSheet: false,
+        sheetFlags: sheetMatch
+      });
+    }
+  }
+  for (const [canonical, sc] of sheetClientsByCanonical.entries()) {
+    if (mergedClientsMap.has(canonical)) continue;
+    if (sc.vendedor.toUpperCase() === "ALI PEREZ") continue;
+    mergedClientsMap.set(canonical, {
+      codigo: sc.rawCode || canonical,
+      canonical,
+      razonSocial: sc.razonSocial,
+      vendedorId: sc.vendedor,
+      vendedorNombre: sc.vendedor,
+      isNewFromSheet: true,
+      sheetFlags: sc
+    });
+  }
+  const activacionApiRows = [];
+  const activacionSupabaseUpserts = [];
+  const newSheetClientsForSupabase = [];
+  const clientActByVendor = /* @__PURE__ */ new Map();
+  for (const c of mergedClientsMap.values()) {
+    if (!c.vendedorId || c.vendedorId.toUpperCase() === "ALI PEREZ") continue;
+    const cAceite = productMaps.ACEITE.get(c.canonical) || productMaps.ACEITE.get(c.codigo) || 0;
+    const cAzucar = productMaps.AZUCAR.get(c.canonical) || productMaps.AZUCAR.get(c.codigo) || 0;
+    const cPollo = productMaps.POLLO.get(c.canonical) || productMaps.POLLO.get(c.codigo) || 0;
+    const cAsturias = productMaps.ESTANDAR_ASTURIAS.get(c.canonical) || productMaps.ESTANDAR_ASTURIAS.get(c.codigo) || 0;
+    const cSalpicao = productMaps.MORTADELA_SALPICAO.get(c.canonical) || productMaps.MORTADELA_SALPICAO.get(c.codigo) || 0;
+    const hasAceite = cAceite > 0 || Boolean(c.sheetFlags?.flagAceite);
+    const hasAzucar = cAzucar > 0 || Boolean(c.sheetFlags?.flagAzucar);
+    const hasPollo = cPollo > 0 || Boolean(c.sheetFlags?.flagPollo);
+    const hasAsturias = cAsturias > 0 || Boolean(c.sheetFlags?.flagAsturias);
+    const hasSalpicao = cSalpicao > 0 || Boolean(c.sheetFlags?.flagSalpicao);
+    const isActivo = hasAceite || hasAzucar || hasPollo || hasAsturias || hasSalpicao;
+    const vNorm = normalizeVendorName(c.vendedorNombre || c.vendedorId);
+    if (!clientActByVendor.has(vNorm)) {
+      clientActByVendor.set(vNorm, {
+        ACEITE: 0,
+        "AZ\xDACAR": 0,
+        AZUCAR: 0,
+        POLLO: 0,
+        "ESTANDAR Y SUPERIOR ASTURIAS": 0,
+        "MORTADELA SALPICAO Y ASTURIAS": 0
+      });
+    }
+    const vCounts = clientActByVendor.get(vNorm);
+    if (hasAceite) vCounts.ACEITE++;
+    if (hasAzucar) {
+      vCounts["AZ\xDACAR"]++;
+      vCounts.AZUCAR++;
+    }
+    if (hasPollo) vCounts.POLLO++;
+    if (hasAsturias) vCounts["ESTANDAR Y SUPERIOR ASTURIAS"]++;
+    if (hasSalpicao) vCounts["MORTADELA SALPICAO Y ASTURIAS"]++;
+    const supaPayload = {
+      ...c.dbId !== void 0 ? { id: c.dbId } : {},
+      periodo,
+      cliente_codigo: c.codigo,
+      cliente_nombre: c.razonSocial,
+      vendedor_id: c.vendedorId,
+      vendedor_nombre: c.vendedorNombre,
+      status: isActivo ? "ACTIVO" : "INACTIVO",
+      cajas_aceite: cAceite,
+      cajas_azucar: cAzucar,
+      cajas_pollo: cPollo,
+      cajas_estandar_asturias: cAsturias,
+      cajas_mortadela_salpicao: cSalpicao,
+      has_aceite: hasAceite,
+      has_azucar: hasAzucar,
+      has_pollo: hasPollo,
+      has_estandar_asturias: hasAsturias,
+      has_mortadela_salpicao: hasSalpicao
+    };
+    if (c.dbId !== void 0) {
+      activacionSupabaseUpserts.push(supaPayload);
+    } else if (c.isNewFromSheet) {
+      newSheetClientsForSupabase.push(supaPayload);
+    }
+    const vendUpper = c.vendedorId.toUpperCase();
+    const isVilla = vendUpper.includes("VILLA");
+    const isJohnatanOrMikel = vendUpper.includes("JOHNATAN") || vendUpper.includes("MIKELANGELO") || vendUpper.includes("SOTO");
+    const displayVendedorNombre = isJohnatanOrMikel ? isVilla ? "Mikelangelo Diaz (Villa del Rosario)" : "Mikelangelo Diaz (Principal)" : c.vendedorNombre;
+    const displayEmail = isJohnatanOrMikel ? "Mikelangelodiaz@gmail.com" : void 0;
+    activacionApiRows.push({
+      id: String(c.codigo),
+      vendedorId: c.vendedorId,
+      vendedorNombre: displayVendedorNombre,
+      vendedorEmail: displayEmail,
+      cliente: c.razonSocial,
+      status: isActivo ? "ACTIVO" : "INACTIVO",
+      cats: {
+        ACEITE: hasAceite,
+        AZUCAR: hasAzucar,
+        POLLO: hasPollo,
+        ESTANDAR_ASTURIAS: hasAsturias,
+        MORTADELA_SALPICAO: hasSalpicao,
+        ARROZ: hasPollo,
+        ENTERO: hasAsturias,
+        LIGEROS: hasSalpicao
+      },
+      cajas: {
+        ACEITE: cAceite,
+        AZUCAR: cAzucar,
+        POLLO: cPollo,
+        ESTANDAR_ASTURIAS: cAsturias,
+        MORTADELA_SALPICAO: cSalpicao
+      }
+    });
+  }
+  const metasSupabaseRows = [];
+  const metasApiRows = [];
+  const gridResolved = resolveSheetByAliases(
+    workbook,
+    ["grid_de_activacion_por_vendedor"],
+    ["grid_de_activacion", "grid"]
+  );
+  if (gridResolved) {
+    const rows = extractSheetRows(XLSX, gridResolved.sheet);
+    const tabMetric = {
+      sheetName: gridResolved.sheetName,
+      totalRowsInSheet: rows.length,
+      headerRows: rows.length >= 2 ? 2 : rows.length,
+      emptyRowsSkipped: 0,
+      summaryRowsSkipped: 0,
+      incompleteRowsLogged: 0,
+      validRecordsRead: 0
+    };
+    if (rows.length >= 2) {
+      const h0 = (rows[0] || []).map(normalizeHeaderKey);
+      const h1 = (rows[1] || []).map(normalizeHeaderKey);
+      const vendorCol = h1.findIndex((h) => h === "vendedor" || h === "ruta" || h === "ejecutivo");
+      const resolvedVendorCol = vendorCol !== -1 ? vendorCol : 0;
+      const findCategoryCols = (catKeywords, fallbackMeta, fallbackAct) => {
+        for (let c = 0; c < Math.max(h0.length, h1.length); c++) {
+          const cell1 = h1[c] || "";
+          const cell0 = h0[c] || "";
+          if (cell1.startsWith("meta") && catKeywords.some((kw) => cell1.includes(kw)) || catKeywords.some((kw) => cell0 === kw || cell0.includes(kw))) {
+            const actCol = h1[c + 1]?.includes("activad") ? c + 1 : c + 1;
+            return { metaIdx: c, actIdx: actCol };
+          }
+        }
+        return { metaIdx: fallbackMeta, actIdx: fallbackAct };
+      };
+      const catDefs = [
+        { name: "ACEITE", ...findCategoryCols(["aceite"], 2, 3) },
+        { name: "AZ\xDACAR", ...findCategoryCols(["azucar"], 4, 5) },
+        { name: "POLLO", ...findCategoryCols(["pollo", "arroz"], 6, 7) },
+        { name: "ESTANDAR Y SUPERIOR ASTURIAS", ...findCategoryCols(["estandar", "superior"], 8, 9) },
+        { name: "MORTADELA SALPICAO Y ASTURIAS", ...findCategoryCols(["mortadela", "salpicao"], 10, 11) }
+      ];
+      for (let r = 2; r < rows.length; r++) {
+        const row = rows[r];
+        if (isRowCompletelyEmpty(row)) {
+          tabMetric.emptyRowsSkipped++;
+          continue;
+        }
+        const rawVendor = row[resolvedVendorCol];
+        const vName = rawVendor !== null && rawVendor !== void 0 ? String(rawVendor).replace(/\s+/g, " ").trim() : "";
+        if (!vName) {
+          tabMetric.summaryRowsSkipped++;
+          continue;
+        }
+        if (isSupervisorSummaryHeader(vName)) {
+          tabMetric.summaryRowsSkipped++;
+          continue;
+        }
+        tabMetric.validRecordsRead++;
+        const vNorm = normalizeVendorName(vName);
+        const liveCounts = clientActByVendor.get(vNorm);
+        for (const cDef of catDefs) {
+          const meta = Math.round(parseLocaleNumber(row[cDef.metaIdx], 0));
+          let activados = Math.round(parseLocaleNumber(row[cDef.actIdx], 0));
+          if (activados === 0 && liveCounts && liveCounts[cDef.name] !== void 0) {
+            activados = liveCounts[cDef.name];
+          }
+          metasSupabaseRows.push({
+            periodo,
+            vendedor_id: vName,
+            categoria: cDef.name,
+            meta,
+            activados
+          });
+          metasApiRows.push({
+            vendedorId: vName,
+            categoria: cDef.name,
+            meta,
+            activados
+          });
+        }
+      }
+      if (!metasSupabaseRows.some((m) => normalizeVendorName(m.vendedor_id).includes("ANGEL NAVARRO"))) {
+        const angelCounts = clientActByVendor.get("ANGEL NAVARRO") || {};
+        for (const cat of [
+          "ACEITE",
+          "AZ\xDACAR",
+          "POLLO",
+          "ESTANDAR Y SUPERIOR ASTURIAS",
+          "MORTADELA SALPICAO Y ASTURIAS"
+        ]) {
+          const act = angelCounts[cat] || 0;
+          metasSupabaseRows.push({ periodo, vendedor_id: "ANGEL NAVARRO", categoria: cat, meta: 0, activados: act });
+          metasApiRows.push({ vendedorId: "ANGEL NAVARRO", categoria: cat, meta: 0, activados: act });
+        }
+      }
+    }
+    metrics[gridResolved.sheetName] = tabMetric;
+  }
+  const usuariosRows = [];
+  const usrResolved = resolveSheetByAliases(workbook, ["usuarios"], ["usuario"]);
+  if (usrResolved) {
+    const rows = extractSheetRows(XLSX, usrResolved.sheet);
+    const tabMetric = {
+      sheetName: usrResolved.sheetName,
+      totalRowsInSheet: rows.length,
+      headerRows: rows.length > 0 ? 1 : 0,
+      emptyRowsSkipped: 0,
+      summaryRowsSkipped: 0,
+      incompleteRowsLogged: 0,
+      validRecordsRead: 0
+    };
+    if (rows.length > 1) {
+      const cols = mapHeaderColumns(
+        rows[0] || [],
+        {
+          usuario: ["usuario", "username", "nombre"],
+          cedula: ["contrasena", "cedula", "password", "clave"],
+          rol: ["rol", "role", "perfil"],
+          vendorId: ["id_del_vendedor", "vendor_id", "id_vendedor", "id"]
+        },
+        { usuario: 0, cedula: 1, rol: 2, vendorId: 3 }
+      );
+      for (let r = 1; r < rows.length; r++) {
+        const row = rows[r];
+        if (isRowCompletelyEmpty(row)) {
+          tabMetric.emptyRowsSkipped++;
+          continue;
+        }
+        const usuario = String(row[cols.usuario] ?? "").replace(/\s+/g, " ").trim();
+        const cedula = String(row[cols.cedula] ?? "").trim();
+        if (!usuario) {
+          tabMetric.incompleteRowsLogged++;
+          warnings.push({
+            sheet: usrResolved.sheetName,
+            row: r + 1,
+            reason: "Fila en Usuarios sin nombre de usuario"
+          });
+          continue;
+        }
+        tabMetric.validRecordsRead++;
+        usuariosRows.push({
+          usuario,
+          cedula,
+          rol: String(row[cols.rol] || "Vendedor").trim(),
+          vendorId: String(row[cols.vendorId] ?? "").trim()
+        });
+      }
+    }
+    metrics[usrResolved.sheetName] = tabMetric;
+  }
+  const degustacionesRows = [];
+  const degResolved = resolveSheetByAliases(workbook, ["degustaciones"], ["degustacion"]);
+  if (degResolved) {
+    const rows = extractSheetRows(XLSX, degResolved.sheet);
+    const tabMetric = {
+      sheetName: degResolved.sheetName,
+      totalRowsInSheet: rows.length,
+      headerRows: rows.length > 0 ? 1 : 0,
+      emptyRowsSkipped: 0,
+      summaryRowsSkipped: 0,
+      incompleteRowsLogged: 0,
+      validRecordsRead: 0
+    };
+    if (rows.length > 1) {
+      const cols = mapHeaderColumns(
+        rows[0] || [],
+        {
+          id: ["id"],
+          fechaRegistro: ["fecha_registro", "created_at", "timestamp"],
+          vendedor: ["vendedor", "vendedor_nombre"],
+          ruta: ["ruta", "zona"],
+          clienteCodigo: ["codigo_cliente", "id_cliente", "cliente_codigo"],
+          clienteNombre: ["nombre_cliente", "cliente", "razon_social"],
+          fechaDegustacion: ["fecha_degustacion", "fecha"],
+          turno: ["turno"],
+          horario: ["horario", "hora"],
+          productos: ["productos", "producto"],
+          kilosEstimados: ["kilos_estimados", "kilos"],
+          personasEstimadas: ["personas_estimadas", "personas"],
+          requierePromotora: ["requiere_promotora"],
+          materialPop: ["material_pop"],
+          contactoPunto: ["contacto_punto", "contacto"],
+          telefonoContacto: ["telefono_contacto", "telefono"],
+          estado: ["estado", "status"],
+          promotoraAsignada: ["promotora_asignada", "promotora"],
+          notasTradeMarketing: ["notas_trade_marketing", "notas", "observaciones"]
+        },
+        {
+          id: 0,
+          fechaRegistro: 1,
+          vendedor: 2,
+          ruta: 3,
+          clienteCodigo: 4,
+          clienteNombre: 5,
+          fechaDegustacion: 6,
+          turno: 7,
+          horario: 8,
+          productos: 9,
+          kilosEstimados: 10,
+          personasEstimadas: 11,
+          requierePromotora: 12,
+          materialPop: 13,
+          contactoPunto: 14,
+          telefonoContacto: 15,
+          estado: 16,
+          promotoraAsignada: 17,
+          notasTradeMarketing: 18
+        }
+      );
+      for (let r = 1; r < rows.length; r++) {
+        const row = rows[r];
+        if (isRowCompletelyEmpty(row)) {
+          tabMetric.emptyRowsSkipped++;
+          continue;
+        }
+        const id = String(row[cols.id] ?? "").trim();
+        if (!id) {
+          tabMetric.incompleteRowsLogged++;
+          warnings.push({
+            sheet: degResolved.sheetName,
+            row: r + 1,
+            reason: "Fila en Degustaciones con datos parciales pero sin ID primario"
+          });
+          continue;
+        }
+        tabMetric.validRecordsRead++;
+        const rawProductos = String(row[cols.productos] ?? "").trim();
+        const parsedProductos = rawProductos ? (parseCsvRfc4180(rawProductos)[0] || []).map((p) => p.trim()).filter(Boolean) : [];
+        degustacionesRows.push({
+          id,
+          createdAt: parseSheetDate(row[cols.fechaRegistro]) || String(row[cols.fechaRegistro] ?? "").trim(),
+          vendedorNombre: String(row[cols.vendedor] ?? "").trim(),
+          ruta: String(row[cols.ruta] ?? "").trim(),
+          clienteCodigo: normalizeClientCode(row[cols.clienteCodigo]).rawClean,
+          clienteNombre: String(row[cols.clienteNombre] ?? "").trim(),
+          fecha: parseSheetDate(row[cols.fechaDegustacion]) || "",
+          turno: String(row[cols.turno] ?? "MA\xD1ANA").trim().toUpperCase(),
+          hora: String(row[cols.horario] ?? "").trim(),
+          productos: parsedProductos,
+          kilosEstimados: parseLocaleNumber(row[cols.kilosEstimados], 0),
+          personasEstimadas: Math.round(parseLocaleNumber(row[cols.personasEstimadas], 0)),
+          requierePromotora: parseTruthySheetFlag(row[cols.requierePromotora]),
+          materialPop: parseTruthySheetFlag(row[cols.materialPop]),
+          contactoPunto: String(row[cols.contactoPunto] ?? "").trim(),
+          telefonoContacto: String(row[cols.telefonoContacto] ?? "").trim(),
+          estado: String(row[cols.estado] ?? "SOLICITADA").trim().toUpperCase(),
+          promotoraAsignada: String(row[cols.promotoraAsignada] ?? "").trim(),
+          notasTradeMarketing: String(row[cols.notasTradeMarketing] ?? "").trim()
+        });
+      }
+    }
+    metrics[degResolved.sheetName] = tabMetric;
+  }
+  return {
+    periodo,
+    volumenSupabaseRows,
+    volumenApiRows,
+    metasSupabaseRows,
+    metasApiRows,
+    activacionApiRows,
+    activacionSupabaseUpserts,
+    newSheetClientsForSupabase,
+    productMaps,
+    usuariosRows,
+    degustacionesRows,
+    metrics,
+    warnings
+  };
+}
+
 // server.ts
 var import_firestore3 = require("firebase/firestore");
 var import_supabase_js = require("@supabase/supabase-js");
@@ -2145,32 +3429,109 @@ function rateLimiter(windowMs, maxRequests, label) {
 var cachedWorkbook = null;
 var lastFetchTime = 0;
 var CACHE_TTL = 3e4;
+var lastSuccessfulSheetSyncAt = "";
+var lastSheetSource = "memory";
+var lastSheetMetrics = {};
+var lastSheetWarnings = [];
+var cachedLocalMasterSeed = null;
+function loadLocalMasterClientSeed() {
+  if (cachedLocalMasterSeed) return cachedLocalMasterSeed;
+  try {
+    const seedPath = import_path.default.join(process.cwd(), "scripts", "data_maestra_octubre_2026.json");
+    if (import_fs.default.existsSync(seedPath)) {
+      const raw = JSON.parse(import_fs.default.readFileSync(seedPath, "utf8"));
+      if (Array.isArray(raw)) {
+        cachedLocalMasterSeed = raw.filter((item) => item && item.id && item.vendedor).map((item) => ({
+          cliente_codigo: String(item.id).trim(),
+          cliente_nombre: String(item.razonSocial || "").trim(),
+          vendedor_id: String(item.vendedor).replace(/\s+/g, " ").trim(),
+          vendedor_nombre: String(item.vendedor).replace(/\s+/g, " ").trim()
+        }));
+        return cachedLocalMasterSeed;
+      }
+    }
+  } catch (err) {
+    console.warn("[SERVER] No se pudo cargar semilla local data_maestra_octubre_2026.json:", err?.message);
+  }
+  return [];
+}
+function setNoCacheSyncHeaders(res, source) {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.setHeader("Surrogate-Control", "no-store");
+  if (lastSuccessfulSheetSyncAt) {
+    res.setHeader("X-Last-Sync", lastSuccessfulSheetSyncAt);
+  }
+  if (source || lastSheetSource) {
+    res.setHeader("X-Sync-Source", source || lastSheetSource);
+  }
+}
+async function fetchGoogleSheetWithRetry(url, maxAttempts = 3) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15e3);
+    try {
+      const fetchRes = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          "Cache-Control": "no-cache, no-store, must-revalidate",
+          "Pragma": "no-cache",
+          "Expires": "0"
+        }
+      });
+      if (!fetchRes.ok) {
+        throw new Error(`HTTP ${fetchRes.status} ${fetchRes.statusText}`);
+      }
+      return await fetchRes.arrayBuffer();
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxAttempts) {
+        const delayMs = 500 * Math.pow(2, attempt - 1);
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastError || new Error("Fallo al descargar Google Sheet");
+}
 async function getWorkbook(force = false) {
   if (!force && cachedWorkbook && Date.now() - lastFetchTime < CACHE_TTL) {
     return cachedWorkbook;
   }
   const XLSX = await import("xlsx");
+  const sheetId = getGoogleSheetId();
   try {
-    const fetchRes = await fetch("https://docs.google.com/spreadsheets/d/1PLzYEe9GG1vHb_wjd7HA93U6UQNtyP-uk8sxVfiN4sg/export?format=xlsx");
-    if (fetchRes.ok) {
-      const buffer = await fetchRes.arrayBuffer();
-      cachedWorkbook = XLSX.read(buffer, { type: "array" });
-      lastFetchTime = Date.now();
-      const localPath2 = import_path.default.join(process.cwd(), "sheet.xlsx");
-      try {
-        import_fs.default.writeFileSync(localPath2, Buffer.from(buffer));
-      } catch (_) {
-      }
-      return cachedWorkbook;
+    const exportUrl = buildGoogleSheetExportUrl(sheetId, "xlsx");
+    const buffer = await fetchGoogleSheetWithRetry(exportUrl, 3);
+    cachedWorkbook = XLSX.read(buffer, { type: "array", raw: true });
+    lastFetchTime = Date.now();
+    lastSuccessfulSheetSyncAt = (/* @__PURE__ */ new Date()).toISOString();
+    lastSheetSource = "live_google_sheet";
+    const localPath2 = import_path.default.join(process.cwd(), "sheet.xlsx");
+    try {
+      import_fs.default.writeFileSync(localPath2, Buffer.from(buffer));
+    } catch (_) {
     }
+    return cachedWorkbook;
   } catch (err) {
-    console.warn("[SERVER] No se pudo obtener XLSX en vivo desde Google Sheets:", err?.message);
+    console.warn(`[SERVER] No se pudo obtener XLSX en vivo desde Google Sheets (${sheetId}):`, err?.message);
   }
   const localPath = import_path.default.join(process.cwd(), "sheet.xlsx");
   if (import_fs.default.existsSync(localPath)) {
     try {
       cachedWorkbook = XLSX.readFile(localPath);
       lastFetchTime = Date.now();
+      lastSheetSource = "local_backup";
+      if (!lastSuccessfulSheetSyncAt) {
+        try {
+          lastSuccessfulSheetSyncAt = import_fs.default.statSync(localPath).mtime.toISOString();
+        } catch {
+          lastSuccessfulSheetSyncAt = (/* @__PURE__ */ new Date()).toISOString();
+        }
+      }
       return cachedWorkbook;
     } catch (fsErr) {
       console.warn("[SERVER] Error leyendo archivo local sheet.xlsx:", fsErr?.message);
@@ -2193,7 +3554,8 @@ async function startServer() {
   app2.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
-    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
+    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, Pragma");
+    res.header("Access-Control-Expose-Headers", "X-Last-Sync, X-Sync-Source");
     if (req.method === "OPTIONS") {
       return res.sendStatus(200);
     }
@@ -2235,6 +3597,7 @@ async function startServer() {
     "ALI PEREZ": { password: "19117934", role: "SUPERVISOR", vendorId: "SUPERVISOR_ALI_PEREZ" },
     "ANGEL NAVARRO": { password: "25468939", role: "VENDEDOR", vendorId: "29" },
     "MARIANGEL GONZALEZ": { password: "20552780", role: "VENDEDOR", vendorId: "47" },
+    "MARIANGEL": { password: "20552780", role: "VENDEDOR", vendorId: "47" },
     "VICTOR CAMPOS": { password: "19944329", role: "VENDEDOR", vendorId: "48" },
     "J PABLO ARAUJO": { password: "15239697", role: "VENDEDOR", vendorId: "31" },
     "EDUARDO PI\xD1A": { password: "11878063", role: "VENDEDOR", vendorId: "33" },
@@ -2269,7 +3632,7 @@ async function startServer() {
           }
         }
       }
-      const isNewFalconVendor = ["ANGEL NAVARRO", "MARIANGEL GONZALEZ", "VICTOR CAMPOS"].includes(matchedCanonicalKey);
+      const isNewFalconVendor = ["ANGEL NAVARRO", "MARIANGEL GONZALEZ", "MARIANGEL", "VICTOR CAMPOS"].includes(matchedCanonicalKey);
       if (supabase) {
         try {
           const { data: supaUser, error: supaErr } = await supabase.from("usuarios").select("*").in("username", [usuarioUpper, matchedCanonicalKey]).maybeSingle();
@@ -3109,25 +4472,30 @@ async function startServer() {
       const sourceRenglones = Array.isArray(item.renglones) && item.renglones.length > 0 ? item.renglones : Array.isArray(item.items) ? item.items : [];
       const gestorArticles = sourceRenglones.map((it) => {
         const rawCod = String(it.sku || it.codigo || "").trim();
-        const cleanCod = /^\d{1,6}$/.test(rawCod) ? rawCod.padStart(6, "0") : rawCod;
-        const desc = String(it.producto || it.descripcion || "PRODUCTO").trim().toUpperCase();
+        const desc = limpiarDescripcionAlkosto(String(it.producto || it.descripcion || "PRODUCTO").trim().toUpperCase());
+        const resolvedProd = resolverProductoBackend(rawCod, desc);
+        const cleanCod = (resolvedProd ? resolvedProd.sku : "") || rawCod;
         const cant = parseNumeroEstricto(it.cantidad ?? it.cantidadCajas ?? it.cantSolicitada ?? it.cantidad_solicitada, 0);
         const precio = parseNumeroEstricto(it.precio_unitario ?? it.precioUnitarioUSD ?? it.precio, 0);
         const sub = precio > 0 ? Number((cant * precio).toFixed(2)) : Number(parseNumeroEstricto(it.subtotal ?? it.subtotalUSD ?? it.sub_total, 0).toFixed(2));
-        const rawUnit = String(it.unidad_medida || it.presentacion || it.unid || it.unidad || "CJ").trim().toUpperCase();
+        const rawUnit = String(it.unidad_medida || it.presentacion || it.unid || it.unidad || resolvedProd?.unid || "CJ").trim().toUpperCase();
         const normUnit = ["CJ", "CJA", "CAJA", "CAJAS", "BLT", "BTO", "BULTO", "BULTOS"].includes(rawUnit) ? "BULTO" : rawUnit === "UND" || rawUnit === "UNIDAD" ? "UNIDAD" : "KG";
         return {
           codigo: cleanCod,
-          descripcion: desc,
-          cantidad_solicitada: cant,
+          descripcion: (resolvedProd ? resolvedProd.nombre : "") || desc,
+          cantidad_solicitada: Number(cant.toFixed(2)),
           cantidad_despachada: 0,
           unidad_medida: normUnit,
-          precio_unitario: precio,
-          sub_total: sub
+          precio_unitario: Number(precio.toFixed(4)),
+          sub_total: Number(sub.toFixed(2))
         };
-      }).filter((a) => a.cantidad_solicitada > 0 || a.descripcion);
+      }).filter((a) => Number.isFinite(a.cantidad_solicitada) && !Number.isNaN(a.cantidad_solicitada) && a.cantidad_solicitada > 0);
+      if (gestorArticles.length === 0) {
+        console.warn(`[ENVIO_FDV -> SALA_ESPERA] Se descart\xF3 pedido de ${sucursalClienteClean} por tener 0 renglones activos (cantidad > 0).`);
+        return;
+      }
       const totalMonto = Number(
-        (gestorArticles.reduce((acc, a) => acc + (Number(a.sub_total) || 0), 0) || parseNumeroEstricto(item.monto_pedido ?? item.totalUSD ?? item.total_usd, 0)).toFixed(2)
+        gestorArticles.reduce((acc, a) => acc + Number((a.cantidad_solicitada * a.precio_unitario).toFixed(2)), 0).toFixed(2)
       );
       const fechaValida = item.fechaPedido || item.fecha ? String(item.fechaPedido || item.fecha).includes("T") ? String(item.fechaPedido || item.fecha).split("T")[0] : String(item.fechaPedido || item.fecha) : (/* @__PURE__ */ new Date()).toISOString().split("T")[0];
       const vendedorClean = String(item.vendedor || item.ruta || "SAIRU VALLES / CUENTAS CLAVE 2").trim().toUpperCase();
@@ -3475,7 +4843,12 @@ async function startServer() {
   const MASTER_PRODUCTOS_DICT = [
     { sku: "1496", nombre: "MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR", barcode: "7590377000077", chainCodes: ["1461", "1496", "7590377000077"], unid: "CJ" },
     { sku: "1519", nombre: "MORTADELA ESP D/POLLO SALPICAO 10UNDX900GR", barcode: "", chainCodes: ["1462", "1519"], unid: "CJ" },
-    { sku: "21", nombre: "MORTADELA ESP D/POLLO CORRAL 1X12UNI", barcode: "", chainCodes: ["21", "1463"], unid: "CJ" },
+    { sku: "21", nombre: "MORTADELA DE POLLO DEL CORRAL 1KG", barcode: "7591289609129", chainCodes: ["21", "021", "1463", "7591289609129"], unid: "CJ" },
+    { sku: "047", nombre: "NUGGETS DE POLLO DEL CORRAL 460GR", barcode: "7591289400023", chainCodes: ["047", "47", "7591289400023"], unid: "UND" },
+    { sku: "1360", nombre: "PAPAS FRITAS CONGELADAS MARQUISE 2,5KG", barcode: "5412873178161", chainCodes: ["1360", "5412873178161", "PATATAS"], unid: "CJ" },
+    { sku: "100281", nombre: "QUESO MOZZARELLA CORLASA X KG", barcode: "", chainCodes: ["100281"], unid: "KG" },
+    { sku: "7591210000513", nombre: "CREMA DE LECHE PURISIMA 500GR", barcode: "7591210000513", chainCodes: ["7591210000513"], unid: "CJ" },
+    { sku: "7591210000544", nombre: "CREMA DE LECHE PURISIMA 250GR", barcode: "7591210000544", chainCodes: ["7591210000544"], unid: "CJ" },
     { sku: "1464", nombre: "MORT. NAVIDE\xD1A ASTURIAS XKG", barcode: "", chainCodes: ["1464"], unid: "KG" },
     { sku: "1461", nombre: "MORT. ESTANDAR ASTURIAS X KG", barcode: "", chainCodes: ["1461"], unid: "KG" },
     { sku: "1462", nombre: "MORT. ESPECIAL COCIDA ASTURIAS X KG", barcode: "", chainCodes: ["1462"], unid: "KG" },
@@ -3516,7 +4889,6 @@ async function startServer() {
     { sku: "302", nombre: "AZUCAR REFINADA BLANCA 50KG", barcode: "", chainCodes: ["302", "AZUCAR"], unid: "CJ" },
     { sku: "303", nombre: "ARROZ BLANCO ESPECIAL 24X1KG", barcode: "", chainCodes: ["303", "ARROZ"], unid: "CJ" },
     { sku: "401", nombre: "HUEVOS BLANCOS SELECCIONADOS", barcode: "", chainCodes: ["401", "HUEVOS"], unid: "CJ" },
-    { sku: "1360", nombre: "PATATAS FRESCAS MARQUISE 4X2.5KG", barcode: "", chainCodes: ["1360", "PATATAS"], unid: "CJ" },
     { sku: "1569", nombre: "PATATAS FRESCAS DOBLE COBERTURA 4X2.5KG", barcode: "", chainCodes: ["1569"], unid: "CJ" },
     { sku: "UTH", nombre: "LECHE LIQUIDA UHT 12X1LT", barcode: "", chainCodes: ["UTH"], unid: "CJ" },
     { sku: "LPV", nombre: "LECHE EN POLVO VENCAMPO", barcode: "", chainCodes: ["LPV"], unid: "CJ" },
@@ -3610,65 +4982,16 @@ async function startServer() {
             const pos = parseInt(posMatch[1], 10);
             try {
               return JSON.parse(text.substring(0, pos).trim());
-            } catch (e2) {
+            } catch {
             }
           }
         }
         const firstBrace = text.indexOf("{");
         if (firstBrace !== -1) {
-          let depth = 0;
-          let inString = false;
-          let escape = false;
-          let endPos = -1;
-          for (let i = firstBrace; i < text.length; i++) {
-            const ch = text[i];
-            if (escape) {
-              escape = false;
-              continue;
-            }
-            if (ch === "\\") {
-              escape = true;
-              continue;
-            }
-            if (ch === '"') {
-              inString = !inString;
-              continue;
-            }
-            if (!inString) {
-              if (ch === "{") depth++;
-              else if (ch === "}") {
-                depth--;
-                if (depth === 0) {
-                  endPos = i;
-                  break;
-                }
-              }
-            }
-          }
-          if (endPos !== -1) {
-            const candidate = text.substring(firstBrace, endPos + 1).trim();
-            try {
-              return JSON.parse(candidate);
-            } catch (e3) {
-              try {
-                const cleaned = candidate.replace(/,\s*([}\]])/g, "$1");
-                return JSON.parse(cleaned);
-              } catch (e4) {
-              }
-            }
-          }
           const lastBrace = text.lastIndexOf("}");
           if (lastBrace > firstBrace) {
-            const candidate2 = text.substring(firstBrace, lastBrace + 1).trim();
-            try {
-              return JSON.parse(candidate2);
-            } catch (e5) {
-              try {
-                const cleaned2 = candidate2.replace(/,\s*([}\]])/g, "$1");
-                return JSON.parse(cleaned2);
-              } catch (e6) {
-              }
-            }
+            const candidate = text.substring(firstBrace, lastBrace + 1).trim().replace(/,\s*([}\]])/g, "$1");
+            return JSON.parse(candidate);
           }
         }
         throw new Error("No se pudo interpretar el JSON devuelto por el lector OCR");
@@ -3688,22 +5011,29 @@ async function startServer() {
       }
       const isPdfPayload = actualMime === "application/pdf" || cleanBase64.startsWith("JVBERi0");
       if (isPdfPayload) {
+        actualMime = "application/pdf";
+      }
+      let deterministicOrder = null;
+      if (isPdfPayload) {
         try {
           const pdfBuffer = Buffer.from(cleanBase64, "base64");
           const positionedText = extractPositionedTextFromAlkostoPdfBuffer(pdfBuffer, import_zlib.default.inflateSync);
           if (positionedText) {
-            const deterministicOrder = parseAlkostoRawText(positionedText);
-            if (deterministicOrder && deterministicOrder.items.length > 0) {
-              return res.json({
-                success: true,
-                parserMode: "DETERMINISTIC_PDF",
-                data: deterministicOrder
-              });
+            const parsedDet = parseAlkostoRawText(positionedText);
+            if (parsedDet && parsedDet.items.length > 0) {
+              deterministicOrder = parsedDet;
             }
           }
         } catch (pdfParseErr) {
-          console.warn("[ALKOSTO OCR] PDF no pudo procesarse por v\xEDa determinista, usando motor IA:", pdfParseErr?.message);
+          console.warn("[ALKOSTO OCR] Advertencia en lectura de coordenadas PDF:", pdfParseErr?.message);
         }
+      }
+      if (!process.env.GEMINI_API_KEY && deterministicOrder) {
+        return res.json({
+          success: true,
+          parserMode: "DETERMINISTIC_PDF",
+          data: deterministicOrder
+        });
       }
       const ai = new import_genai.GoogleGenAI({
         apiKey: process.env.GEMINI_API_KEY,
@@ -3713,87 +5043,50 @@ async function startServer() {
           }
         }
       });
-      const prompt = `Act\xFAa como un motor de visi\xF3n artificial de precisi\xF3n bancaria especializado en extraer \xD3rdenes de Compra (OC) y Notas de Pedido de CODIZULCA, C.A.
-Analiza la imagen o documento adjunto y devuelve \xDANICAMENTE un objeto JSON estrictamente estructurado que siga el esquema proporcionado.
-
-EL DOCUMENTO PUEDE VENIR EN UNO DE ESTOS DOS ESQUEMAS VISUALES OFICIALES:
-
-================================================================================
-ESQUEMA VISUAL A: FORMATO OFICIAL DE ORDEN DE COMPRA / NOTA DE PEDIDO CODIZULCA
-================================================================================
-1. ENCABEZADOS SUPERIORES:
-   - "CLIENTE:" -> Extraer en "clienteNombre" (ej. "Alkosto 1 san Felipe", "Familia Center 1 - Plaza lago").
-   - "FECHA:" -> Extraer en "fechaEntrega" (formato DD/MM/YYYY o YYYY-MM-DD).
-   - "ID CLIENTE:" -> Extraer en "idCliente" (ej. "7498", "7499", "7490").
-   - "N\xB0 DE PEDIDO:" -> Extraer en "nroPedido".
-   - "ORDEN DE COMPRA:" -> Extraer en "ordenNro" (ej. "0200605591", "OC-4501"). \xA1CR\xCDTICO: Nunca dejar vac\xEDo si aparece impreso o manuscrito!
-   - "RUTA:" -> Extraer en "ruta" (ej. "SAIRU VALLES / CUENTAS CLAVE 2").
-2. TABLA DE PRODUCTOS (8 COLUMNAS ESTRICTAS DE IZQUIERDA A DERECHA):
-   - Columna 1: "N\xB0" -> N\xFAmero de fila/rengl\xF3n (1 al 15). Extraer en "renglon".
-   - Columna 2 y 3 (Bajo cabecera agrupada "CANT. SOLICITADA"):
-     * Subcolumna 2a: "UNID" -> Unidad de medida comercial. Normalizar estrictamente a:
-       - "CJ" si dice CJ, CAJA, CAJAS, BULTO, BULTOS, CJS.
-       - "UND" si dice UND, UNI, UNIDAD, UNIDADES, PZA, PIEZA.
-       - "KG" si dice KG, KGS, KILO, KILOS, KILOGRAMOS.
-       - "BLT" si dice BLT.
-       Extraer en "unid". \xA1PROHIBIDO poner la unidad en la columna SKU o CANT!
-     * Subcolumna 2b: "CANT" -> Cantidad num\xE9rica solicitada. Extraer en "totalCantidad".
-   - Columna 4: "CANTIDAD DESPACHADA" -> Suele venir en blanco o con n\xFAmero de despacho. Extraer en "cantDespachada". \xA1ADVERTENCIA VISUAL CR\xCDTICA!: Aunque "CANTIDAD DESPACHADA" est\xE9 vac\xEDa, NO desplaces la columna "SKU" hacia la izquierda ni mezcles "CANT" con "SKU".
-   - Columna 5: "SKU" -> C\xF3digo corto CODIZULCA (ej. "1496", "1497", "21", "047", "046", "1360", "1512") o c\xF3digo EAN/Cadena. Extraer en "codigo" y "skuCodizulca".
-   - Columna 6: "DESCRIPCI\xD3N DEL PRODUCTO" -> Nombre completo del producto. Extraer en "descripcion".
-   - Columna 7: "PRECIO" -> Precio unitario en USD/Bs. Extraer en "costoUnitario".
-   - Columna 8: "SUB TOTAL" -> Monto total de la fila (CANT * PRECIO). Extraer en "totalRenglon".
-   - NOTA IMPORTANTE SOBRE FILAS VAC\xCDAS: El formato oficial CODIZULCA tiene 15 filas preimpresas (1..15). Ignora por completo las filas vac\xEDas de la plantilla que no tengan SKU, descripci\xF3n ni cantidad.
-3. PIE DE P\xC1GINA:
-   - "TOTAL GENERAL" -> Extraer en "subtotal".
-   - "OBSERVACIONES" -> Extraer en "observaciones".
-   - "SUPERVISOR" -> Extraer en "supervisor".
-   - "CHOFER" -> Extraer en "chofer".
-   - "CANTIDAD DE CESTAS" -> Extraer en "cantidadCestas".
-
-================================================================================
-ESQUEMA VISUAL B: ORDEN DE COMPRA MATRIZ DE CADENA (ALKOSTO / FAMILIA CENTER)
-================================================================================
-1. Pertenece a ALKOSTO (columnas de tienda AK01..AK10, AKOP) o FAMILIA CENTER (columnas FC01..FC07, FCOP).
-2. "ordenNro": N\xFAmero de Orden de Compra en la esquina superior derecha (ej. "0200605591").
-3. "codigo": Lee el c\xF3digo EXACTO impreso en la columna C\xF3digo de cada rengl\xF3n sin espacios ni guiones.
-4. "descripcion": Elimina el sufijo "/ <precio>" al final de la descripci\xF3n (ej. "PECHUGA DE PAVO ASTURIAS X KG / 6.88" -> "PECHUGA DE PAVO ASTURIAS X KG"). NUNCA uses ese n\xFAmero tras la barra como costoUnitario.
-5. "emp" vs Tiendas (AK01..AK10 / FC01..FC07): La columna "EMP" (empaque: 0, 4, 6, 10, 12, 20) est\xE1 situada entre "IVA" y la primera tienda ("AK01" o "FC01"). NUNCA asignes el valor entero de "EMP" a ninguna tienda.
-6. Unidad de medida ("unid"): Si el producto se vende por caja/empaque (EMP >= 4 o descripci\xF3n indica UND/CAJA como "10UNDX900GR", "20UNDX500GR", "1X12UNI", "4X2.5KG", "6 X 500 GRS") usa "CJ"; si es por pieza unitaria (ej. "NUGGET CORRAL DE 460GM", "226 GR X 36 UND") usa "UND"; si es por peso ("X KG", "POR KG", "3.5KG X 4 UND") usa "KG".
-7. Verificaci\xF3n Matem\xE1tica: La suma de las cantidades de las tiendas de cada fila DEBE coincidir con "totalCantidad", y "totalCantidad" * "costoUnitario" DEBE coincidir con "totalRenglon".
-
-DICCIONARIO MAESTRO DE C\xD3DIGOS Y PRODUCTOS CODIZULCA PARA ASISTIR LA LECTURA EXACTA:
-- EAN-13: 7590377000077 -> SKU 1496 MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR (Unidad: CJ)
-- EAN-13: 7590377000589 -> SKU 1497 MORTADELA ESP D/POLLO ASTURIAS 20UNDX500GR (Unidad: CJ)
-- EAN-13: 7591289609129 -> SKU 21 MORTADELA ESP D/POLLO CORRAL 1X12UNI (Unidad: CJ)
-- EAN-13: 7591289400023 -> SKU 047 NUGGET CORRAL DE 460GM (Unidad: UND)
-- Cadena Alkosto: 100253 -> SKU 046 NUGGETS DE POLLO (COD. 046) (Unidad: KG)
-- EAN-13: 5412873178161 -> SKU 1360 PATATAS FRESCAS MARQUISE 4X2.5KG (Unidad: CJ)
-- EAN-13: 7591210000513 -> SKU 7591210000513 CREMA DE LECHE PURISIMA 6 X 500 GRS (Unidad: CJ)
-- EAN-12: 021000061778 -> SKU 021000061778 QUESO CREMA KRAFT 226 GR X 36 UND (Unidad: UND)
-- Cadena Alkosto: 100281 -> SKU 100281 QUESO MOZZARELLA CORLASA 3.5KG X 4 UND (Unidad: KG)
-- Cadena Alkosto: 100881 -> SKU 1512 MORT. PECHUGA DE PAVO ASTURIAS X KG (Unidad: KG)
-- Cadena Alkosto: 100882 -> SKU 1511 MORT. PECHUGA DE POLLO ASTURIAS X KG (Unidad: KG)
-- Cadena Alkosto: 100929 -> SKU 1463 JAMON COCIDO DE PAVO AHUMADO SUPERIOR ASTURIAS X KG (Unidad: KG)
-- C\xF3digo 1446 -> SKU 1446 CHULETA FRESCA ASTURIAS POR KG (Unidad: KG)
-- C\xF3digo 1462 / 1519 -> SKU 1519 MORTADELA ESP D/POLLO SALPICAO 10UNDX900GR (Unidad: CJ)`;
+      const systemInstruction = `Eres un motor de visi\xF3n multimodal bancaria especializado en lectura visual nativa de \xD3rdenes de Compra (OC) en PDF e imagen de CODIZULCA, C.A. para las cadenas ALKOSTO (P\xE1gina 1: columnas AK01 a AK10, AKOP, CI) y FAMILIA CENTER (P\xE1gina 2: columnas FC01 a FC07).
+REGLAS ESTRICTAS OBLIGATORIAS:
+1. Lee visualmente las l\xEDneas de la cuadr\xEDcula de TODAS las p\xE1ginas del PDF sin desfasar columnas cuando la descripci\xF3n salta de l\xEDnea.
+2. Extrae obligatoriamente: numero_oc (ej. "0000055773"), fecha_emision (ej. "26/10/2026"), fecha_entrega (ej. "31/10/2026"), tasa_cambio (ej. 887.3020), subtotal_alkosto, subtotal_familia_center y subtotal_general.
+3. Recorre todas las p\xE1ginas del PDF identificando la matriz de cada cadena:
+   - P\xE1gina Alkosto: AK01, AK02, AK03, AK04, AK05, AK06, AK07, AK08, AK09, AK10, AKOP, CI.
+   - P\xE1gina Familia Center: FC01, FC02, FC03, FC04, FC05, FC06, FC07.
+4. REGLA DE AUTOCORRECTOR MATEM\xC1TICO POR FILA: Para cada producto, la suma de las cantidades de todas las tiendas de esa p\xE1gina DEBE ser exactamente igual a la columna Total Cantidad de esa fila, y Total Cantidad * Costo Unitario debe cuadrar con Total Renglon. Si en una celda el texto parece decir "200" pero el Total Cantidad de la fila es "3.00" y otra tienda tiene "1.00" (ej. en AK10 para el c\xF3digo 7591210000513), corrige autom\xE1ticamente el valor a "2.00".
+5. Homologaci\xF3n de C\xF3digo EAN a SKU Interno y limpieza de descripci\xF3n:
+   - 7591289609129 -> SKU "21" | "CJ" | "MORTADELA DE POLLO DEL CORRAL 1KG"
+   - 7591289400023 -> SKU "047" | "UND" | "NUGGETS DE POLLO DEL CORRAL 460GR"
+   - 5412873178161 -> SKU "1360" | "CJ" | "PAPAS FRITAS CONGELADAS MARQUISE 2,5KG"
+   - 100281 -> SKU "100281" | "KG" | "QUESO MOZZARELLA CORLASA X KG"
+   - 7591210000513 -> SKU "7591210000513" | "CJ" | "CREMA DE LECHE PURISIMA 500GR"
+   - 7591210000544 -> SKU "7591210000544" | "CJ" | "CREMA DE LECHE PURISIMA 250GR"
+   Elimina siempre de la descripci\xF3n el sufijo del PVP (ej. quitar "/3.78", "/5.84", "/6.99", "/12.00", "/5.89", "/3.70").`;
+      const prompt = `Analiza visualmente el documento PDF/imagen adjunto en todas sus p\xE1ginas y devuelve \xDANICAMENTE un objeto JSON estructurado que cumpla estrictamente el responseSchema y el cuadre matem\xE1tico por fila y por cadena.`;
       const ocResponseSchema = {
         type: import_genai.Type.OBJECT,
         properties: {
-          clienteCadena: { type: import_genai.Type.STRING, description: "ALKOSTO o FAMILIA_CENTER" },
-          ordenNro: { type: import_genai.Type.STRING, description: "N\xFAmero de Orden de Compra (ej. 0200605591)" },
-          clienteNombre: { type: import_genai.Type.STRING, description: "Nombre del cliente o sucursal en encabezado CLIENTE" },
-          idCliente: { type: import_genai.Type.STRING, description: "C\xF3digo de sucursal en encabezado ID CLIENTE (ej. 7498, 7490)" },
-          ruta: { type: import_genai.Type.STRING, description: "Ruta o vendedor asignado en encabezado RUTA" },
-          nroPedido: { type: import_genai.Type.STRING, description: "N\xB0 de pedido si aparece en el formato" },
-          sede: { type: import_genai.Type.STRING },
+          numero_oc: { type: import_genai.Type.STRING, description: "N\xFAmero de Orden de Compra (ej. 0000055773)" },
+          ordenNro: { type: import_genai.Type.STRING, description: "N\xFAmero de Orden de Compra (ej. 0000055773)" },
+          fecha_emision: { type: import_genai.Type.STRING, description: "Fecha de emisi\xF3n (ej. 26/10/2026)" },
           fechaEmision: { type: import_genai.Type.STRING },
-          fechaEntrega: { type: import_genai.Type.STRING, description: "Fecha del documento o fecha de entrega" },
-          diasCredito: { type: import_genai.Type.NUMBER },
+          fecha_entrega: { type: import_genai.Type.STRING, description: "Fecha de entrega (ej. 31/10/2026)" },
+          fechaEntrega: { type: import_genai.Type.STRING },
+          tasa_cambio: { type: import_genai.Type.NUMBER, description: "Tasa de cambio BCV (ej. 887.3020)" },
           tasaCambio: { type: import_genai.Type.NUMBER },
+          subtotal_alkosto: { type: import_genai.Type.NUMBER, description: "SubTotal p\xE1gina Alkosto (ej. 11321.85)" },
+          subtotalAlkosto: { type: import_genai.Type.NUMBER },
+          subtotal_familia_center: { type: import_genai.Type.NUMBER, description: "SubTotal p\xE1gina Familia Center (ej. 4149.02)" },
+          subtotalFamiliaCenter: { type: import_genai.Type.NUMBER },
+          subtotal_general: { type: import_genai.Type.NUMBER, description: "Sub Total general de la OC (ej. 15470.87)" },
+          subtotalGeneral: { type: import_genai.Type.NUMBER },
+          subtotal: { type: import_genai.Type.NUMBER },
+          clienteCadena: { type: import_genai.Type.STRING, description: "ALKOSTO o FAMILIA_CENTER" },
+          clienteNombre: { type: import_genai.Type.STRING },
+          idCliente: { type: import_genai.Type.STRING },
+          ruta: { type: import_genai.Type.STRING },
+          nroPedido: { type: import_genai.Type.STRING },
+          sede: { type: import_genai.Type.STRING },
+          diasCredito: { type: import_genai.Type.NUMBER },
           proveedorNombre: { type: import_genai.Type.STRING },
           proveedorRif: { type: import_genai.Type.STRING },
-          subtotal: { type: import_genai.Type.NUMBER, description: "Subtotal o Total General de la orden" },
           observaciones: { type: import_genai.Type.STRING },
           supervisor: { type: import_genai.Type.STRING },
           chofer: { type: import_genai.Type.STRING },
@@ -3805,16 +5098,16 @@ DICCIONARIO MAESTRO DE C\xD3DIGOS Y PRODUCTOS CODIZULCA PARA ASISTIR LA LECTURA 
               properties: {
                 renglon: { type: import_genai.Type.NUMBER, description: "Columna N\xB0 (n\xFAmero de fila)" },
                 unid: { type: import_genai.Type.STRING, description: "Columna UNID normalizada estrictamente a CJ, UND, KG o BLT" },
-                totalCantidad: { type: import_genai.Type.NUMBER, description: "Columna CANT (cantidad solicitada)" },
-                cantDespachada: { type: import_genai.Type.STRING, description: "Columna CANTIDAD DESPACHADA (vac\xEDo si no tiene valor)" },
-                codigo: { type: import_genai.Type.STRING, description: "Columna SKU o C\xF3digo del art\xEDculo" },
-                skuCodizulca: { type: import_genai.Type.STRING, description: "SKU interno CODIZULCA asociado al producto" },
-                codigoBarra: { type: import_genai.Type.STRING, description: "C\xF3digo de barras EAN si aparece" },
-                descripcion: { type: import_genai.Type.STRING, description: "Columna DESCRIPCI\xD3N DEL PRODUCTO" },
-                emp: { type: import_genai.Type.NUMBER, description: "Unidades por empaque si aparece en formato matriz" },
+                totalCantidad: { type: import_genai.Type.NUMBER, description: "Columna Total Cantidad solicitada" },
+                cantDespachada: { type: import_genai.Type.STRING },
+                codigo: { type: import_genai.Type.STRING, description: "C\xF3digo EAN o SKU del art\xEDculo" },
+                skuCodizulca: { type: import_genai.Type.STRING, description: "SKU interno CODIZULCA homologado" },
+                codigoBarra: { type: import_genai.Type.STRING },
+                descripcion: { type: import_genai.Type.STRING, description: "Descripci\xF3n limpia sin el sufijo /PVP" },
+                emp: { type: import_genai.Type.NUMBER },
                 costoBruto: { type: import_genai.Type.NUMBER },
-                costoUnitario: { type: import_genai.Type.NUMBER, description: "Columna PRECIO (precio unitario)" },
-                totalRenglon: { type: import_genai.Type.NUMBER, description: "Columna SUB TOTAL de la fila" },
+                costoUnitario: { type: import_genai.Type.NUMBER, description: "Costo Unitario" },
+                totalRenglon: { type: import_genai.Type.NUMBER, description: "Total Renglon (Total Cantidad * Costo Unitario)" },
                 tiendas: {
                   type: import_genai.Type.OBJECT,
                   properties: {
@@ -3829,6 +5122,7 @@ DICCIONARIO MAESTRO DE C\xD3DIGOS Y PRODUCTOS CODIZULCA PARA ASISTIR LA LECTURA 
                     AK09: { type: import_genai.Type.NUMBER },
                     AK10: { type: import_genai.Type.NUMBER },
                     AKOP: { type: import_genai.Type.NUMBER },
+                    CI: { type: import_genai.Type.NUMBER },
                     FC01: { type: import_genai.Type.NUMBER },
                     FC02: { type: import_genai.Type.NUMBER },
                     FC03: { type: import_genai.Type.NUMBER },
@@ -3844,11 +5138,12 @@ DICCIONARIO MAESTRO DE C\xD3DIGOS Y PRODUCTOS CODIZULCA PARA ASISTIR LA LECTURA 
             }
           }
         },
-        required: ["ordenNro", "items"]
+        required: ["items"]
       };
-      let rawResponseText = "";
-      const candidateModels = ["gemini-3.1-flash-lite", "gemini-3.8-flash"];
+      const candidateModels = ["gemini-2.5-flash", "gemini-2.5-pro"];
       let lastModelError = null;
+      let validatedOrder = null;
+      let usedModel = "";
       for (const modelName of candidateModels) {
         try {
           const response = await ai.models.generateContent({
@@ -3857,59 +5152,59 @@ DICCIONARIO MAESTRO DE C\xD3DIGOS Y PRODUCTOS CODIZULCA PARA ASISTIR LA LECTURA 
               {
                 role: "user",
                 parts: [
-                  { inlineData: { mimeType: actualMime, data: cleanBase64 } },
+                  { inlineData: { data: cleanBase64, mimeType: actualMime } },
                   { text: prompt }
                 ]
               }
             ],
             config: {
+              systemInstruction,
               responseMimeType: "application/json",
               responseSchema: ocResponseSchema,
-              thinkingConfig: { thinkingLevel: import_genai.ThinkingLevel.LOW },
-              temperature: 0.1
+              temperature: 0
             }
           });
           if (response && response.text) {
-            rawResponseText = response.text;
+            const parsed = safeExtractJson(response.text);
+            const candidateValidated = validateAndNormalizeAlkostoOC(parsed, {
+              strictMath: false,
+              requireOrdenNro: false
+            });
+            const resumenCuadre = calcularResumenCuadreOC(candidateValidated);
+            const hasRowMismatch = candidateValidated.items.some((it) => {
+              const storeVals = Object.entries(it.tiendas || {}).filter(([tk]) => tk !== "AKOP" && tk !== "FCOP" && tk !== "CI").map(([, v]) => Number(v) || 0);
+              if (storeVals.length === 0) return false;
+              const sumStores = Number(storeVals.reduce((a, b) => a + b, 0).toFixed(2));
+              return Math.abs(sumStores - Number(it.totalCantidad || 0)) > 0.05;
+            });
+            validatedOrder = candidateValidated;
+            usedModel = modelName;
+            if (!resumenCuadre.cuadreExacto || hasRowMismatch) {
+              console.warn(`[ALKOSTO OCR] Descuadre matem\xE1tico detectado en ${modelName}, activando fallback...`);
+              continue;
+            }
             break;
           }
         } catch (mErr) {
-          console.warn(`Intento OCR con schema en ${modelName} fall\xF3:`, mErr?.message);
-          try {
-            const fallbackRes = await ai.models.generateContent({
-              model: modelName,
-              contents: [
-                {
-                  role: "user",
-                  parts: [
-                    { inlineData: { mimeType: actualMime, data: cleanBase64 } },
-                    { text: prompt }
-                  ]
-                }
-              ],
-              config: {
-                responseMimeType: "application/json",
-                temperature: 0.1
-              }
-            });
-            if (fallbackRes && fallbackRes.text) {
-              rawResponseText = fallbackRes.text;
-              break;
-            }
-          } catch (fbErr) {
-            lastModelError = fbErr;
-          }
+          lastModelError = mErr;
+          console.warn(`[ALKOSTO OCR] Modelo ${modelName} fall\xF3, activando fallback:`, mErr?.message);
         }
       }
-      if (!rawResponseText) {
+      if (deterministicOrder) {
+        const detCuadre = calcularResumenCuadreOC(deterministicOrder);
+        const aiCuadre = validatedOrder ? calcularResumenCuadreOC(validatedOrder) : null;
+        if (!validatedOrder || !aiCuadre?.cuadreExacto && detCuadre.cuadreExacto || validatedOrder.items.length < deterministicOrder.items.length) {
+          return res.json({
+            success: true,
+            parserMode: usedModel ? `AI_HYBRID_${usedModel}` : "DETERMINISTIC_PDF",
+            data: deterministicOrder
+          });
+        }
+      }
+      if (!validatedOrder) {
         throw new Error(lastModelError?.message || "No se obtuvo respuesta del motor de IA para el OCR");
       }
-      const parsed = safeExtractJson(rawResponseText);
-      const validatedOrder = validateAndNormalizeAlkostoOC(parsed, {
-        strictMath: false,
-        requireOrdenNro: false
-      });
-      return res.json({ success: true, parserMode: "AI_VALIDATED", data: validatedOrder });
+      return res.json({ success: true, parserMode: `AI_VALIDATED_${usedModel}`, data: validatedOrder });
     } catch (err) {
       console.error("Error en OCR Alkosto:", err);
       if (err instanceof AlkostoParseValidationError) {
@@ -4052,7 +5347,7 @@ REGLAS CR\xCDTICAS DE EXTRACCI\xD3N PARA COMPROBANTES BANCARIOS VENEZOLANOS:
         },
         required: ["monto", "referencia"]
       };
-      const candidateModels = ["gemini-3.1-flash-lite", "gemini-3.8-flash"];
+      const candidateModels = ["gemini-2.5-flash", "gemini-2.5-pro"];
       let rawResponseText = "";
       let lastModelError = null;
       for (const modelName of candidateModels) {
@@ -4071,7 +5366,6 @@ REGLAS CR\xCDTICAS DE EXTRACCI\xD3N PARA COMPROBANTES BANCARIOS VENEZOLANOS:
             config: {
               responseMimeType: "application/json",
               responseSchema: cobroSchema,
-              thinkingConfig: { thinkingLevel: import_genai.ThinkingLevel.LOW },
               temperature: 0.1
             }
           });
@@ -4374,7 +5668,7 @@ REGLAS CR\xCDTICAS DE EXTRACCI\xD3N PARA COMPROBANTES BANCARIOS VENEZOLANOS:
         return res.status(401).json({ error: "Missing or invalid Authorization header" });
       }
       const token = authHeader.split(" ")[1];
-      const spreadsheetId = "1PLzYEe9GG1vHb_wjd7HA93U6UQNtyP-uk8sxVfiN4sg";
+      const spreadsheetId = getGoogleSheetId();
       const metaRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}`, {
         headers: {
           "Authorization": `Bearer ${token}`
@@ -4405,26 +5699,20 @@ REGLAS CR\xCDTICAS DE EXTRACCI\xD3N PARA COMPROBANTES BANCARIOS VENEZOLANOS:
       return res.status(500).json({ error: "Internal server error" });
     }
   });
+  let cachedVolumenParsed = null;
+  let lastVolumenParsedTime = 0;
+  let cachedActivacionParsed = null;
+  let lastActivacionParsedTime = 0;
+  let cachedMetasParsed = null;
+  let lastMetasParsedTime = 0;
+  const PARSED_DATA_TTL = 6e4;
   app2.get("/api/usuarios", async (req, res) => {
     try {
       const workbook = await getWorkbook(req.query.force === "true");
       const XLSX = await import("xlsx");
-      const uSheet = workbook.Sheets["Usuarios"];
-      if (!uSheet) return res.json([]);
-      const rows = XLSX.utils.sheet_to_json(uSheet, { header: 1 });
-      const users = [];
-      for (let i = 1; i < rows.length; i++) {
-        const r = rows[i];
-        if (r && r[0]) {
-          users.push({
-            usuario: String(r[0]).trim(),
-            cedula: String(r[1]).trim(),
-            rol: String(r[2] || "Vendedor").trim(),
-            vendorId: String(r[3] || "").trim()
-          });
-        }
-      }
-      return res.json(users);
+      const parsed = parseWorkbookFull(XLSX, workbook, { periodo: metasPeriodoActual() });
+      setNoCacheSyncHeaders(res);
+      return res.json(parsed.usuariosRows);
     } catch (err) {
       console.error("Error fetching usuarios:", err);
       return res.status(500).json({ error: "Internal server error" });
@@ -4513,284 +5801,193 @@ REGLAS CR\xCDTICAS DE EXTRACCI\xD3N PARA COMPROBANTES BANCARIOS VENEZOLANOS:
     }
   });
   async function syncWorkbookToSupabase(workbook) {
-    if (!supabase) return { countVolumen: 0, countActivacion: 0 };
     const XLSX = await import("xlsx");
-    const volumenRows = [];
-    const volSheet = workbook.Sheets["Volumen por SKU"];
-    if (volSheet) {
-      const volJson = XLSX.utils.sheet_to_json(volSheet, { header: 1 });
-      const header0 = volJson[0];
-      for (let r = 2; r < volJson.length; r++) {
-        const row = volJson[r];
-        if (!row || !row[0]) continue;
-        const sku = String(row[0]).trim();
-        const articulo = String(row[1] || "").trim();
-        let cat = "OTROS";
-        const artU = articulo.toUpperCase();
-        const skuU = sku.toUpperCase();
-        if (sku === "1461" || sku === "1463" || artU.includes("ESTANDAR ASTURIAS") || artU.includes("SUPERIOR ASTURIAS")) {
-          cat = "ESTANDAR Y SUPERIOR ASTURIAS";
-        } else if (artU.includes("MORTADELA") || artU.includes("MORT.") || artU.includes("SALPICAO") || sku === "1464" || sku === "1462" || sku === "1512" || sku === "1521" || sku === "1561" || sku === "1522" || sku === "1563" || sku === "1562" || sku === "1564" || sku === "1519" || sku === "1496") {
-          cat = "MORTADELA SALPICAO Y ASTURIAS";
-        } else if (skuU === "ACEITE" || artU.includes("ACEITE")) {
-          cat = "ACEITE";
-        } else if (skuU === "AZUCAR" || skuU === "AZ\xDACAR" || artU.includes("AZUCAR") || artU.includes("AZ\xDACAR")) {
-          cat = "AZ\xDACAR";
-        } else if (skuU === "POLLO" || skuU === "FILET" || skuU === "MUSLO" || skuU === "630" || skuU === "870" || skuU === "393" || artU.includes("POLLO ENTERO") || artU.includes("FILET") || artU.includes("MUSLO") || artU.includes("ALAS DESPRESADAS") || artU.includes("HIGADO") || artU.includes("MOLLEJA")) {
-          cat = "POLLO";
+    const periodo = metasPeriodoActual();
+    let masterClients = [];
+    let hadDbClients = false;
+    if (supabase) {
+      try {
+        const allClients = [];
+        let from = 0;
+        while (true) {
+          const { data, error } = await supabase.from("activacion_clientes").select("*").order("id").range(from, from + 999);
+          if (error || !data || data.length === 0) break;
+          allClients.push(...data);
+          if (data.length < 1e3) break;
+          from += 1e3;
         }
-        for (let c = 2; c < header0.length; c += 3) {
-          const vendorName = String(header0[c] || "").replace(/\s+/g, " ").trim();
-          if (!vendorName) continue;
-          if (c >= 89 || SUPERVISOR_SUMMARY_COLUMNS.has(vendorName.toUpperCase())) continue;
-          const metaKg = parseFloat(row[c]) || 0;
-          const ejecutadoKg = parseFloat(row[c + 1]) || 0;
-          if (metaKg > 0 || ejecutadoKg > 0) {
-            volumenRows.push({
-              periodo: metasPeriodoActual(),
-              sku,
-              articulo,
-              categoria: cat,
-              vendedor_id: vendorName,
-              vendedor_nombre: vendorName,
-              meta_kg: metaKg,
-              ejecutado_kg: ejecutadoKg,
-              zona: "General"
-            });
+        if (allClients.length > 0) {
+          hadDbClients = true;
+          const seenCodes = /* @__PURE__ */ new Map();
+          const duplicateIds = [];
+          for (const c of allClients) {
+            const codKey = String(c.cliente_codigo || "").trim();
+            if (!codKey) continue;
+            if (!seenCodes.has(codKey)) {
+              seenCodes.set(codKey, c);
+            } else {
+              const prev = seenCodes.get(codKey);
+              prev.has_aceite = Boolean(prev.has_aceite || c.has_aceite);
+              prev.has_azucar = Boolean(prev.has_azucar || c.has_azucar);
+              prev.has_pollo = Boolean(prev.has_pollo || c.has_pollo);
+              prev.has_estandar_asturias = Boolean(prev.has_estandar_asturias || c.has_estandar_asturias);
+              prev.has_mortadela_salpicao = Boolean(prev.has_mortadela_salpicao || c.has_mortadela_salpicao);
+              duplicateIds.push(c.id);
+            }
           }
-        }
-      }
-    }
-    const metasRows = [];
-    const gridVendorsSeen = /* @__PURE__ */ new Set();
-    const gridSheet = workbook.Sheets["Grid de Activaci\xF3n por Vendedor"];
-    if (gridSheet) {
-      const gridJson = XLSX.utils.sheet_to_json(gridSheet, { header: 1 });
-      for (let i = 2; i < gridJson.length; i++) {
-        const row = gridJson[i];
-        if (!row || !row[0]) continue;
-        const vName = String(row[0]).replace(/\s+/g, " ").trim();
-        if (SUPERVISOR_SUMMARY_COLUMNS.has(vName.toUpperCase())) continue;
-        gridVendorsSeen.add(vName.toUpperCase().replace(/\s*-\s*/g, " - "));
-        const cats = [
-          { name: "ACEITE", metaIdx: 2, actIdx: 3 },
-          { name: "AZ\xDACAR", metaIdx: 4, actIdx: 5 },
-          { name: "POLLO", metaIdx: 6, actIdx: 7 },
-          { name: "ESTANDAR Y SUPERIOR ASTURIAS", metaIdx: 8, actIdx: 9 },
-          { name: "MORTADELA SALPICAO Y ASTURIAS", metaIdx: 10, actIdx: 11 }
-        ];
-        cats.forEach((c) => {
-          metasRows.push({
-            periodo: metasPeriodoActual(),
-            vendedor_id: vName,
-            categoria: c.name,
-            meta: parseInt(row[c.metaIdx]) || 0,
-            activados: parseInt(row[c.actIdx]) || 0
-          });
-        });
-      }
-    }
-    const findSheet = (patterns) => {
-      const found = workbook.SheetNames.find(
-        (n) => patterns.some((p) => n.toLowerCase().trim().includes(p.toLowerCase()))
-      );
-      return found ? workbook.Sheets[found] : null;
-    };
-    const sAceite = findSheet(["aceite"]);
-    const sAzucar = findSheet(["azucar", "az\xFAcar"]);
-    const sPollo = findSheet(["pollo"]);
-    const sAsturias = findSheet(["asturias", "jamon"]);
-    const sSalpicao = findSheet(["ligeros", "salpicao", "mortadela"]);
-    const readActiveClients = (sheet) => {
-      const clientMap = /* @__PURE__ */ new Map();
-      if (!sheet) return clientMap;
-      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-      for (let i = 1; i < rows.length; i++) {
-        const r = rows[i];
-        if (r && r[0] !== void 0 && r[0] !== null && String(r[0]).trim() !== "") {
-          const rawCode = String(r[0]).trim();
-          const cleanCode = rawCode.replace(/^0+/, "") || rawCode;
-          const cajas = parseFloat(r[2]) || 0;
-          const addVal = cajas > 0 ? cajas : 1;
-          clientMap.set(rawCode, (clientMap.get(rawCode) || 0) + addVal);
-          if (cleanCode !== rawCode) {
-            clientMap.set(cleanCode, (clientMap.get(cleanCode) || 0) + addVal);
+          if (duplicateIds.length > 0) {
+            for (let i = 0; i < duplicateIds.length; i += 200) {
+              await supabase.from("activacion_clientes").delete().in("id", duplicateIds.slice(i, i + 200));
+            }
           }
-        }
-      }
-      return clientMap;
-    };
-    const mapAceite = readActiveClients(sAceite);
-    const mapAzucar = readActiveClients(sAzucar);
-    const mapPollo = readActiveClients(sPollo);
-    const mapAsturias = readActiveClients(sAsturias);
-    const mapSalpicao = readActiveClients(sSalpicao);
-    try {
-      if (volumenRows.length > 0) {
-        await supabase.from("ventas_volumen").delete().eq("periodo", metasPeriodoActual());
-        for (let i = 0; i < volumenRows.length; i += 100) {
-          const batch = volumenRows.slice(i, i + 100);
-          const { error: insVolErr } = await supabase.from("ventas_volumen").insert(batch);
-          if (insVolErr) throw new Error(`insert lote ${i}: ${insVolErr.message}`);
-        }
-      }
-    } catch (vErr) {
-      console.warn("[SERVER] Error sincronizando ventas_volumen:", vErr?.message);
-    }
-    let allClients = [];
-    const clientActByVendor = /* @__PURE__ */ new Map();
-    try {
-      let from = 0;
-      while (true) {
-        const { data, error } = await supabase.from("activacion_clientes").select("*").order("id").range(from, from + 999);
-        if (error || !data || data.length === 0) break;
-        allClients.push(...data);
-        if (data.length < 1e3) break;
-        from += 1e3;
-      }
-      if (allClients.length > 0) {
-        const seenCodes = /* @__PURE__ */ new Map();
-        const duplicateIds = [];
-        for (const c of allClients) {
-          const codKey = String(c.cliente_codigo || "").trim();
-          if (!codKey) continue;
-          if (!seenCodes.has(codKey)) {
-            seenCodes.set(codKey, c);
-          } else {
-            const prev = seenCodes.get(codKey);
-            prev.has_aceite = Boolean(prev.has_aceite || c.has_aceite);
-            prev.has_azucar = Boolean(prev.has_azucar || c.has_azucar);
-            prev.has_pollo = Boolean(prev.has_pollo || c.has_pollo);
-            prev.has_estandar_asturias = Boolean(prev.has_estandar_asturias || c.has_estandar_asturias);
-            prev.has_mortadela_salpicao = Boolean(prev.has_mortadela_salpicao || c.has_mortadela_salpicao);
-            duplicateIds.push(c.id);
-          }
-        }
-        if (duplicateIds.length > 0) {
-          for (let i = 0; i < duplicateIds.length; i += 200) {
-            await supabase.from("activacion_clientes").delete().in("id", duplicateIds.slice(i, i + 200));
-          }
-        }
-        const uniqueClients = Array.from(seenCodes.values());
-        const updateBatch = [];
-        for (const c of uniqueClients) {
-          const cod = String(c.cliente_codigo).trim();
-          const cleanCod = cod.replace(/^0+/, "") || cod;
-          const cAceite = mapAceite.get(cod) || mapAceite.get(cleanCod) || 0;
-          const cAzucar = mapAzucar.get(cod) || mapAzucar.get(cleanCod) || 0;
-          const cPollo = mapPollo.get(cod) || mapPollo.get(cleanCod) || 0;
-          const cAsturias = mapAsturias.get(cod) || mapAsturias.get(cleanCod) || 0;
-          const cSalpicao = mapSalpicao.get(cod) || mapSalpicao.get(cleanCod) || 0;
-          const hasAceite = cAceite > 0;
-          const hasAzucar = cAzucar > 0;
-          const hasPollo = cPollo > 0;
-          const hasAsturias = cAsturias > 0;
-          const hasSalpicao = cSalpicao > 0;
-          const isActivo = hasAceite || hasAzucar || hasPollo || hasAsturias || hasSalpicao;
-          const vNorm = normalizeVendorName(c.vendedor_nombre || c.vendedor_id || "");
-          if (!clientActByVendor.has(vNorm)) {
-            clientActByVendor.set(vNorm, {
-              "ACEITE": 0,
-              "AZUCAR": 0,
-              "POLLO": 0,
-              "ESTANDAR Y SUPERIOR ASTURIAS": 0,
-              "MORTADELA SALPICAO Y ASTURIAS": 0
-            });
-          }
-          const vCounts = clientActByVendor.get(vNorm);
-          if (hasAceite) vCounts["ACEITE"]++;
-          if (hasAzucar) vCounts["AZUCAR"]++;
-          if (hasPollo) vCounts["POLLO"]++;
-          if (hasAsturias) vCounts["ESTANDAR Y SUPERIOR ASTURIAS"]++;
-          if (hasSalpicao) vCounts["MORTADELA SALPICAO Y ASTURIAS"]++;
-          updateBatch.push({
+          masterClients = Array.from(seenCodes.values()).map((c) => ({
             id: c.id,
-            periodo: "2026-10",
-            cliente_codigo: c.cliente_codigo,
-            cliente_nombre: c.cliente_nombre,
-            vendedor_id: c.vendedor_id,
-            vendedor_nombre: c.vendedor_nombre,
-            status: isActivo ? "ACTIVO" : "INACTIVO",
-            cajas_aceite: cAceite,
-            cajas_azucar: cAzucar,
-            cajas_pollo: cPollo,
-            cajas_estandar_asturias: cAsturias,
-            cajas_mortadela_salpicao: cSalpicao,
-            has_aceite: hasAceite,
-            has_azucar: hasAzucar,
-            has_pollo: hasPollo,
-            has_estandar_asturias: hasAsturias,
-            has_mortadela_salpicao: hasSalpicao
-          });
+            cliente_codigo: String(c.cliente_codigo || "").trim(),
+            cliente_nombre: String(c.cliente_nombre || "").trim(),
+            vendedor_id: String(c.vendedor_id || c.vendedor_nombre || "").replace(/\s+/g, " ").trim(),
+            vendedor_nombre: String(c.vendedor_nombre || c.vendedor_id || "").replace(/\s+/g, " ").trim(),
+            has_aceite: Boolean(c.has_aceite),
+            has_azucar: Boolean(c.has_azucar),
+            has_pollo: Boolean(c.has_pollo),
+            has_estandar_asturias: Boolean(c.has_estandar_asturias),
+            has_mortadela_salpicao: Boolean(c.has_mortadela_salpicao)
+          }));
         }
-        for (let i = 0; i < updateBatch.length; i += 100) {
-          const batch = updateBatch.slice(i, i + 100);
-          await supabase.from("activacion_clientes").upsert(batch, { onConflict: "id" });
-        }
+      } catch (dbReadErr) {
+        console.warn("[SERVER] Advertencia leyendo cartera maestra desde Supabase:", dbReadErr?.message);
       }
-    } catch (cErr) {
-      console.warn("[SERVER] Error sincronizando activacion_clientes:", cErr?.message);
     }
-    try {
-      for (const m of metasRows) {
-        if (m.activados === 0) {
-          const vNorm = normalizeVendorName(m.vendedor_id);
-          const vCounts = clientActByVendor.get(vNorm);
-          if (vCounts && vCounts[m.categoria] !== void 0) {
-            m.activados = vCounts[m.categoria];
+    if (masterClients.length === 0) {
+      masterClients = loadLocalMasterClientSeed();
+    }
+    const parsed = parseWorkbookFull(XLSX, workbook, {
+      periodo,
+      masterClients
+    });
+    cachedVolumenParsed = parsed.volumenApiRows;
+    lastVolumenParsedTime = Date.now();
+    cachedActivacionParsed = parsed.activacionApiRows;
+    lastActivacionParsedTime = Date.now();
+    cachedMetasParsed = parsed.metasApiRows;
+    lastMetasParsedTime = Date.now();
+    lastSheetMetrics = parsed.metrics;
+    lastSheetWarnings = parsed.warnings;
+    if (parsed.warnings.length > 0) {
+      console.warn(
+        `[SHEET QA] ${parsed.warnings.length} advertencia(s) en lectura fila por fila (datos incompletos/duplicados registrados sin cortar carga):`,
+        parsed.warnings.slice(0, 8)
+      );
+    }
+    if (supabase) {
+      try {
+        if (parsed.volumenSupabaseRows.length > 0) {
+          await supabase.from("ventas_volumen").delete().eq("periodo", periodo);
+          for (let i = 0; i < parsed.volumenSupabaseRows.length; i += 200) {
+            const batch = parsed.volumenSupabaseRows.slice(i, i + 200);
+            const { error: insVolErr } = await supabase.from("ventas_volumen").insert(batch);
+            if (insVolErr) throw new Error(`insert lote ${i}: ${insVolErr.message}`);
           }
         }
+      } catch (vErr) {
+        console.warn("[SERVER] Error sincronizando ventas_volumen:", vErr?.message);
       }
-      if (!metasRows.some((m) => normalizeVendorName(m.vendedor_id).includes("ANGEL NAVARRO"))) {
-        const angelCounts = clientActByVendor.get("ANGEL NAVARRO") || {};
-        for (const cat of ["ACEITE", "AZUCAR", "POLLO", "ESTANDAR Y SUPERIOR ASTURIAS", "MORTADELA SALPICAO Y ASTURIAS"]) {
-          metasRows.push({
-            periodo: metasPeriodoActual(),
-            vendedor_id: "ANGEL NAVARRO",
-            categoria: cat,
-            meta: 0,
-            activados: angelCounts[cat] || 0
-          });
+      try {
+        if (parsed.activacionSupabaseUpserts.length > 0) {
+          for (let i = 0; i < parsed.activacionSupabaseUpserts.length; i += 200) {
+            const batch = parsed.activacionSupabaseUpserts.slice(i, i + 200);
+            await supabase.from("activacion_clientes").upsert(batch, { onConflict: "id" });
+          }
         }
-      }
-      if (metasRows.length > 0) {
-        await supabase.from("metas_activacion").delete().eq("periodo", metasPeriodoActual());
-        for (let i = 0; i < metasRows.length; i += 100) {
-          const batch = metasRows.slice(i, i + 100);
-          const { error: insMetaErr } = await supabase.from("metas_activacion").insert(batch);
-          if (insMetaErr) throw new Error(`insert lote ${i}: ${insMetaErr.message}`);
+        if (hadDbClients && parsed.newSheetClientsForSupabase.length > 0) {
+          for (let i = 0; i < parsed.newSheetClientsForSupabase.length; i += 200) {
+            const batch = parsed.newSheetClientsForSupabase.slice(i, i + 200);
+            await supabase.from("activacion_clientes").insert(batch);
+          }
         }
+      } catch (cErr) {
+        console.warn("[SERVER] Error sincronizando activacion_clientes:", cErr?.message);
       }
-    } catch (mErr) {
-      console.warn("[SERVER] Error sincronizando metas_activacion:", mErr?.message);
+      try {
+        if (parsed.metasSupabaseRows.length > 0) {
+          await supabase.from("metas_activacion").delete().eq("periodo", periodo);
+          for (let i = 0; i < parsed.metasSupabaseRows.length; i += 200) {
+            const batch = parsed.metasSupabaseRows.slice(i, i + 200);
+            const { error: insMetaErr } = await supabase.from("metas_activacion").insert(batch);
+            if (insMetaErr) throw new Error(`insert lote ${i}: ${insMetaErr.message}`);
+          }
+        }
+      } catch (mErr) {
+        console.warn("[SERVER] Error sincronizando metas_activacion:", mErr?.message);
+      }
     }
     return {
-      countVolumen: volumenRows.length,
-      countActivacion: allClients.length,
-      countMetas: metasRows.length
+      countVolumen: parsed.volumenApiRows.length,
+      countActivacion: parsed.activacionApiRows.length,
+      countMetas: parsed.metasApiRows.length,
+      warningsCount: parsed.warnings.length,
+      metrics: parsed.metrics
     };
   }
-  app2.post("/api/sync/sheets", authenticateToken, requireAdmin, async (req, res) => {
+  let inFlightSheetsSync = null;
+  let lastFullSheetsSyncCompletedAt = 0;
+  async function runCoalescedSheetsSync(bypassCooldown = false) {
+    if (inFlightSheetsSync) {
+      return inFlightSheetsSync;
+    }
+    if (!bypassCooldown && Date.now() - lastFullSheetsSyncCompletedAt < 4e3 && cachedVolumenParsed && cachedActivacionParsed && cachedMetasParsed) {
+      return {
+        countVolumen: cachedVolumenParsed.length,
+        countActivacion: cachedActivacionParsed.length,
+        countMetas: cachedMetasParsed.length,
+        warningsCount: lastSheetWarnings.length,
+        metrics: lastSheetMetrics
+      };
+    }
+    inFlightSheetsSync = (async () => {
+      try {
+        const workbook = await getWorkbook(true);
+        const res = await syncWorkbookToSupabase(workbook);
+        lastFullSheetsSyncCompletedAt = Date.now();
+        return res;
+      } finally {
+        inFlightSheetsSync = null;
+      }
+    })();
+    return inFlightSheetsSync;
+  }
+  app2.post("/api/sync/sheets", authenticateToken, async (req, res) => {
     try {
-      console.log("[SERVER] Sincronizando datos en vivo desde Google Sheets...");
-      const workbook = await getWorkbook(true);
-      cachedWorkbook = null;
-      cachedVolumenParsed = null;
-      cachedActivacionParsed = null;
-      cachedMetasParsed = null;
-      const result = await syncWorkbookToSupabase(workbook);
+      const sheetId = getGoogleSheetId();
+      console.log(`[SERVER] Sincronizando datos en vivo desde Google Sheets (${sheetId}) solicitado por ${req.user?.username || "usuario"}...`);
+      const result = await runCoalescedSheetsSync(true);
+      setNoCacheSyncHeaders(res);
       res.json({
         success: true,
         message: "Sincronizaci\xF3n con Google Sheets y Supabase completada con \xE9xito",
+        sheetId,
+        source: lastSheetSource,
         countVolumen: result.countVolumen,
         countActivacion: result.countActivacion,
         countMetas: result.countMetas,
-        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        warningsCount: result.warningsCount,
+        timestamp: lastSuccessfulSheetSyncAt || (/* @__PURE__ */ new Date()).toISOString()
       });
     } catch (err) {
       console.error("[SERVER] Error en /api/sync/sheets:", err);
       res.status(500).json({ success: false, error: "Error sincronizando datos de Google Sheets", details: err?.message });
     }
+  });
+  app2.get("/api/sync/status", authenticateToken, (req, res) => {
+    setNoCacheSyncHeaders(res);
+    res.json({
+      success: true,
+      sheetId: getGoogleSheetId(),
+      lastSyncAt: lastSuccessfulSheetSyncAt || null,
+      source: lastSheetSource,
+      metrics: lastSheetMetrics,
+      warningsCount: lastSheetWarnings.length,
+      warnings: lastSheetWarnings.slice(0, 50)
+    });
   });
   const normHist = (s) => String(s || "").replace(/Ã‘|Ã±/g, "N").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().replace(/[^A-Z0-9]/g, "");
   const normalizeHistRubroCode = (raw) => {
@@ -5667,13 +6864,23 @@ REGLAS CR\xCDTICAS DE EXTRACCI\xD3N PARA COMPROBANTES BANCARIOS VENEZOLANOS:
       histFail(res, e);
     }
   });
-  let cachedVolumenParsed = null;
-  let lastVolumenParsedTime = 0;
-  let cachedActivacionParsed = null;
-  let lastActivacionParsedTime = 0;
-  let cachedMetasParsed = null;
-  let lastMetasParsedTime = 0;
-  const PARSED_DATA_TTL = 6e4;
+  const hydrateParsedCachesFromWorkbookFallback = async () => {
+    const workbook = await getWorkbook(false);
+    const XLSX = await import("xlsx");
+    const parsed = parseWorkbookFull(XLSX, workbook, {
+      periodo: metasPeriodoActual(),
+      masterClients: loadLocalMasterClientSeed()
+    });
+    cachedVolumenParsed = parsed.volumenApiRows;
+    lastVolumenParsedTime = Date.now();
+    cachedActivacionParsed = parsed.activacionApiRows;
+    lastActivacionParsedTime = Date.now();
+    cachedMetasParsed = parsed.metasApiRows;
+    lastMetasParsedTime = Date.now();
+    lastSheetMetrics = parsed.metrics;
+    lastSheetWarnings = parsed.warnings;
+    return parsed;
+  };
   const resolveDataFilter = (user, queryVendedor) => {
     const supProfile = getSupervisorProfile(user?.username);
     const effectiveRole = supProfile ? "SUPERVISOR" : String(user?.role || "").toUpperCase();
@@ -5755,10 +6962,16 @@ REGLAS CR\xCDTICAS DE EXTRACCI\xD3N PARA COMPROBANTES BANCARIOS VENEZOLANOS:
           });
         });
       };
-      if (!force && cachedVolumenParsed && Date.now() - lastVolumenParsedTime < PARSED_DATA_TTL) {
+      if (force) {
+        await runCoalescedSheetsSync(false);
+        setNoCacheSyncHeaders(res);
+        return res.json(filterByVendor(cachedVolumenParsed || []));
+      }
+      if (cachedVolumenParsed && Date.now() - lastVolumenParsedTime < PARSED_DATA_TTL) {
+        setNoCacheSyncHeaders(res, "memory");
         return res.json(filterByVendor(cachedVolumenParsed));
       }
-      if (!force && supabase) {
+      if (supabase) {
         try {
           let supaRows = [];
           let from = 0;
@@ -5793,92 +7006,15 @@ REGLAS CR\xCDTICAS DE EXTRACCI\xD3N PARA COMPROBANTES BANCARIOS VENEZOLANOS:
             });
             cachedVolumenParsed = mapped;
             lastVolumenParsedTime = Date.now();
+            setNoCacheSyncHeaders(res, "supabase");
             return res.json(filterByVendor(mapped));
           }
         } catch (e) {
         }
       }
-      const workbook = await getWorkbook(force);
-      const XLSX = await import("xlsx");
-      let volumenData = [];
-      let idCounter = 1;
-      const volSheet = workbook.Sheets["Volumen por SKU"];
-      if (volSheet) {
-        const volJson = XLSX.utils.sheet_to_json(volSheet, { header: 1 });
-        const header0 = volJson[0];
-        for (let r = 2; r < volJson.length; r++) {
-          const row = volJson[r];
-          if (!row || !row[0]) continue;
-          const sku = String(row[0]);
-          const articulo = String(row[1]);
-          let cat = "OTROS";
-          const artU = articulo.toUpperCase();
-          const skuU = sku.toUpperCase();
-          if (sku === "1461" || sku === "1463" || artU.includes("ESTANDAR ASTURIAS") || artU.includes("SUPERIOR ASTURIAS")) {
-            cat = "ESTANDAR Y SUPERIOR ASTURIAS";
-          } else if (artU.includes("MORTADELA") || artU.includes("MORT.") || artU.includes("SALPICAO") || sku === "1464" || sku === "1462" || sku === "1512" || sku === "1521" || sku === "1561" || sku === "1522" || sku === "1563" || sku === "1562" || sku === "1564" || sku === "1519" || sku === "1496") {
-            cat = "MORTADELA SALPICAO Y ASTURIAS";
-          } else if (skuU === "ACEITE" || artU.includes("ACEITE")) {
-            cat = "ACEITE";
-          } else if (skuU === "AZUCAR" || skuU === "AZ\xDACAR" || artU.includes("AZUCAR") || artU.includes("AZ\xDACAR")) {
-            cat = "AZ\xDACAR";
-          } else if (skuU === "POLLO" || skuU === "FILET" || skuU === "MUSLO" || skuU === "630" || skuU === "870" || skuU === "393" || artU.includes("POLLO ENTERO") || artU.includes("FILET") || artU.includes("MUSLO") || artU.includes("ALAS DESPRESADAS") || artU.includes("HIGADO") || artU.includes("MOLLEJA")) {
-            cat = "POLLO";
-          }
-          for (let c = 2; c < header0.length; c += 3) {
-            const vendorName = String(header0[c] || "").replace(/\s+/g, " ").trim();
-            if (!vendorName) continue;
-            if (c >= 89 || SUPERVISOR_SUMMARY_COLUMNS.has(vendorName.toUpperCase())) continue;
-            const metaKg = parseFloat(row[c]) || 0;
-            const ejecutadoKg = parseFloat(row[c + 1]) || 0;
-            if (metaKg > 0 || ejecutadoKg > 0) {
-              const vendorUpper = vendorName.toUpperCase();
-              const isMikelRoute1 = vendorUpper === "MIKELANGELO DIAZ1" || vendorUpper.includes("MIKELANGELO DIAZ 1") || vendorUpper.includes("MIKELANGELO DIAZ - PRINCIPAL");
-              const isMikelVilla = (vendorUpper.includes("MIKELANGELO") || vendorUpper.includes("SOTO") || vendorUpper.includes("DIAZ")) && vendorUpper.includes("VILLA");
-              const isJohnatanHistorical = (vendorUpper === "JOHNATAN SOTO" || vendorUpper === "JHONATAN SOTO") && !vendorUpper.includes("VILLA");
-              let finalVendedorId = vendorName;
-              let finalVendedorNombre = vendorName;
-              let finalVendedorEmail = void 0;
-              if (isMikelRoute1) {
-                finalVendedorId = "MIKELANGELO DIAZ1";
-                finalVendedorNombre = "Mikelangelo Diaz (Principal)";
-                finalVendedorEmail = "Mikelangelodiaz@gmail.com";
-              } else if (isMikelVilla) {
-                finalVendedorId = "MIKELANGELO DIAZ - VILLA DEL ROS";
-                finalVendedorNombre = "Mikelangelo Diaz (Villa del Rosario)";
-                finalVendedorEmail = "Mikelangelodiaz@gmail.com";
-              } else if (isJohnatanHistorical) {
-                finalVendedorId = "JOHNATAN SOTO (HISTORICO)";
-                finalVendedorNombre = "Johnatan Soto (Hist\xF3rico)";
-              } else if (/mikelangelo/i.test(vendorName)) {
-                finalVendedorNombre = "Mikelangelo Diaz";
-                finalVendedorEmail = "Mikelangelodiaz@gmail.com";
-              }
-              volumenData.push({
-                id: String(idCounter++),
-                vendedorId: finalVendedorId,
-                vendedorNombre: finalVendedorNombre,
-                vendedorEmail: finalVendedorEmail,
-                sku,
-                skuId: sku,
-                articulo,
-                cliente: finalVendedorNombre,
-                categoria: cat,
-                meta: metaKg,
-                metaKg,
-                ejecutado: ejecutadoKg,
-                ejecutadoKg,
-                zona: "General",
-                lat: 10.6427,
-                lng: -71.6125
-              });
-            }
-          }
-        }
-      }
-      cachedVolumenParsed = volumenData;
-      lastVolumenParsedTime = Date.now();
-      res.json(filterByVendor(volumenData));
+      const parsed = await hydrateParsedCachesFromWorkbookFallback();
+      setNoCacheSyncHeaders(res);
+      res.json(filterByVendor(parsed.volumenApiRows));
     } catch (err) {
       console.error("Error parsing volume data:", err);
       res.status(500).json([]);
@@ -5906,10 +7042,16 @@ REGLAS CR\xCDTICAS DE EXTRACCI\xD3N PARA COMPROBANTES BANCARIOS VENEZOLANOS:
           });
         });
       };
-      if (!force && cachedActivacionParsed && Date.now() - lastActivacionParsedTime < PARSED_DATA_TTL) {
+      if (force) {
+        await runCoalescedSheetsSync(false);
+        setNoCacheSyncHeaders(res);
+        return res.json(filterByVendor(cachedActivacionParsed || []));
+      }
+      if (cachedActivacionParsed && Date.now() - lastActivacionParsedTime < PARSED_DATA_TTL) {
+        setNoCacheSyncHeaders(res, "memory");
         return res.json(filterByVendor(cachedActivacionParsed));
       }
-      if (!force && supabase) {
+      if (supabase) {
         try {
           let supaRows = [];
           let from = 0;
@@ -5950,7 +7092,10 @@ REGLAS CR\xCDTICAS DE EXTRACCI\xD3N PARA COMPROBANTES BANCARIOS VENEZOLANOS:
                     AZUCAR: hasAzucar,
                     POLLO: hasPollo,
                     ESTANDAR_ASTURIAS: hasAsturias,
-                    MORTADELA_SALPICAO: hasSalpicao
+                    MORTADELA_SALPICAO: hasSalpicao,
+                    ARROZ: hasPollo,
+                    ENTERO: hasAsturias,
+                    LIGEROS: hasSalpicao
                   }
                 });
               } else {
@@ -5960,6 +7105,9 @@ REGLAS CR\xCDTICAS DE EXTRACCI\xD3N PARA COMPROBANTES BANCARIOS VENEZOLANOS:
                 prev.cats.POLLO = prev.cats.POLLO || hasPollo;
                 prev.cats.ESTANDAR_ASTURIAS = prev.cats.ESTANDAR_ASTURIAS || hasAsturias;
                 prev.cats.MORTADELA_SALPICAO = prev.cats.MORTADELA_SALPICAO || hasSalpicao;
+                prev.cats.ARROZ = prev.cats.POLLO;
+                prev.cats.ENTERO = prev.cats.ESTANDAR_ASTURIAS;
+                prev.cats.LIGEROS = prev.cats.MORTADELA_SALPICAO;
                 prev.cajas.ACEITE = Math.max(prev.cajas.ACEITE, Number(r.cajas_aceite) || 0);
                 prev.cajas.AZUCAR = Math.max(prev.cajas.AZUCAR, Number(r.cajas_azucar) || 0);
                 prev.cajas.POLLO = Math.max(prev.cajas.POLLO, Number(r.cajas_pollo) || 0);
@@ -5973,106 +7121,15 @@ REGLAS CR\xCDTICAS DE EXTRACCI\xD3N PARA COMPROBANTES BANCARIOS VENEZOLANOS:
             const mapped = Array.from(byClientMap.values());
             cachedActivacionParsed = mapped;
             lastActivacionParsedTime = Date.now();
+            setNoCacheSyncHeaders(res, "supabase");
             return res.json(filterByVendor(mapped));
           }
         } catch (e) {
         }
       }
-      const workbook = await getWorkbook(force);
-      const XLSX = await import("xlsx");
-      const findSheet = (patterns) => {
-        const found = workbook.SheetNames.find(
-          (n) => patterns.some((p) => n.toLowerCase().trim().includes(p.toLowerCase()))
-        );
-        return found ? workbook.Sheets[found] : null;
-      };
-      const sAceite = findSheet(["aceite"]);
-      const sAzucar = findSheet(["azucar", "az\xFAcar"]);
-      const sPollo = findSheet(["pollo"]);
-      const sAsturias = findSheet(["asturias", "jamon"]);
-      const sSalpicao = findSheet(["ligeros", "salpicao", "mortadela"]);
-      const readActiveClients = (sheet) => {
-        const clientMap = /* @__PURE__ */ new Map();
-        if (!sheet) return clientMap;
-        const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-        for (let i = 1; i < rows.length; i++) {
-          const r = rows[i];
-          if (r && r[0] !== void 0 && r[0] !== null && String(r[0]).trim() !== "") {
-            const rawCode = String(r[0]).trim();
-            const cleanCode = rawCode.replace(/^0+/, "") || rawCode;
-            const cajas = parseFloat(r[2]) || 0;
-            const addVal = cajas > 0 ? cajas : 1;
-            clientMap.set(rawCode, (clientMap.get(rawCode) || 0) + addVal);
-            if (cleanCode !== rawCode) {
-              clientMap.set(cleanCode, (clientMap.get(cleanCode) || 0) + addVal);
-            }
-          }
-        }
-        return clientMap;
-      };
-      const mapAceite = readActiveClients(sAceite);
-      const mapAzucar = readActiveClients(sAzucar);
-      const mapPollo = readActiveClients(sPollo);
-      const mapAsturias = readActiveClients(sAsturias);
-      const mapSalpicao = readActiveClients(sSalpicao);
-      let activacionData = [];
-      const clientSheet = workbook.Sheets["Activaci\xF3n por Cliente"];
-      if (clientSheet) {
-        const clientJson = XLSX.utils.sheet_to_json(clientSheet, { header: 1 });
-        for (let i = 1; i < clientJson.length; i++) {
-          const row = clientJson[i];
-          if (!row || row.length < 3 || !row[0]) continue;
-          const codigo = String(row[0]).trim();
-          const cleanCodigo = codigo.replace(/^0+/, "") || codigo;
-          const razonSocial = String(row[1] || "").trim();
-          const vendedor = String(row[2] || "").replace(/\s+/g, " ").trim();
-          if (vendedor.toUpperCase() === "ALI PEREZ") continue;
-          const cAceite = mapAceite.get(codigo) || mapAceite.get(cleanCodigo) || 0;
-          const cAzucar = mapAzucar.get(codigo) || mapAzucar.get(cleanCodigo) || 0;
-          const cPollo = mapPollo.get(codigo) || mapPollo.get(cleanCodigo) || 0;
-          const cAsturias = mapAsturias.get(codigo) || mapAsturias.get(cleanCodigo) || 0;
-          const cSalpicao = mapSalpicao.get(codigo) || mapSalpicao.get(cleanCodigo) || 0;
-          const hasAceite = cAceite > 0 || Boolean(row[3] && String(row[3]).trim().toUpperCase() === "SI");
-          const hasAzucar = cAzucar > 0 || Boolean(row[4] && String(row[4]).trim().toUpperCase() === "SI");
-          const hasPollo = cPollo > 0 || Boolean(row[5] && String(row[5]).trim().toUpperCase() === "SI");
-          const hasAsturias = cAsturias > 0 || Boolean(row[6] && String(row[6]).trim().toUpperCase() === "SI");
-          const hasSalpicao = cSalpicao > 0 || Boolean(row[7] && String(row[7]).trim().toUpperCase() === "SI");
-          const isActivo = hasAceite || hasAzucar || hasPollo || hasAsturias || hasSalpicao;
-          const vendedorUpper = vendedor.toUpperCase();
-          const isVilla = vendedorUpper.includes("VILLA");
-          const isJohnatanOrMikel = vendedorUpper.includes("JOHNATAN") || vendedorUpper.includes("MIKELANGELO") || vendedorUpper.includes("SOTO");
-          const vendedorNombre = isJohnatanOrMikel ? isVilla ? "Mikelangelo Diaz (Villa del Rosario)" : "Mikelangelo Diaz (Principal)" : vendedor;
-          const vendedorEmail = isJohnatanOrMikel ? "Mikelangelodiaz@gmail.com" : void 0;
-          activacionData.push({
-            id: String(codigo),
-            vendedorId: vendedor,
-            vendedorNombre,
-            vendedorEmail,
-            cliente: razonSocial,
-            status: isActivo ? "ACTIVO" : "INACTIVO",
-            cats: {
-              ACEITE: hasAceite,
-              AZUCAR: hasAzucar,
-              POLLO: hasPollo,
-              ESTANDAR_ASTURIAS: hasAsturias,
-              MORTADELA_SALPICAO: hasSalpicao,
-              ARROZ: hasPollo,
-              ENTERO: hasAsturias,
-              LIGEROS: hasSalpicao
-            },
-            cajas: {
-              ACEITE: cAceite,
-              AZUCAR: cAzucar,
-              POLLO: cPollo,
-              ESTANDAR_ASTURIAS: cAsturias,
-              MORTADELA_SALPICAO: cSalpicao
-            }
-          });
-        }
-      }
-      cachedActivacionParsed = activacionData;
-      lastActivacionParsedTime = Date.now();
-      res.json(filterByVendor(activacionData));
+      const parsed = await hydrateParsedCachesFromWorkbookFallback();
+      setNoCacheSyncHeaders(res);
+      res.json(filterByVendor(parsed.activacionApiRows));
     } catch (err) {
       console.error("Error in /api/data/activacion:", err);
       res.status(500).json([]);
@@ -6120,6 +7177,9 @@ REGLAS CR\xCDTICAS DE EXTRACCI\xD3N PARA COMPROBANTES BANCARIOS VENEZOLANOS:
           if (cid === cleanCod) {
             if (!c.cats) c.cats = {};
             c.cats[normRubro] = boolActive;
+            if (normRubro === "POLLO") c.cats.ARROZ = boolActive;
+            if (normRubro === "ESTANDAR_ASTURIAS") c.cats.ENTERO = boolActive;
+            if (normRubro === "MORTADELA_SALPICAO") c.cats.LIGEROS = boolActive;
             const anyActive = Boolean(
               c.cats.ACEITE || c.cats.AZUCAR || c.cats.POLLO || c.cats.ESTANDAR_ASTURIAS || c.cats.MORTADELA_SALPICAO
             );
@@ -6127,6 +7187,7 @@ REGLAS CR\xCDTICAS DE EXTRACCI\xD3N PARA COMPROBANTES BANCARIOS VENEZOLANOS:
           }
         });
       }
+      setNoCacheSyncHeaders(res);
       return res.json({ success: true, clienteCodigo: cleanCod, rubro: normRubro, active: boolActive });
     } catch (err) {
       console.error("[SERVER] Error en /api/data/activacion/toggle-rubro:", err);
@@ -6154,10 +7215,16 @@ REGLAS CR\xCDTICAS DE EXTRACCI\xD3N PARA COMPROBANTES BANCARIOS VENEZOLANOS:
           });
         });
       };
-      if (!force && cachedMetasParsed && Date.now() - lastMetasParsedTime < PARSED_DATA_TTL) {
+      if (force) {
+        await runCoalescedSheetsSync(false);
+        setNoCacheSyncHeaders(res);
+        return res.json(filterByVendor(cachedMetasParsed || []));
+      }
+      if (cachedMetasParsed && Date.now() - lastMetasParsedTime < PARSED_DATA_TTL) {
+        setNoCacheSyncHeaders(res, "memory");
         return res.json(filterByVendor(cachedMetasParsed));
       }
-      if (!force && supabase) {
+      if (supabase) {
         try {
           const { data, error } = await supabase.from("metas_activacion").select("*").eq("periodo", metasPeriodoActual());
           if (!error && data && data.length > 0) {
@@ -6169,41 +7236,15 @@ REGLAS CR\xCDTICAS DE EXTRACCI\xD3N PARA COMPROBANTES BANCARIOS VENEZOLANOS:
             }));
             cachedMetasParsed = mapped;
             lastMetasParsedTime = Date.now();
+            setNoCacheSyncHeaders(res, "supabase");
             return res.json(filterByVendor(mapped));
           }
         } catch (e) {
         }
       }
-      const workbook = await getWorkbook(force);
-      const XLSX = await import("xlsx");
-      let metasData = [];
-      const gridSheet = workbook.Sheets["Grid de Activaci\xF3n por Vendedor"];
-      if (gridSheet) {
-        const gridJson = XLSX.utils.sheet_to_json(gridSheet, { header: 1 });
-        for (let i = 2; i < gridJson.length; i++) {
-          const row = gridJson[i];
-          if (!row || !row[0]) continue;
-          const vName = String(row[0]).replace(/\s+/g, " ").trim();
-          const cats = [
-            { name: "ACEITE", metaIdx: 2, actIdx: 3 },
-            { name: "AZ\xDACAR", metaIdx: 4, actIdx: 5 },
-            { name: "POLLO", metaIdx: 6, actIdx: 7 },
-            { name: "ESTANDAR Y SUPERIOR ASTURIAS", metaIdx: 8, actIdx: 9 },
-            { name: "MORTADELA SALPICAO Y ASTURIAS", metaIdx: 10, actIdx: 11 }
-          ];
-          cats.forEach((c) => {
-            metasData.push({
-              vendedorId: vName,
-              categoria: c.name,
-              meta: parseInt(row[c.metaIdx]) || 0,
-              activados: parseInt(row[c.actIdx]) || 0
-            });
-          });
-        }
-      }
-      cachedMetasParsed = metasData;
-      lastMetasParsedTime = Date.now();
-      res.json(filterByVendor(metasData));
+      const parsed = await hydrateParsedCachesFromWorkbookFallback();
+      setNoCacheSyncHeaders(res);
+      res.json(filterByVendor(parsed.metasApiRows));
     } catch (err) {
       console.error("Error in /api/data/metas-activacion:", err);
       res.status(500).json([]);
@@ -6381,14 +7422,10 @@ REGLAS CR\xCDTICAS DE EXTRACCI\xD3N PARA COMPROBANTES BANCARIOS VENEZOLANOS:
       console.log(`Server running on port ${portToTry}`);
       const runAutoSync = async () => {
         try {
-          console.log("[SYNC AUTO] Sincronizando datos en vivo desde Google Sheet...");
-          const wb = await getWorkbook(true);
-          cachedWorkbook = wb;
-          cachedVolumenParsed = null;
-          cachedActivacionParsed = null;
-          cachedMetasParsed = null;
-          const res = await syncWorkbookToSupabase(wb);
-          console.log(`[SYNC AUTO] Sincronizaci\xF3n exitosa con Google Sheet y Supabase. Volumen: ${res.countVolumen}, Activaci\xF3n: ${res.countActivacion}`);
+          const sheetId = getGoogleSheetId();
+          console.log(`[SYNC AUTO] Sincronizando datos en vivo desde Google Sheet (${sheetId})...`);
+          const res = await runCoalescedSheetsSync(true);
+          console.log(`[SYNC AUTO] Sincronizaci\xF3n exitosa (${lastSheetSource}). Volumen: ${res.countVolumen}, Activaci\xF3n: ${res.countActivacion}, Metas: ${res.countMetas}`);
         } catch (err) {
           console.warn("[SYNC AUTO] Error en sincronizaci\xF3n peri\xF3dica desde Google Sheet:", err?.message);
         }
