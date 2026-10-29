@@ -177,15 +177,50 @@ describe('Integration: API Server Routes & Authentication Flow', () => {
       expect(data.error).toContain('Datos de pedido requeridos');
     });
 
-    it('should successfully process and transmit a valid Alkosto order', async () => {
+    it('should return 400 when order has zero valid products with quantity > 0', async () => {
+      const emptyItemsOrder = {
+        id: `test-int-empty-${Date.now()}`,
+        numeroPedido: '9999',
+        sucursalCodigo: '7498',
+        sucursalNombre: 'Alkosto 1 san Felipe',
+        vendedora: 'Sairu Valles',
+        items: [
+          {
+            sku: '1496',
+            producto: 'MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR',
+            cantidadCajas: 0,
+            precioUnitarioUSD: 20,
+            subtotalUSD: 0
+          }
+        ]
+      };
+
+      const res = await fetch(`${baseUrl}/api/alkosto/pedidos/transmitir`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${vendorToken}`
+        },
+        body: JSON.stringify(emptyItemsOrder)
+      });
+      expect(res.status).toBe(400);
+      const data = await res.json();
+      expect(data.success).toBe(false);
+      expect(data.error).toMatch(/Validación previa/i);
+    });
+
+    it('should successfully homologate, confirm real DB id, enforce idempotency and clean up test order', async () => {
+      const testId = `test-int-${Date.now()}`;
       const testOrder = {
-        id: `test-int-${Date.now()}`,
+        id: testId,
+        idempotencyKey: testId,
         numeroPedido: '9999',
         correlativo: '9999',
         ordenCompraAlkosto: 'OC-TEST-INT-001',
-        sucursalCodigo: '7497',
-        sucursalNombre: 'Alkosto 01 - Zona Industrial',
-        direccionEntrega: 'Av. 68 con Calle 148, Zona Industrial',
+        sucursalTag: 'AK01',
+        sucursalCodigo: '7498',
+        sucursalNombre: 'Alkosto 1 san Felipe',
+        direccionEntrega: 'Calle 98 CC San Felipe',
         vendedora: 'SAIRU VALLES',
         ruta: 'CUENTAS CLAVE 2',
         fechaPedido: new Date().toISOString().split('T')[0],
@@ -196,6 +231,7 @@ describe('Integration: API Server Routes & Authentication Flow', () => {
             producto: 'MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR',
             bultos: 2,
             kilos: 18,
+            descuento: 5,
             precioUnitarioUSD: 24.50,
             subtotalUSD: 49.00
           }
@@ -210,19 +246,54 @@ describe('Integration: API Server Routes & Authentication Flow', () => {
         observaciones: 'Prueba de integración automatizada QA'
       };
 
-      const res = await fetch(`${baseUrl}/api/alkosto/pedidos/transmitir`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${vendorToken}`
-        },
-        body: JSON.stringify(testOrder)
-      });
+      try {
+        // Simular doble clic concurrente con la misma clave de idempotencia
+        const [res1, res2] = await Promise.all([
+          fetch(`${baseUrl}/api/alkosto/pedidos/transmitir`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Idempotency-Key': testId,
+              Authorization: `Bearer ${vendorToken}`
+            },
+            body: JSON.stringify(testOrder)
+          }),
+          fetch(`${baseUrl}/api/alkosto/pedidos/transmitir`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Idempotency-Key': testId,
+              Authorization: `Bearer ${vendorToken}`
+            },
+            body: JSON.stringify(testOrder)
+          })
+        ]);
 
-      expect(res.status).toBe(200);
-      const data = await res.json();
-      expect(data.success).toBe(true);
-      expect(data.message).toContain('transmitido');
+        expect(res1.status).toBe(200);
+        expect(res2.status).toBe(200);
+        const data1 = await res1.json();
+        const data2 = await res2.json();
+
+        expect(data1.success).toBe(true);
+        expect(data1.salaEsperaId).toBe(testId);
+        expect(data1.id).toBe(testId);
+        expect(data1.data.vendedor).toBe('Sairu Valles');
+        expect(data1.data.vendedora).toBe('Sairu Valles');
+        expect(data1.data.cadena).toBe('ALKOSTO');
+        expect(data1.data.estadoSalaEspera).toBe('POR_VALIDAR');
+        expect(data1.data.transmitido_a_pedidos_manuales).toBe(true);
+        expect(data1.message).toContain(testId);
+
+        // Idempotencia: ambos clics concurrentes devuelven exactamente el mismo ID y correlativo
+        expect(data2.salaEsperaId).toBe(data1.salaEsperaId);
+        expect(data2.data.correlativo).toBe(data1.data.correlativo);
+      } finally {
+        // Limpiar el pedido de prueba de las bases de datos local y Sala de Espera
+        await fetch(`${baseUrl}/api/alkosto/pedidos/${encodeURIComponent(testId)}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${vendorToken}` }
+        }).catch(() => {});
+      }
     });
   });
 

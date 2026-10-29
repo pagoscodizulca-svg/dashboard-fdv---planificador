@@ -8,8 +8,14 @@ import {
   SUCURSALES_ALKOSTO,
   SUCURSALES_FAMILIA_CENTER,
   CATALOGO_ALKOSTO,
-  transmitirPedidoAlkosto
+  transmitirPedidoAlkosto,
+  validarPedidoAlkostoAntesDeEnviar,
+  sanitizarPedidoSucursalAntesDeEnviar
 } from '../../src/services/alkostoService';
+import {
+  generarIdDeterministaPedidoAlkosto,
+  normalizarNombreVendedorSairu
+} from '../../src/services/alkostoOcParser';
 import { AlkostoOrder } from '../../src/types';
 
 describe('Unit: alkostoService', () => {
@@ -167,94 +173,232 @@ describe('Unit: alkostoService', () => {
     });
   });
 
-  describe('transmitirPedidoAlkosto - Happy path and Error Handling', () => {
+  describe('Production Hardening: Pre-validation, Homologation, Idempotency & Retries', () => {
     beforeEach(() => {
       vi.restoreAllMocks();
     });
 
-    it('should return success when backend endpoint responds 200 OK', async () => {
-      const mockOrder: AlkostoOrder = {
-        id: 'test-order-1',
-        numeroPedido: '0042',
-        correlativo: '0042',
-        ordenCompraAlkosto: 'OC-1234',
-        sucursalCodigo: '7497',
-        sucursalNombre: 'Alkosto 01 - Zona Industrial',
-        direccionEntrega: 'Zona Ind',
-        vendedora: 'SAIRU VALLES',
-        ruta: 'CUENTAS CLAVE 2',
-        fechaPedido: '2026-10-16',
-        fechaEntregaEstimada: '2026-10-18',
-        condicionPago: 'Crédito 15 días',
-        items: [],
-        totalBultos: 5,
-        totalKilos: 50,
-        totalUSD: 150,
-        estado: 'BORRADOR',
-        createdAt: '2026-10-16T10:00:00Z',
-        updatedAt: '2026-10-16T10:00:00Z'
-      };
+    const buildValidMockOrder = (overrides: Partial<AlkostoOrder> = {}): AlkostoOrder => ({
+      id: 'alk-ak01-oc1234abcd',
+      numeroPedido: '0042',
+      correlativo: '0042',
+      ordenCompraAlkosto: '0000055769',
+      sucursalTag: 'AK01',
+      sucursalCodigo: '7498',
+      sucursalNombre: 'Alkosto 1 san Felipe',
+      direccionEntrega: 'Calle 98 CC San Felipe',
+      vendedora: 'SAIRU VALLES / CUENTAS CLAVE 2',
+      ruta: 'CUENTAS CLAVE 2',
+      fechaPedido: '2026-10-29',
+      fechaEntregaEstimada: '2026-10-30',
+      condicionPago: 'Crédito 21 días',
+      items: [
+        {
+          id: 'item-1',
+          sku: '1496',
+          producto: 'MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR',
+          categoria: 'MORTADELAS',
+          presentacion: 'CJ',
+          cantidadCajas: 10,
+          cajas: 10,
+          unidades: 0,
+          kilosPorCaja: 9,
+          totalKilos: 90,
+          precioBrutoUSD: 25,
+          descuento: 20,
+          precioUnitarioUSD: 20,
+          subtotalUSD: 200
+        }
+      ],
+      totalBultos: 10,
+      totalKilos: 90,
+      totalUSD: 200,
+      estado: 'BORRADOR',
+      createdAt: '2026-10-29T10:00:00Z',
+      updatedAt: '2026-10-29T10:00:00Z',
+      ...overrides
+    });
+
+    it('should block submission during pre-validation when items are empty or all quantities <= 0', async () => {
+      const emptyOrder = buildValidMockOrder({ items: [], renglones: [] });
+      const checkEmpty = validarPedidoAlkostoAntesDeEnviar(emptyOrder);
+      expect(checkEmpty.valido).toBe(false);
+
+      const zeroQtyOrder = buildValidMockOrder({
+        items: [
+          {
+            id: 'item-1',
+            sku: '1496',
+            producto: 'MORTADELA',
+            categoria: 'MORTADELAS',
+            presentacion: 'CJ',
+            cantidadCajas: 0,
+            kilosPorCaja: 9,
+            totalKilos: 0,
+            precioUnitarioUSD: 20,
+            subtotalUSD: 0
+          }
+        ]
+      });
+      expect(validarPedidoAlkostoAntesDeEnviar(zeroQtyOrder).valido).toBe(false);
+
+      global.fetch = vi.fn();
+      await expect(transmitirPedidoAlkosto(emptyOrder)).rejects.toThrow(/Validación previa/i);
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('should homologate Sairu Valles, ALKOSTO chain, POR_VALIDAR state and 100% item fields (0% data loss)', () => {
+      expect(normalizarNombreVendedorSairu('SAIRU VALLES / CUENTAS CLAVE 2')).toBe('Sairu Valles');
+      expect(normalizarNombreVendedorSairu('SAIRU')).toBe('Sairu Valles');
+      expect(normalizarNombreVendedorSairu('')).toBe('Sairu Valles');
+
+      const sanitized = sanitizarPedidoSucursalAntesDeEnviar(buildValidMockOrder());
+      expect(sanitized).not.toBeNull();
+      expect(sanitized?.vendedor).toBe('Sairu Valles');
+      expect(sanitized?.vendedora).toBe('Sairu Valles');
+      expect(sanitized?.ruta).toBe('Sairu Valles');
+      expect(sanitized?.cadena).toBe('ALKOSTO');
+      expect(sanitized?.estadoSalaEspera).toBe('POR_VALIDAR');
+      expect(sanitized?.renglones?.[0]).toMatchObject({
+        codigo: '1496',
+        sku: '1496',
+        descripcion: 'MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR',
+        cantidad: 10,
+        cajas: 10,
+        unidades: 0,
+        precio_unitario: 20,
+        precio_bruto: 25,
+        descuento: 20,
+        subtotal: 200
+      });
+    });
+
+    it('should generate deterministic idempotency IDs for identical branch + OC + items', () => {
+      const id1 = generarIdDeterministaPedidoAlkosto({
+        tagSlug: 'AK01',
+        idCliente: '007498',
+        numeroOc: '0000055769',
+        fechaISO: '2026-10-29',
+        renglones: [{ codigo: '1496', unidad_medida: 'CJ', cantidad: 10, precio_unitario: 20, descuento: 0, subtotal: 200 }]
+      });
+      const id2 = generarIdDeterministaPedidoAlkosto({
+        tagSlug: 'ak01',
+        idCliente: '007498',
+        numeroOc: '55769',
+        fechaISO: '2026-10-29',
+        renglones: [{ codigo: '1496', unidad_medida: 'CJ', cantidad: 10, precio_unitario: 20, descuento: 0, subtotal: 200 }]
+      });
+      const idDifferentStore = generarIdDeterministaPedidoAlkosto({
+        tagSlug: 'AK02',
+        idCliente: '007499',
+        numeroOc: '0000055769',
+        fechaISO: '2026-10-29',
+        renglones: [{ codigo: '1496', unidad_medida: 'CJ', cantidad: 10, precio_unitario: 20, descuento: 0, subtotal: 200 }]
+      });
+
+      expect(id1).toBe(id2);
+      expect(id1.startsWith('alk-ak01-')).toBe(true);
+      expect(id1).not.toBe(idDifferentStore);
+    });
+
+    it('should return success ONLY when backend confirms insertion returning real database id', async () => {
+      const mockOrder = buildValidMockOrder();
 
       global.fetch = vi.fn().mockResolvedValue({
         ok: true,
-        text: () => Promise.resolve(JSON.stringify({ success: true, message: 'Pedido transmitido al programa de pedidos manuales' }))
+        status: 200,
+        text: () =>
+          Promise.resolve(
+            JSON.stringify({
+              success: true,
+              salaEsperaId: 'alk-ak01-oc1234abcd',
+              data: { id: 'alk-ak01-oc1234abcd', correlativo: '0042' },
+              message: 'Pedido transmitido y confirmado en Sala de Espera'
+            })
+          )
       } as any);
 
       const result = await transmitirPedidoAlkosto(mockOrder);
       expect(result.success).toBe(true);
-      expect(result.message).toContain('transmitido');
-      expect(global.fetch).toHaveBeenCalledWith('/api/alkosto/pedidos/transmitir', expect.anything());
+      expect(result.id).toBe('alk-ak01-oc1234abcd');
+      expect(global.fetch).toHaveBeenCalledTimes(1);
     });
 
-    it('should trigger fallback when backend responds with 500 error', async () => {
-      const mockOrder: AlkostoOrder = {
-        id: 'test-order-2',
-        numeroPedido: '0043',
-        sucursalCodigo: '7497',
-        sucursalNombre: 'Alkosto 01',
-        vendedora: 'SAIRU VALLES',
-        ruta: 'CUENTAS CLAVE 2',
-        fechaPedido: '2026-10-16',
-        fechaEntregaEstimada: '2026-10-18',
-        condicionPago: 'Crédito 15 días',
-        items: [],
-        totalBultos: 1,
-        totalKilos: 10,
-        totalUSD: 25,
-        estado: 'BORRADOR',
-        createdAt: '2026-10-16T10:00:00Z',
-        updatedAt: '2026-10-16T10:00:00Z'
-      };
+    it('should perform up to 2 automatic retries on network micro-cuts/5xx and succeed when retry confirms id', async () => {
+      const mockOrder = buildValidMockOrder({ id: 'alk-ak02-retrytest' });
 
       let callCount = 0;
-      global.fetch = vi.fn().mockImplementation((url: string) => {
+      global.fetch = vi.fn().mockImplementation(() => {
         callCount++;
-        if (callCount === 1) {
-          // Backend API fails
+        if (callCount <= 2) {
           return Promise.resolve({
             ok: false,
-            status: 500,
-            text: () => Promise.resolve(JSON.stringify({ error: 'Internal Server Error' }))
+            status: 503,
+            text: () => Promise.resolve(JSON.stringify({ error: 'Micro-corte temporal de red' }))
           });
         }
-        // Fallback webhook succeeds
         return Promise.resolve({
           ok: true,
-          text: () => Promise.resolve(JSON.stringify({ success: true }))
+          status: 200,
+          text: () =>
+            Promise.resolve(
+              JSON.stringify({
+                success: true,
+                salaEsperaId: 'alk-ak02-retrytest',
+                data: { id: 'alk-ak02-retrytest', correlativo: '0043' }
+              })
+            )
         });
       });
 
       const result = await transmitirPedidoAlkosto(mockOrder);
+      expect(callCount).toBe(3); // 1 intento inicial + 2 reintentos automáticos
       expect(result.success).toBe(true);
-      expect(result.message).toContain('modo directo');
+      expect(result.id).toBe('alk-ak02-retrytest');
+      expect(result.attempts).toBe(3);
     });
 
-    it('should throw Error if both backend and fallback fail completely', async () => {
-      const mockOrder = { id: 'test-order-fail' } as AlkostoOrder;
+    it('should deduplicate concurrent double-click calls so only 1 network POST is sent', async () => {
+      const mockOrder = buildValidMockOrder({ id: 'alk-ak03-deduptest', idempotencyKey: 'alk-ak03-deduptest' });
+
+      global.fetch = vi.fn().mockImplementation(
+        () =>
+          new Promise(resolve =>
+            setTimeout(
+              () =>
+                resolve({
+                  ok: true,
+                  status: 200,
+                  text: () =>
+                    Promise.resolve(
+                      JSON.stringify({
+                        success: true,
+                        salaEsperaId: 'alk-ak03-deduptest',
+                        data: { id: 'alk-ak03-deduptest', correlativo: '0044' }
+                      })
+                    )
+                }),
+              40
+            )
+          )
+      );
+
+      const [r1, r2] = await Promise.all([
+        transmitirPedidoAlkosto(mockOrder),
+        transmitirPedidoAlkosto(mockOrder)
+      ]);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(r1.id).toBe('alk-ak03-deduptest');
+      expect(r2.id).toBe('alk-ak03-deduptest');
+    });
+
+    it('should NEVER fake success if all 3 attempts fail or if DB fails to return confirmed id', async () => {
+      const mockOrder = buildValidMockOrder({ id: 'alk-ak04-failtest', idempotencyKey: 'alk-ak04-failtest' });
 
       global.fetch = vi.fn().mockRejectedValue(new Error('Network offline or DNS failure'));
 
-      await expect(transmitirPedidoAlkosto(mockOrder)).rejects.toThrow();
+      await expect(transmitirPedidoAlkosto(mockOrder)).rejects.toThrow(/Network offline/i);
+      expect(global.fetch).toHaveBeenCalledTimes(3); // 1 inicial + 2 reintentos
     });
   });
 });

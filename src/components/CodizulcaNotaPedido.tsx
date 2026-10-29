@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Plus, Trash2, Printer, Save, Share2, Check, AlertCircle, Calendar as CalendarIcon, Store, Layers, Send, Building2, Search, BookOpen, X, Barcode } from 'lucide-react';
 import { CodizulcaNotaPedidoItem, ParsedOrdenCompraAlkosto, AlkostoOrder } from '../types';
 import { 
@@ -13,7 +13,8 @@ import {
   detectCadenaFromTagOrName,
   saveAlkostoOrder, 
   transmitirPedidoAlkosto,
-  enviarLotePedidosAlkosto
+  enviarLotePedidosAlkosto,
+  validarPedidoAlkostoAntesDeEnviar
 } from '../services/alkostoService';
 import {
   normalizarUnidadMedidaAlkosto,
@@ -22,7 +23,8 @@ import {
   validarNumeroOC,
   construirObservacionFormateada,
   normalizarCadenaEstricta,
-  calcularResumenCuadreOC
+  calcularResumenCuadreOC,
+  normalizarNombreVendedorSairu
 } from '../services/alkostoOcParser';
 
 interface CodizulcaNotaPedidoProps {
@@ -218,6 +220,8 @@ function buildFilasFromData(
     }
 
     const rawDespachada = (it as any).cantDespachada ?? (it as any).cantidadDespachada ?? '';
+    const rawPrecioBruto = parseNumeroSeguro((it as any).costoBruto ?? (it as any).precioBruto);
+    const rawDescuento = parseNumeroSeguro((it as any).descuento ?? (it as any).porcentajeBonif);
 
     result.push({
       renglon: result.length + 1,
@@ -229,6 +233,8 @@ function buildFilasFromData(
       codigoBarra: finalBarcode,
       descripcion: finalDesc,
       precio: Number(finalPrecio.toFixed(4)),
+      ...(rawPrecioBruto > 0 ? { precioBruto: Number(rawPrecioBruto.toFixed(4)) } : {}),
+      ...(rawDescuento > 0 ? { descuento: Number(rawDescuento.toFixed(2)) } : {}),
       subtotal: Number(sub.toFixed(2)),
       tiendas: it.tiendas
     });
@@ -289,7 +295,7 @@ export function CodizulcaNotaPedido({
     if (!initialData) return '';
     return initialData.ordenNro || (initialData as any).numeroOrden || (initialData as any).nroOrden || (initialData as any).oc || '';
   });
-  const [ruta, setRuta] = useState('SAIRU VALLES / CUENTAS CLAVE 2');
+  const [ruta, setRuta] = useState(() => normalizarNombreVendedorSairu(vendedoraNombre));
   const [supervisor, setSupervisor] = useState('PEDRO PEREZ');
   const [chofer, setChofer] = useState('TRANSPORTE CODIZULCA');
   const [observaciones, setObservaciones] = useState('');
@@ -310,7 +316,9 @@ export function CodizulcaNotaPedido({
   const [mensajeExito, setMensajeExito] = useState<string | null>(null);
   const [alertaValidacionOC, setAlertaValidacionOC] = useState<string | null>(null);
   const [guardando, setGuardando] = useState(false);
-  const [transmitiendo, setTransmitiendo] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const isSubmittingRef = useRef(false);
+  const transmitiendo = isSubmitting;
   const [progresoEnvio, setProgresoEnvio] = useState<{ actual: number; total: number; tag: string; sucursal: string; monto: number } | null>(null);
   const [pedidosFallidosLote, setPedidosFallidosLote] = useState<Array<{ pedido: AlkostoOrder; motivo: string }>>([]);
   const [todasTiendasOC, setTodasTiendasOC] = useState<string[]>([]);
@@ -470,8 +478,12 @@ export function CodizulcaNotaPedido({
       : tienda.startsWith('AK')
         ? 'ALKOSTO'
         : cadena;
-    const dataFilas = buildFilasFromData(data, tienda, effectiveCadena);
-    setFilas(dataFilas);
+    // Solo reconstruir filas cuando existe una Orden de Compra con matriz de ítems;
+    // en modo manual conservar los productos ya cargados por Sairu Valles al cambiar sucursal.
+    if (extractItemsList(data).length > 0) {
+      const dataFilas = buildFilasFromData(data, tienda, effectiveCadena);
+      setFilas(dataFilas);
+    }
 
     // Actualizar nombre, código y observación estandarizada de sucursal según listado oficial
     if (tienda !== 'CONSOLIDADO') {
@@ -663,9 +675,45 @@ export function CodizulcaNotaPedido({
   const handleTransmitirAOtroPrograma = async (
     opciones?: { soloTiendaActual?: boolean; reintentarFallidos?: AlkostoOrder[] }
   ) => {
-    if (transmitiendo) return;
+    // Bloqueo anti-doble clic inmediato y síncrono al primer clic
+    if (isSubmittingRef.current || isSubmitting) return;
 
-    // 1. Validar número de Orden de Compra (OC) con regex antes de enviar (nunca omitir en silencio)
+    // 1. Validación previa estricta: al menos un producto válido con cantidad > 0 antes de permitir envío
+    if (!opciones?.reintentarFallidos || opciones.reintentarFallidos.length === 0) {
+      const tieneProductosEnTabla = filas.some(f => {
+        const cant = parseNumeroSeguro(f.cantSolicitada);
+        const tieneIdentidad = String(f.codigo || '').trim() !== '' || String(f.descripcion || '').trim() !== '';
+        return tieneIdentidad && Number.isFinite(cant) && cant > 0;
+      });
+      const tieneProductosEnOC = extractItemsList(initialData).some((it: any) => {
+        const tiendasSum =
+          it?.tiendas && typeof it.tiendas === 'object'
+            ? (Object.values(it.tiendas) as unknown[]).reduce<number>((acc, v) => acc + parseNumeroSeguro(v), 0)
+            : 0;
+        const cant: number =
+          parseNumeroSeguro(it?.totalCantidad) ||
+          parseNumeroSeguro(it?.cantidad) ||
+          tiendasSum;
+        return Number.isFinite(cant) && cant > 0;
+      });
+
+      if (!tieneProductosEnTabla && !tieneProductosEnOC) {
+        const msg =
+          '⚠️ Validación previa: Debes ingresar al menos un producto válido con cantidad mayor a cero (CANT > 0) antes de enviar a la Sala de Espera.';
+        setAlertaValidacionOC(msg);
+        alert(msg);
+        return;
+      }
+
+      if (!String(clienteNombre || '').trim() || !String(idCliente || '').trim()) {
+        const msg = '⚠️ Validación previa: Selecciona la sucursal/tienda de ALKOSTO antes de enviar.';
+        setAlertaValidacionOC(msg);
+        alert(msg);
+        return;
+      }
+    }
+
+    // 2. Validar número de Orden de Compra (OC) con regex antes de enviar (nunca omitir en silencio)
     const ocRaw = ordenCompraRef.trim() || initialData?.ordenNro || '';
     const validacionOC = validarNumeroOC(ocRaw);
     if (!validacionOC.valido) {
@@ -683,7 +731,9 @@ export function CodizulcaNotaPedido({
       setAlertaValidacionOC(null);
     }
 
-    setTransmitiendo(true);
+    // Activar bloqueo síncrono + estado React antes de cualquier promesa de red
+    isSubmittingRef.current = true;
+    setIsSubmitting(true);
     try {
       let pedidosPorEnviar: AlkostoOrder[] = [];
 
@@ -692,6 +742,7 @@ export function CodizulcaNotaPedido({
       } else {
         // Extraer el 100% de las sucursales/tiendas del documento OC bajo el Esquema de Datos Normalizado (Strict Payload)
         const enviarLoteCompleto = opciones?.soloTiendaActual ? false : true;
+        const vendedorHomologado = normalizarNombreVendedorSairu(ruta || vendedoraNombre);
         const extraidos = extraerPedidosNormalizadosDeOC({
           initialData,
           filasActuales: filas,
@@ -701,7 +752,7 @@ export function CodizulcaNotaPedido({
           clienteNombreSeleccionado: clienteNombre,
           direccionObservacionFallback: observaciones,
           numero_oc: validacionOC.numero_oc,
-          vendedor: ruta || `${vendedoraNombre} / CUENTAS CLAVE 2`,
+          vendedor: vendedorHomologado,
           supervisor,
           chofer,
           cantidadCestas,
@@ -711,22 +762,31 @@ export function CodizulcaNotaPedido({
         pedidosPorEnviar = extraidos.pedidos;
       }
 
-      if (pedidosPorEnviar.length === 0) {
-        alert('No hay renglones con cantidad mayor a 0 para enviar. Por favor verifica las cantidades del formato.');
+      // Validar cada pedido con validarPedidoAlkostoAntesDeEnviar
+      const pedidosValidados: AlkostoOrder[] = [];
+      for (const ped of pedidosPorEnviar) {
+        const check = validarPedidoAlkostoAntesDeEnviar(ped);
+        if (check.valido && check.pedidoSanitizado) {
+          pedidosValidados.push(check.pedidoSanitizado);
+        }
+      }
+
+      if (pedidosValidados.length === 0) {
+        alert('No hay productos válidos con cantidad mayor a 0 para enviar. Por favor verifica los renglones del formato.');
         return;
       }
 
       setProgresoEnvio({
         actual: 1,
-        total: pedidosPorEnviar.length,
-        tag: pedidosPorEnviar[0].sucursalTag || pedidosPorEnviar[0].sucursalCodigo || '',
-        sucursal: pedidosPorEnviar[0].sucursal_cliente || pedidosPorEnviar[0].sucursalNombre,
-        monto: Number(pedidosPorEnviar[0].monto_pedido ?? pedidosPorEnviar[0].totalNeto ?? 0)
+        total: pedidosValidados.length,
+        tag: pedidosValidados[0].sucursalTag || pedidosValidados[0].sucursalCodigo || '',
+        sucursal: pedidosValidados[0].sucursal_cliente || pedidosValidados[0].sucursalNombre,
+        monto: Number(pedidosValidados[0].monto_pedido ?? pedidosValidados[0].totalNeto ?? 0)
       });
 
-      // 2. Envío secuencial estricto con await por cada pedido y verificación de integridad (N de N)
+      // 3. Envío secuencial estricto con hasta 2 reintentos automáticos por pedido y confirmación real de ID de BD
       const resultado = await enviarLotePedidosAlkosto(
-        pedidosPorEnviar,
+        pedidosValidados,
         (actual, total, pedidoActual) => {
           setProgresoEnvio({
             actual,
@@ -738,46 +798,59 @@ export function CodizulcaNotaPedido({
         }
       );
 
-      // 3. Verificación estricta de integridad: N insertados === N por enviar
-      if (!resultado.integridadCompleta || resultado.pedidosInsertados.length !== pedidosPorEnviar.length) {
+      // 4. Verificación estricta de integridad y confirmación de ID devuelto por Sala de Espera
+      const todosConIdConfirmado = resultado.pedidosInsertados.every(
+        p => Boolean(String(p.salaEsperaId || p.id || '').trim())
+      );
+
+      if (
+        !resultado.integridadCompleta ||
+        !todosConIdConfirmado ||
+        resultado.pedidosInsertados.length !== pedidosValidados.length
+      ) {
         // Conservar ÚNICAMENTE los pedidos fallidos en pantalla mostrando el motivo exacto del error (NO limpiar ni desmontar)
         setPedidosFallidosLote(resultado.pedidosFallidos);
         const exitososCount = resultado.pedidosInsertados.length;
         const fallidosCount = resultado.pedidosFallidos.length;
         setMensajeExito(
           exitososCount > 0
-            ? `Se enviaron ${exitososCount} de ${pedidosPorEnviar.length} pedidos. Quedan ${fallidosCount} pedido(s) pendientes por reintentar.`
+            ? `Se confirmaron ${exitososCount} de ${pedidosValidados.length} pedidos en Sala de Espera. Quedan ${fallidosCount} pedido(s) pendientes por reintentar.`
             : null
         );
         return;
       }
 
-      // 100% de integridad verificada (ej. 7 de 7 insertados exitosamente)
+      // 100% de integridad y confirmación real de BD verificada
       setPedidosFallidosLote([]);
       const correlativosList = resultado.pedidosInsertados.map(g => g.correlativo || g.numeroPedido);
+      const idsConfirmadosList = resultado.pedidosInsertados.map(g => g.salaEsperaId || g.id);
+
       if (resultado.pedidosInsertados.length > 1) {
         setMensajeExito(
-          `¡${resultado.pedidosInsertados.length} de ${ pedidosPorEnviar.length } pedidos transmitidos íntegramente a la Sala de Espera (Cadenas Comerciales)! Correlativos: N° ${correlativosList.join(', N° ')}.`
+          `¡${resultado.pedidosInsertados.length} de ${pedidosValidados.length} pedidos confirmados en Sala de Espera (Pedidos Manuales)! Correlativos: N° ${correlativosList.join(', N° ')} | IDs BD: ${idsConfirmadosList.join(', ')}.`
         );
       } else {
-        const unicoCorrelativo = correlativosList[0] || 'AUTO';
+        const unicoPedido = resultado.pedidosInsertados[0];
+        const unicoCorrelativo = unicoPedido.correlativo || unicoPedido.numeroPedido || 'AUTO';
+        const unicoIdConfirmado = unicoPedido.salaEsperaId || unicoPedido.id;
         setNroPedido(unicoCorrelativo);
         setMensajeExito(
-          `¡Pedido transmitido directamente a la Sala de Espera (Cadenas Comerciales)! Correlativo: N° ${unicoCorrelativo}.`
+          `¡Pedido confirmado en Sala de Espera (Pedidos Manuales)! ID Pedido: ${unicoIdConfirmado} | Correlativo: N° ${unicoCorrelativo} | Sucursal: ${unicoPedido.sucursalNombre}.`
         );
       }
 
-      // Solo limpiar y desmontar tras verificar que pedidosInsertados.length === pedidosPorEnviar.length
+      // Solo limpiar tras confirmar inserción real en la base de datos de Sala de Espera
       limpiarFormato();
 
-      setTimeout(() => setMensajeExito(null), 6000);
+      setTimeout(() => setMensajeExito(null), 8000);
       if (onOrderSaved) {
         onOrderSaved();
       }
     } catch (err: any) {
-      alert('Error al transmitir pedido: ' + err.message);
+      alert('Error al transmitir pedido a Sala de Espera: ' + (err?.message || String(err)));
     } finally {
-      setTransmitiendo(false);
+      isSubmittingRef.current = false;
+      setIsSubmitting(false);
       setProgresoEnvio(null);
     }
   };
@@ -865,7 +938,9 @@ export function CodizulcaNotaPedido({
                   );
                   if (suc.tag && tiendasDisponibles.includes(suc.tag)) {
                     setTiendaSeleccionada(suc.tag);
-                    setFilas(buildFilasFromData(initialData, suc.tag, cadenaActiva));
+                    if (extractItemsList(initialData).length > 0) {
+                      setFilas(buildFilasFromData(initialData, suc.tag, cadenaActiva));
+                    }
                   }
                 }
               }}

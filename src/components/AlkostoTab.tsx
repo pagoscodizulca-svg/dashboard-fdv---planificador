@@ -44,6 +44,7 @@ import {
   deleteAlkostoOrder,
   parseAlkostoOrderImage,
   transmitirPedidoAlkosto,
+  validarPedidoAlkostoAntesDeEnviar,
   syncCadenasConfigToFirestore,
   AlkostoSucursal,
   CatalogoAlkostoItem
@@ -81,6 +82,9 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
   const [alertaError, setAlertaError] = useState<string | null>(null);
   const [pedidoDetalle, setPedidoDetalle] = useState<AlkostoOrder | null>(null);
   const [selectedSucursalForFormato, setSelectedSucursalForFormato] = useState<{ codigo: string; nombre: string; cadena?: 'ALKOSTO' | 'FAMILIA_CENTER' } | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submittingOrderId, setSubmittingOrderId] = useState<string | null>(null);
+  const isSubmittingRef = useRef(false);
 
   // Suscripción en tiempo real a pedidos de Alkosto y sincronización de abreviaturas
   useEffect(() => {
@@ -249,15 +253,41 @@ ${pedido.observaciones ? `💬 *Observaciones:* ${pedido.observaciones}` : ''}
 
   // Transmitir pedido directamente a la Sala de Espera del Gestor de Pedidos Manuales
   const handleTransmitir = async (pedido: AlkostoOrder) => {
+    // Bloqueo inmediato anti-doble clic (ref síncrono + estado React)
+    if (isSubmittingRef.current || isSubmitting) return;
+
+    // Validación previa estricta: al menos un producto válido con cantidad > 0
+    const check = validarPedidoAlkostoAntesDeEnviar(pedido);
+    if (!check.valido || !check.pedidoSanitizado) {
+      setAlertaError(`Validación previa: ${check.errores.join(' ')}`);
+      setTimeout(() => setAlertaError(null), 6000);
+      return;
+    }
+
+    isSubmittingRef.current = true;
+    setIsSubmitting(true);
+    setSubmittingOrderId(pedido.id);
+    setAlertaError(null);
+
     try {
-      const correlativoIdent = pedido.correlativo || pedido.numeroPedido;
-      setAlertaExito(`Transmitiendo pedido N° ${correlativoIdent} a la Sala de Espera de Pedidos Manuales...`);
-      await transmitirPedidoAlkosto(pedido);
+      const pedidoValidado = check.pedidoSanitizado;
+      const result = await transmitirPedidoAlkosto(pedidoValidado);
+      const confirmedId = String(result.id || '').trim();
+      if (!result.success || !confirmedId) {
+        throw new Error('La base de datos de Sala de Espera no confirmó el ID del pedido.');
+      }
+
+      const finalCorr = String(
+        result.data?.correlativo || result.data?.numeroPedido || pedido.correlativo || pedido.numeroPedido
+      );
       await updateAlkostoOrderStatus(pedido.id, 'ENVIADO');
 
       const nowIso = new Date().toISOString();
       setOrders(prev => prev.map(o => o.id === pedido.id ? { 
         ...o, 
+        salaEsperaId: confirmedId,
+        correlativo: finalCorr,
+        numeroPedido: finalCorr,
         estado: 'ENVIADO', 
         transmitido_a_pedidos_manuales: true,
         fecha_transmision: nowIso 
@@ -266,17 +296,27 @@ ${pedido.observaciones ? `💬 *Observaciones:* ${pedido.observaciones}` : ''}
       if (pedidoDetalle && pedidoDetalle.id === pedido.id) {
         setPedidoDetalle(prev => prev ? { 
           ...prev, 
+          salaEsperaId: confirmedId,
+          correlativo: finalCorr,
+          numeroPedido: finalCorr,
           estado: 'ENVIADO', 
           transmitido_a_pedidos_manuales: true,
           fecha_transmision: nowIso 
         } : null);
       }
 
-      setAlertaExito(`¡Pedido N° ${correlativoIdent} transmitido con éxito! Ha viajado directamente a la Sala de Espera del Gestor de Pedidos Manuales.`);
-      setTimeout(() => setAlertaExito(null), 5000);
+      setAlertaExito(
+        `¡Pedido N° ${finalCorr} confirmado en Sala de Espera (Pedidos Manuales)! ID Pedido: ${confirmedId}.`
+      );
+      setTimeout(() => setAlertaExito(null), 6000);
     } catch (err: any) {
-      setAlertaError(`Error transmitiendo pedido: ${err.message}`);
-      setTimeout(() => setAlertaError(null), 5000);
+      setAlertaExito(null);
+      setAlertaError(`Error transmitiendo pedido a Sala de Espera: ${err?.message || String(err)}`);
+      setTimeout(() => setAlertaError(null), 6000);
+    } finally {
+      isSubmittingRef.current = false;
+      setIsSubmitting(false);
+      setSubmittingOrderId(null);
     }
   };
 
@@ -936,23 +976,25 @@ ${pedido.observaciones ? `💬 *Observaciones:* ${pedido.observaciones}` : ''}
                             </span>
                             <button
                               type="button"
+                              disabled={isSubmitting}
                               onClick={() => handleTransmitir(ped)}
-                              className="bg-neutral-900 hover:bg-neutral-800 text-neutral-400 hover:text-white px-2 py-1 rounded-xl text-xs font-bold border border-neutral-800 transition-colors flex items-center gap-1 cursor-pointer"
+                              className="bg-neutral-900 hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed text-neutral-400 hover:text-white px-2 py-1 rounded-xl text-xs font-bold border border-neutral-800 transition-colors flex items-center gap-1 cursor-pointer"
                               title="Re-transmitir a Pedidos Manuales"
                             >
-                              <RefreshCw className="w-3 h-3 text-neutral-400" />
-                              <span className="text-[10px]">Re-enviar</span>
+                              <RefreshCw className={`w-3 h-3 text-neutral-400 ${submittingOrderId === ped.id ? 'animate-spin' : ''}`} />
+                              <span className="text-[10px]">{submittingOrderId === ped.id ? 'Enviando...' : 'Re-enviar'}</span>
                             </button>
                           </div>
                         ) : (
                           <button
                             type="button"
+                            disabled={isSubmitting}
                             onClick={() => handleTransmitir(ped)}
-                            className="bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-md shadow-emerald-950/50 cursor-pointer active:scale-95"
+                            className="bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 disabled:cursor-not-allowed text-white px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-md shadow-emerald-950/50 cursor-pointer active:scale-95"
                             title="Transmitir directamente a la Sala de Espera de Pedidos Manuales"
                           >
                             <Send className="w-3.5 h-3.5 text-white" />
-                            <span className="text-[11px]">Transmitir Directo</span>
+                            <span className="text-[11px]">{submittingOrderId === ped.id ? 'Transmitiendo...' : 'Transmitir Directo'}</span>
                           </button>
                         )}
 
@@ -1220,11 +1262,18 @@ ${pedido.observaciones ? `💬 *Observaciones:* ${pedido.observaciones}` : ''}
             <div className="grid grid-cols-1 sm:flex sm:items-center sm:justify-end gap-2 sm:gap-3 pt-3 border-t border-neutral-800">
               <button
                 type="button"
+                disabled={isSubmitting}
                 onClick={() => handleTransmitir(pedidoDetalle)}
-                className="w-full sm:w-auto bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 active:scale-[0.98] text-white font-bold text-xs py-2.5 px-4 rounded-xl flex items-center justify-center gap-1.5 shadow cursor-pointer"
+                className="w-full sm:w-auto bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.98] text-white font-bold text-xs py-2.5 px-4 rounded-xl flex items-center justify-center gap-1.5 shadow cursor-pointer"
               >
                 <Send className="w-4 h-4" />
-                <span>{pedidoDetalle.transmitido_a_pedidos_manuales || pedidoDetalle.estado === 'ENVIADO' ? '🔄 Re-transmitir a Pedidos Manuales' : '🚀 Transmitir Directo a Sala de Espera'}</span>
+                <span>
+                  {submittingOrderId === pedidoDetalle.id
+                    ? '⏳ Confirmando en Sala de Espera...'
+                    : pedidoDetalle.transmitido_a_pedidos_manuales || pedidoDetalle.estado === 'ENVIADO'
+                      ? '🔄 Re-transmitir a Pedidos Manuales'
+                      : '🚀 Transmitir Directo a Sala de Espera'}
+                </span>
               </button>
 
               <button

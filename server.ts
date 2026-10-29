@@ -14,7 +14,9 @@ import {
   construirObservacionFormateada,
   parseNumeroEstricto,
   limpiarDescripcionAlkosto,
-  calcularResumenCuadreOC
+  calcularResumenCuadreOC,
+  normalizarNombreVendedorSairu,
+  generarIdDeterministaPedidoAlkosto
 } from "./src/services/alkostoOcParser";
 
 dotenv.config();
@@ -276,7 +278,7 @@ async function startServer() {
   app.use((req, res, next) => {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
-    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, Pragma");
+    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, Pragma, X-Idempotency-Key");
     res.header("Access-Control-Expose-Headers", "X-Last-Sync, X-Sync-Source");
     if (req.method === 'OPTIONS') {
       return res.sendStatus(200);
@@ -1326,172 +1328,312 @@ async function startServer() {
     return String(lastAllocatedCorrelativo).padStart(4, '0');
   }
 
-  async function syncAlkostoOrderToExternal(item: any) {
-    try {
-      const correlativo = String(item.correlativo || item.numeroPedido || '').trim();
-      const orderId = String(item.id || `alk-${Date.now()}`).trim();
+  // Deduplicación idempotente en servidor para evitar pedidos duplicados por doble clic o reintentos
+  const inFlightAlkostoSubmissions = new Map<string, Promise<any>>();
+  const recentAlkostoSubmissions = new Map<string, { timestamp: number; record: any }>();
+  const IDEMPOTENCY_TTL_MS = 60_000;
 
-      const cadenaNorm = normalizarCadenaEstricta(
-        item.cadena || item.sucursalCodigo || item.id_cliente,
-        item.sucursal_cliente || item.sucursalNombre || item.cliente
-      );
-      const sucursalClienteClean = String(
-        item.sucursal_cliente || item.sucursalNombre || item.cliente || cadenaNorm
-      )
-        .trim()
-        .toUpperCase();
+  class AlkostoHttpError extends Error {
+    public readonly statusCode: number;
+    constructor(statusCode: number, message: string) {
+      super(message);
+      this.name = 'AlkostoHttpError';
+      this.statusCode = statusCode;
+    }
+  }
 
-      const rawIdCli = String(item.id_cliente || item.sucursalCodigo || item.idCliente || '').trim();
-      const idClientePadded = /^\d+$/.test(rawIdCli) ? rawIdCli.padStart(6, '0') : rawIdCli;
-
-      const numeroOcClean = String(
-        item.numero_oc || item.ordenCompraAlkosto || item.orden_compra_alkosto || item.orden_compra || 'S/N'
-      ).trim();
-
-      const direccionDespachoClean = String(
-        item.direccion_despacho || item.direccionEntrega || item.observaciones || 'Entrega según Orden de Compra'
-      ).trim();
-
-      const observacionFormateada =
-        item.observacion_formateada && String(item.observacion_formateada).includes(' | OC ')
-          ? String(item.observacion_formateada).trim()
-          : construirObservacionFormateada({
-              sucursal_cliente: sucursalClienteClean,
-              cadena: cadenaNorm,
-              numero_oc: numeroOcClean,
-              direccion_despacho: direccionDespachoClean
-            });
-
-      // Formatear renglones de artículos con conversión numérica limpia (cero NaN)
-      const sourceRenglones = Array.isArray(item.renglones) && item.renglones.length > 0
+  function extraerArticulosHomologadosSalaEspera(item: any) {
+    const sourceRenglones =
+      Array.isArray(item?.renglones) && item.renglones.length > 0
         ? item.renglones
-        : Array.isArray(item.items)
+        : Array.isArray(item?.items) && item.items.length > 0
           ? item.items
-          : [];
+          : Array.isArray(item?.articulos) && item.articulos.length > 0
+            ? item.articulos
+            : [];
 
-      const gestorArticles = sourceRenglones
-        .map((it: any) => {
-          const rawCod = String(it.sku || it.codigo || '').trim();
-          const desc = limpiarDescripcionAlkosto(String(it.producto || it.descripcion || 'PRODUCTO').trim().toUpperCase());
-          const resolvedProd = resolverProductoBackend(rawCod, desc);
-          const cleanCod = (resolvedProd ? resolvedProd.sku : '') || rawCod;
-          const cant = parseNumeroEstricto(it.cantidad ?? it.cantidadCajas ?? it.cantSolicitada ?? it.cantidad_solicitada, 0);
-          const precio = parseNumeroEstricto(it.precio_unitario ?? it.precioUnitarioUSD ?? it.precio, 0);
-          const sub = precio > 0
+    return sourceRenglones
+      .map((it: any) => {
+        if (!it || typeof it !== 'object') return null;
+        const rawCod = String(it.sku ?? it.codigo ?? '').trim();
+        const rawDesc = String(it.producto ?? it.descripcion ?? '').trim();
+        if (!rawCod && !rawDesc) return null;
+
+        const desc = limpiarDescripcionAlkosto((rawDesc || 'PRODUCTO').toUpperCase());
+        const resolvedProd = resolverProductoBackend(rawCod, desc);
+        const cleanCod = (resolvedProd ? resolvedProd.sku : '') || rawCod || 'S/C';
+
+        const cant = parseNumeroEstricto(
+          it.cantidad ??
+            it.cantidad_solicitada ??
+            it.cantidadCajas ??
+            it.cantSolicitada ??
+            it.bultos ??
+            it.cajas ??
+            it.unidades ??
+            it.kilos,
+          0
+        );
+        if (!Number.isFinite(cant) || Number.isNaN(cant) || cant <= 0) {
+          return null;
+        }
+
+        const precioBruto = parseNumeroEstricto(
+          it.precio_bruto ?? it.precioBrutoUSD ?? it.costoBruto,
+          0
+        );
+        const descuentoRaw = Math.max(0, parseNumeroEstricto(it.descuento, 0));
+        let precio = parseNumeroEstricto(
+          it.precio_unitario ?? it.precioUnitarioUSD ?? it.precio,
+          0
+        );
+        if (precio <= 0 && precioBruto > 0 && descuentoRaw > 0 && descuentoRaw <= 100) {
+          precio = Number((precioBruto * (1 - descuentoRaw / 100)).toFixed(4));
+        }
+
+        const descuentoEfectivo =
+          descuentoRaw > 0
+            ? Number(descuentoRaw.toFixed(2))
+            : precioBruto > precio && precio > 0
+              ? Number((((precioBruto - precio) / precioBruto) * 100).toFixed(2))
+              : 0;
+
+        const sub =
+          precio > 0
             ? Number((cant * precio).toFixed(2))
-            : Number(parseNumeroEstricto(it.subtotal ?? it.subtotalUSD ?? it.sub_total, 0).toFixed(2));
-          const rawUnit = String(it.unidad_medida || it.presentacion || it.unid || it.unidad || resolvedProd?.unid || 'CJ').trim().toUpperCase();
-          const normUnit = ['CJ', 'CJA', 'CAJA', 'CAJAS', 'BLT', 'BTO', 'BULTO', 'BULTOS'].includes(rawUnit)
-            ? 'BULTO'
-            : rawUnit === 'UND' || rawUnit === 'UNIDAD'
-              ? 'UNIDAD'
-              : 'KG';
+            : Number(
+                Math.max(
+                  0,
+                  parseNumeroEstricto(it.subtotal ?? it.subtotalUSD ?? it.sub_total, 0)
+                ).toFixed(2)
+              );
 
-          return {
-            codigo: cleanCod,
-            descripcion: (resolvedProd ? resolvedProd.nombre : '') || desc,
-            cantidad_solicitada: Number(cant.toFixed(2)),
-            cantidad_despachada: 0,
-            unidad_medida: normUnit,
-            precio_unitario: Number(precio.toFixed(4)),
-            sub_total: Number(sub.toFixed(2))
-          };
-        })
-        .filter((a: any) => Number.isFinite(a.cantidad_solicitada) && !Number.isNaN(a.cantidad_solicitada) && a.cantidad_solicitada > 0);
+        const rawUnit = String(
+          it.unidad_medida || it.presentacion || it.unid || it.unidad || resolvedProd?.unid || 'CJ'
+        )
+          .trim()
+          .toUpperCase();
 
-      if (gestorArticles.length === 0) {
-        console.warn(`[ENVIO_FDV -> SALA_ESPERA] Se descartó pedido de ${sucursalClienteClean} por tener 0 renglones activos (cantidad > 0).`);
-        return;
-      }
+        const isBoxUnit =
+          ['CJ', 'CJA', 'CAJA', 'CAJAS', 'BLT', 'BTO', 'BULTO', 'BULTOS'].includes(rawUnit) ||
+          rawUnit.startsWith('CAJA');
+        const isPieceUnit = ['UND', 'UNID', 'UNIDAD', 'UNIDADES'].includes(rawUnit);
 
-      const totalMonto = Number(
-        gestorArticles
-          .reduce((acc: number, a: any) => acc + Number((a.cantidad_solicitada * a.precio_unitario).toFixed(2)), 0)
-          .toFixed(2)
+        const normUnit = isBoxUnit ? 'BULTO' : isPieceUnit ? 'UNIDAD' : 'KG';
+        const unidadOriginal = rawUnit === 'BLT' ? 'BLT' : isBoxUnit ? 'CJ' : isPieceUnit ? 'UND' : 'KG';
+
+        const cajasVal = Number.isFinite(Number(it.cajas)) && Number(it.cajas) > 0
+          ? Number(Number(it.cajas).toFixed(2))
+          : isBoxUnit
+            ? Number(cant.toFixed(2))
+            : 0;
+        const unidadesVal = Number.isFinite(Number(it.unidades)) && Number(it.unidades) > 0
+          ? Number(Number(it.unidades).toFixed(2))
+          : isPieceUnit
+            ? Number(cant.toFixed(2))
+            : 0;
+        const kilosVal = Number.isFinite(Number(it.totalKilos ?? it.kilos)) && Number(it.totalKilos ?? it.kilos) > 0
+          ? Number(Number(it.totalKilos ?? it.kilos).toFixed(2))
+          : normUnit === 'KG'
+            ? Number(cant.toFixed(2))
+            : Number((cant * 10).toFixed(2));
+
+        return {
+          codigo: cleanCod,
+          sku: cleanCod,
+          descripcion: (resolvedProd ? resolvedProd.nombre : '') || desc,
+          cantidad_solicitada: Number(cant.toFixed(2)),
+          cantidad: Number(cant.toFixed(2)),
+          cantidad_despachada: 0,
+          unidad_medida: normUnit,
+          unidad_original: unidadOriginal,
+          cajas: cajasVal,
+          unidades: unidadesVal,
+          kilos: kilosVal,
+          precio_unitario: Number(precio.toFixed(4)),
+          precio: Number(precio.toFixed(4)),
+          ...(precioBruto > 0 ? { precio_bruto: Number(precioBruto.toFixed(4)) } : {}),
+          descuento: descuentoEfectivo,
+          sub_total: Number(sub.toFixed(2)),
+          subtotal: Number(sub.toFixed(2))
+        };
+      })
+      .filter((a: any): a is NonNullable<typeof a> => a !== null);
+  }
+
+  async function syncAlkostoOrderToExternal(
+    item: any,
+    gestorArticlesPrecomputed?: any[]
+  ): Promise<{
+    confirmedId: string;
+    status: string;
+    totalRenglones: number;
+    montoPedido: number;
+    attempts: number;
+  }> {
+    const correlativo = String(item.correlativo || item.numeroPedido || '').trim();
+    const orderId = String(item.id || '').trim();
+    if (!orderId) {
+      throw new AlkostoHttpError(400, 'ID de pedido ausente para sincronizar con Sala de Espera.');
+    }
+
+    const cadenaNorm = normalizarCadenaEstricta(
+      item.cadena || item.sucursalTag || item.sucursalCodigo || item.id_cliente,
+      item.sucursal_cliente || item.sucursalNombre || item.cliente
+    );
+    const sucursalClienteClean = String(
+      item.sucursal_cliente || item.sucursalNombre || item.cliente || cadenaNorm
+    )
+      .trim()
+      .toUpperCase();
+
+    const rawIdCli = String(item.id_cliente || item.sucursalCodigo || item.idCliente || '').trim();
+    const idClientePadded = /^\d+$/.test(rawIdCli) ? rawIdCli.padStart(6, '0') : rawIdCli;
+    const sucursalTagClean = String(item.sucursalTag || item.sucursal_tag || '').trim().toUpperCase();
+
+    const numeroOcClean = String(
+      item.numero_oc || item.ordenCompraAlkosto || item.orden_compra_alkosto || item.orden_compra || 'S/N'
+    ).trim();
+
+    const direccionDespachoClean = String(
+      item.direccion_despacho || item.direccionEntrega || item.observaciones || 'Entrega según Orden de Compra'
+    ).trim();
+
+    const observacionFormateada =
+      item.observacion_formateada && String(item.observacion_formateada).includes(' | OC ')
+        ? String(item.observacion_formateada).trim()
+        : construirObservacionFormateada({
+            sucursal_cliente: sucursalClienteClean,
+            cadena: cadenaNorm,
+            numero_oc: numeroOcClean,
+            direccion_despacho: direccionDespachoClean
+          });
+
+    const gestorArticles = Array.isArray(gestorArticlesPrecomputed)
+      ? gestorArticlesPrecomputed
+      : extraerArticulosHomologadosSalaEspera(item);
+
+    if (gestorArticles.length === 0) {
+      throw new AlkostoHttpError(
+        400,
+        `Validación previa: El pedido de ${sucursalClienteClean} no contiene productos válidos con cantidad mayor a cero.`
       );
+    }
 
-      const fechaValida = item.fechaPedido || item.fecha
-        ? (String(item.fechaPedido || item.fecha).includes('T')
-            ? String(item.fechaPedido || item.fecha).split('T')[0]
-            : String(item.fechaPedido || item.fecha))
-        : new Date().toISOString().split('T')[0];
+    const totalMonto = Number(
+      gestorArticles
+        .reduce((acc: number, a: any) => acc + Number(a.sub_total || 0), 0)
+        .toFixed(2)
+    );
 
-      const vendedorClean = String(item.vendedor || item.ruta || 'SAIRU VALLES / CUENTAS CLAVE 2').trim().toUpperCase();
-      const supervisorClean = String(item.supervisor || item.vendedora || 'SAIRU VALLES').trim().toUpperCase();
+    const fechaValida = item.fechaPedido || item.fecha
+      ? (String(item.fechaPedido || item.fecha).includes('T')
+          ? String(item.fechaPedido || item.fecha).split('T')[0]
+          : String(item.fechaPedido || item.fecha))
+      : new Date().toISOString().split('T')[0];
 
-      const rawOrder = {
-        id_cliente: idClientePadded,
-        cliente: sucursalClienteClean,
-        sucursal_cliente: sucursalClienteClean,
-        cadena: cadenaNorm,
-        numero_oc: numeroOcClean,
-        direccion_despacho: direccionDespachoClean,
-        observacion_formateada: observacionFormateada,
-        vendedor: vendedorClean,
-        numero_pedido: correlativo,
-        ruta: vendedorClean,
-        supervisor: supervisorClean,
-        chofer: String(item.chofer || 'TRANSPORTE CODIZULCA').trim(),
-        observaciones: observacionFormateada,
-        fecha: fechaValida,
-        total_pedido: totalMonto,
-        monto_pedido: totalMonto,
-        total_renglones: gestorArticles.length,
-        estado: 'POR VALIDAR',
-        origen: cadenaNorm,
-        fuente_origen: 'APP FDV',
-        sucursal: 'Maracaibo',
-        articulos: gestorArticles,
-        renglones: gestorArticles.map((a: any) => ({
-          codigo: a.codigo,
-          descripcion: a.descripcion,
-          unidad_medida: a.unidad_medida,
-          cantidad: a.cantidad_solicitada,
-          precio_unitario: a.precio_unitario,
-          subtotal: a.sub_total
-        }))
-      };
+    // Homologación exacta: vendedor = 'Sairu Valles' y ruta = 'Sairu Valles' (coincide con VS["Sairu Valles"] y cd(row) en Pedidos Manuales)
+    const vendedorHomologado = normalizarNombreVendedorSairu(
+      item.vendedor || item.vendedora || item.ruta
+    );
+    const supervisorClean = String(item.supervisor || vendedorHomologado).trim();
 
-      const supabaseOrderRow = {
-        id: orderId,
-        numero_pedido: correlativo || 'APP-FDV',
-        cliente: rawOrder.cliente,
-        id_cliente: rawOrder.id_cliente || null,
-        ruta: rawOrder.ruta,
-        supervisor: rawOrder.supervisor,
-        chofer: rawOrder.chofer || null,
-        observaciones: observacionFormateada,
-        fecha: fechaValida,
-        total_pedido: totalMonto,
-        monto_pedido: totalMonto,
-        status: "POR_VALIDAR", // <--- SIEMPRE ENTRA EN ESTADO POR_VALIDAR A LA SALA DE ESPERA DE PEDIDOS MANUALES
-        sucursal: "Maracaibo",
-        version: 1,
-        is_modified: false,
-        reject_reason: null,
-        cxc_note: null,
-        fact_note: null,
-        articulos: gestorArticles,
-        status_history: [
-          {
-            status: "POR_VALIDAR",
-            department: "Ventas",
-            changedBy: rawOrder.ruta || "SAIRU VALLES",
-            timestamp: new Date().toISOString(),
-            reason: `Recibido en Sala de Espera desde APP FDV (${cadenaNorm} | OC: ${numeroOcClean})`
-          }
-        ],
-        raw_order: rawOrder,
-        created_at: item.createdAt || new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        is_archived: false
-      };
+    const rawOrder = {
+      id: orderId,
+      idempotency_key: String(item.idempotencyKey || orderId),
+      id_cliente: idClientePadded,
+      cliente: sucursalClienteClean,
+      sucursal_cliente: sucursalClienteClean,
+      ...(sucursalTagClean ? { sucursal_tag: sucursalTagClean } : {}),
+      cadena: cadenaNorm,
+      numero_oc: numeroOcClean,
+      direccion_despacho: direccionDespachoClean,
+      observacion_formateada: observacionFormateada,
+      vendedor: vendedorHomologado,
+      vendedor_nombre: vendedorHomologado,
+      canal_comercial: 'CUENTAS CLAVE 2',
+      numero_pedido: correlativo,
+      ruta: vendedorHomologado,
+      supervisor: supervisorClean,
+      chofer: String(item.chofer || 'TRANSPORTE CODIZULCA').trim(),
+      observaciones: observacionFormateada,
+      fecha: fechaValida,
+      total_pedido: totalMonto,
+      monto_pedido: totalMonto,
+      total_renglones: gestorArticles.length,
+      estado: 'POR VALIDAR',
+      estado_sala_espera: 'POR_VALIDAR',
+      origen: cadenaNorm,
+      fuente_origen: 'APP FDV',
+      sucursal: 'Maracaibo',
+      articulos: gestorArticles,
+      renglones: gestorArticles.map((a: any) => ({
+        codigo: a.codigo,
+        sku: a.sku,
+        descripcion: a.descripcion,
+        unidad_medida: a.unidad_medida,
+        unidad_original: a.unidad_original,
+        cantidad: a.cantidad_solicitada,
+        cajas: a.cajas,
+        unidades: a.unidades,
+        kilos: a.kilos,
+        precio_unitario: a.precio_unitario,
+        ...(a.precio_bruto ? { precio_bruto: a.precio_bruto } : {}),
+        descuento: a.descuento,
+        subtotal: a.sub_total
+      }))
+    };
 
-      // 1. Envío directo al Supabase del Programa de Pedidos Manuales (Sala de Espera - Cadenas Comerciales)
+    const supabaseOrderRow = {
+      id: orderId,
+      numero_pedido: correlativo || 'APP-FDV',
+      cliente: rawOrder.cliente,
+      id_cliente: rawOrder.id_cliente || null,
+      ruta: vendedorHomologado,
+      supervisor: rawOrder.supervisor,
+      chofer: rawOrder.chofer || null,
+      observaciones: observacionFormateada,
+      fecha: fechaValida,
+      total_pedido: totalMonto,
+      monto_pedido: totalMonto,
+      status: 'POR_VALIDAR', // Estado exacto que filtra la Sala de Espera de Pedidos Manuales
+      sucursal: 'Maracaibo',
+      version: 1,
+      is_modified: false,
+      reject_reason: null,
+      cxc_note: null,
+      fact_note: null,
+      articulos: gestorArticles,
+      status_history: [
+        {
+          status: 'POR_VALIDAR',
+          department: 'Ventas',
+          changedBy: vendedorHomologado,
+          timestamp: new Date().toISOString(),
+          reason: `Recibido en Sala de Espera desde APP FDV (${vendedorHomologado} | ${cadenaNorm} | OC: ${numeroOcClean})`
+        }
+      ],
+      raw_order: rawOrder,
+      created_at: item.createdAt || new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      is_archived: false
+    };
+
+    // 1. Envío transaccional con hasta 2 reintentos automáticos (3 intentos totales) a public.orders (Sala de Espera)
+    const ordersUrl = `${PEDIDOS_MANUALES_SUPABASE_URL.replace(/\/+$/, '')}/rest/v1/orders`;
+    const maxAttempts = 3;
+    let confirmedId = '';
+    let attemptsUsed = 0;
+    let lastExternalErr: Error | null = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      attemptsUsed = attempt;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
       try {
-        const ordersUrl = `${PEDIDOS_MANUALES_SUPABASE_URL.replace(/\/+$/, '')}/rest/v1/orders`;
         const supaRes = await fetch(ordersUrl, {
           method: 'POST',
+          signal: controller.signal,
           headers: {
             'apikey': PEDIDOS_MANUALES_SUPABASE_KEY,
             'Authorization': `Bearer ${PEDIDOS_MANUALES_SUPABASE_KEY}`,
@@ -1500,208 +1642,356 @@ async function startServer() {
           },
           body: JSON.stringify(supabaseOrderRow)
         });
-        if (supaRes.ok) {
-          console.log(`[ENVIO_FDV -> SALA_ESPERA] Pedido N° ${correlativo} (ID: ${orderId} | ${sucursalClienteClean} | OC: ${numeroOcClean} | Renglones: ${gestorArticles.length} | Monto: $${totalMonto.toFixed(2)}) insertado en Sala de Espera (status: POR_VALIDAR)`);
-        } else {
-          const errTxt = await supaRes.text();
-          console.warn(`[ENVIO_FDV -> SALA_ESPERA] Supabase aviso:`, supaRes.status, errTxt);
-        }
-      } catch (supaErr) {
-        console.error(`[ENVIO_FDV -> SALA_ESPERA] Error conectando a Supabase Pedidos Manuales:`, supaErr);
-      }
 
-      // 2. Persistencia en archivo local orders.json del Gestor de Pedidos Manuales (si existe)
-      try {
-        const ordersFilePath = path.resolve(process.cwd(), '../gestor-de-pedidos-pro/orders.json');
-        if (fs.existsSync(ordersFilePath)) {
-          const rawContent = fs.readFileSync(ordersFilePath, 'utf8');
-          let fileOrders: any[] = [];
-          try {
-            fileOrders = JSON.parse(rawContent);
-            if (!Array.isArray(fileOrders)) fileOrders = [];
-          } catch {}
-
-          const dbOrderObj = {
-            id: orderId,
-            status: "POR_VALIDAR",
-            isArchived: false,
-            createdAt: supabaseOrderRow.created_at,
-            updatedAt: supabaseOrderRow.updated_at,
-            sucursal: "Maracaibo",
-            version: 1,
-            order: rawOrder,
-            statusHistory: supabaseOrderRow.status_history
-          };
-
-          const existingIdx = fileOrders.findIndex(o => 
-            o.id === orderId || 
-            (o.order?.numero_pedido && correlativo && String(o.order.numero_pedido).trim() === correlativo)
+        const bodyText = await supaRes.text();
+        if (!supaRes.ok) {
+          const isClientSchemaError = supaRes.status >= 400 && supaRes.status < 500 && supaRes.status !== 408 && supaRes.status !== 429;
+          const err = new AlkostoHttpError(
+            isClientSchemaError ? 502 : 503,
+            `Supabase Sala de Espera respondió HTTP ${supaRes.status}: ${bodyText.slice(0, 300)}`
           );
-
-          if (existingIdx >= 0) {
-            fileOrders[existingIdx] = dbOrderObj;
-          } else {
-            fileOrders.unshift(dbOrderObj);
-          }
-
-          fs.writeFileSync(ordersFilePath, JSON.stringify(fileOrders, null, 2), 'utf8');
+          (err as any).retryable = !isClientSchemaError;
+          throw err;
         }
-      } catch (fErr) {
-        console.warn(`[ALKOSTO -> PEDIDOS MANUALES] No se pudo escribir localmente en orders.json:`, fErr);
-      }
 
-      // 3. Actualizar estado local a ENVIADO en Firestore y Supabase local con await estricto (sin race condition)
-      try {
-        await setDoc(doc(db, 'alkosto_orders', orderId), {
-          estado: 'ENVIADO',
-          status: 'ENVIADO',
-          observaciones: observacionFormateada,
-          transmitido_a_pedidos_manuales: true,
-          fecha_transmision: new Date().toISOString()
-        }, { merge: true });
+        let parsedRep: any = null;
+        try {
+          parsedRep = bodyText ? JSON.parse(bodyText) : null;
+        } catch {}
 
-        if (supabase) {
-          await supabase.from('pedidos_alkosto').update({
-            status: 'ENVIADO',
-            observaciones: observacionFormateada,
-            updated_at: new Date().toISOString()
-          }).eq('id', orderId);
+        const insertedRow = Array.isArray(parsedRep) ? parsedRep[0] : parsedRep;
+        confirmedId = String(insertedRow?.id || '').trim();
+        if (!confirmedId) {
+          throw new AlkostoHttpError(
+            502,
+            'Supabase Sala de Espera no devolvió el ID de confirmación en la representación insertada.'
+          );
         }
-      } catch (dbErr) {
-        console.warn(`[ALKOSTO] Error actualizando estado a ENVIADO en db local:`, dbErr);
-      }
 
-      // 4. Enviar a Google Sheets Webhook
-      if (GOOGLE_SCRIPT_WEBHOOK_URL) {
-        fetch(GOOGLE_SCRIPT_WEBHOOK_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            action: 'ADD_PEDIDO_ALKOSTO',
-            tipo: 'PEDIDO_ALKOSTO',
-            timestamp: new Date().toISOString(),
-            id: orderId,
-            numeroPedido: correlativo,
-            correlativo: correlativo,
-            ordenCompraAlkosto: numeroOcClean,
-            sucursalCodigo: item.sucursalCodigo,
-            sucursalNombre: sucursalClienteClean,
-            vendedora: item.vendedora || 'SAIRU VALLES',
-            ruta: vendedorClean,
-            fechaPedido: fechaValida,
-            fechaEntrega: item.fechaEntregaEstimada,
-            totalBultos: item.totalBultos,
-            totalKilos: item.totalKilos,
-            totalUSD: totalMonto,
-            condicionPago: item.condicionPago || 'Crédito 21 días',
-            items: item.items,
-            observaciones: observacionFormateada
-          })
-        }).catch(err => console.warn("Google script webhook alkosto error:", err));
+        console.log(
+          `[ENVIO_FDV -> SALA_ESPERA] Confirmado Pedido N° ${correlativo} (ID BD: ${confirmedId} | Vendedor: ${vendedorHomologado} | ${sucursalClienteClean} | OC: ${numeroOcClean} | Renglones: ${gestorArticles.length} | Monto: $${totalMonto.toFixed(2)} | Intento: ${attempt}/${maxAttempts})`
+        );
+        break;
+      } catch (err: any) {
+        lastExternalErr = err instanceof Error ? err : new Error(String(err));
+        const canRetry = attempt < maxAttempts && (err?.retryable !== false);
+        console.warn(
+          `[ENVIO_FDV -> SALA_ESPERA] Intento ${attempt}/${maxAttempts} fallido para ${sucursalClienteClean}: ${lastExternalErr.message}`
+        );
+        if (!canRetry) {
+          break;
+        }
+        await new Promise(r => setTimeout(r, 400 * attempt));
+      } finally {
+        clearTimeout(timeoutId);
       }
-
-    } catch (e) {
-      console.warn("syncAlkostoOrderToExternal failure:", e);
     }
+
+    if (!confirmedId) {
+      throw new AlkostoHttpError(
+        502,
+        `No se pudo confirmar la inserción del pedido en la Sala de Espera de Pedidos Manuales tras ${attemptsUsed} intento(s): ${lastExternalErr?.message || 'Error desconocido'}`
+      );
+    }
+
+    // 2. Persistencia opcional en archivo local orders.json del Gestor de Pedidos Manuales (si existe en entorno local)
+    try {
+      const ordersFilePath = path.resolve(process.cwd(), '../gestor-de-pedidos-pro/orders.json');
+      if (fs.existsSync(ordersFilePath)) {
+        const rawContent = fs.readFileSync(ordersFilePath, 'utf8');
+        let fileOrders: any[] = [];
+        try {
+          fileOrders = JSON.parse(rawContent);
+          if (!Array.isArray(fileOrders)) fileOrders = [];
+        } catch {}
+
+        const dbOrderObj = {
+          id: confirmedId,
+          status: 'POR_VALIDAR',
+          isArchived: false,
+          createdAt: supabaseOrderRow.created_at,
+          updatedAt: supabaseOrderRow.updated_at,
+          sucursal: 'Maracaibo',
+          version: 1,
+          order: rawOrder,
+          statusHistory: supabaseOrderRow.status_history
+        };
+
+        const existingIdx = fileOrders.findIndex(
+          o =>
+            o.id === confirmedId ||
+            (o.order?.numero_pedido && correlativo && String(o.order.numero_pedido).trim() === correlativo)
+        );
+
+        if (existingIdx >= 0) {
+          fileOrders[existingIdx] = dbOrderObj;
+        } else {
+          fileOrders.unshift(dbOrderObj);
+        }
+
+        fs.writeFileSync(ordersFilePath, JSON.stringify(fileOrders, null, 2), 'utf8');
+      }
+    } catch (fErr) {
+      console.warn(`[ALKOSTO -> PEDIDOS MANUALES] No se pudo escribir localmente en orders.json:`, fErr);
+    }
+
+    // 3. Enviar espejo secundario a Google Sheets Webhook (no bloqueante, tras confirmar BD principal)
+    if (GOOGLE_SCRIPT_WEBHOOK_URL) {
+      fetch(GOOGLE_SCRIPT_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'ADD_PEDIDO_ALKOSTO',
+          tipo: 'PEDIDO_ALKOSTO',
+          timestamp: new Date().toISOString(),
+          id: confirmedId,
+          numeroPedido: correlativo,
+          correlativo: correlativo,
+          ordenCompraAlkosto: numeroOcClean,
+          sucursalCodigo: item.sucursalCodigo,
+          sucursalNombre: sucursalClienteClean,
+          vendedora: vendedorHomologado,
+          ruta: vendedorHomologado,
+          fechaPedido: fechaValida,
+          fechaEntrega: item.fechaEntregaEstimada,
+          totalBultos: item.totalBultos,
+          totalKilos: item.totalKilos,
+          totalUSD: totalMonto,
+          condicionPago: item.condicionPago || 'Crédito 21 días',
+          items: item.items,
+          observaciones: observacionFormateada
+        })
+      }).catch(err => console.warn("Google script webhook alkosto error:", err));
+    }
+
+    return {
+      confirmedId,
+      status: 'POR_VALIDAR',
+      totalRenglones: gestorArticles.length,
+      montoPedido: totalMonto,
+      attempts: attemptsUsed
+    };
   }
 
-  async function processAndPersistSingleAlkostoOrder(item: any): Promise<any> {
-    const id = item.id || `alk-ord-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
-    const correlativo = await allocateNextCorrelativo(
-      item.correlativo && item.correlativo !== 'AUTO' && item.numeroPedido !== 'PENDIENTE'
-        ? item.correlativo
-        : undefined
-    );
-
-    const cadenaNorm = normalizarCadenaEstricta(
-      item.cadena || item.sucursalCodigo || item.id_cliente,
-      item.sucursal_cliente || item.sucursalNombre
-    );
-    const sucursalNombreClean = String(item.sucursal_cliente || item.sucursalNombre || cadenaNorm).trim().toUpperCase();
-    const numeroOcClean = String(item.numero_oc || item.ordenCompraAlkosto || 'S/N').trim();
-    const direccionClean = String(item.direccion_despacho || item.direccionEntrega || item.observaciones || 'Entrega según Orden de Compra').trim();
-
-    const observacionFormateada =
-      item.observacion_formateada && String(item.observacion_formateada).includes(' | OC ')
-        ? String(item.observacion_formateada).trim()
-        : construirObservacionFormateada({
-            sucursal_cliente: sucursalNombreClean,
-            cadena: cadenaNorm,
-            numero_oc: numeroOcClean,
-            direccion_despacho: direccionClean
-          });
-
-    const record = {
-      ...item,
-      id,
-      correlativo,
-      numeroPedido: correlativo,
-      ordenCompraAlkosto: numeroOcClean !== 'S/N' ? numeroOcClean : (item.ordenCompraAlkosto || ''),
-      sucursalNombre: sucursalNombreClean,
-      direccionEntrega: direccionClean,
-      observaciones: observacionFormateada,
-      observacion_formateada: observacionFormateada,
-      cadena: cadenaNorm,
-      sucursal_cliente: sucursalNombreClean,
-      numero_oc: numeroOcClean,
-      direccion_despacho: direccionClean,
-      estado: 'ENVIADO',
-      status: 'ENVIADO',
-      origen: 'APP FDV',
-      transmitido_a_pedidos_manuales: true,
-      fecha_transmision: new Date().toISOString(),
-      createdAt: item.createdAt || new Date().toISOString()
-    };
-
-    // 1. Guardar en Firestore con await
-    await setDoc(doc(db, 'alkosto_orders', id), record, { merge: true }).catch(err =>
-      console.warn("[FIRESTORE] Aviso guardando pedido Alkosto:", err?.message)
-    );
-
-    // 2. Guardar en Supabase local (pedidos_alkosto) con status: 'ENVIADO' directamente en el upsert y con await estricto
-    if (supabase) {
-      const { error: supaErr } = await supabase.from('pedidos_alkosto').upsert({
-        id: record.id,
-        numero_pedido: record.numeroPedido || '',
-        correlativo: record.correlativo || record.numeroPedido || '',
-        orden_compra_alkosto: record.ordenCompraAlkosto || '',
-        sucursal_codigo: record.sucursalCodigo || '',
-        sucursal_nombre: record.sucursalNombre || '',
-        vendedora: record.vendedora || 'SAIRU VALLES',
-        ruta: record.ruta || 'CUENTAS CLAVE 2',
-        fecha_pedido: record.fechaPedido ? new Date(record.fechaPedido).toISOString().split('T')[0] : null,
-        total_bultos: Number(record.totalBultos) || 0,
-        total_kilos: Number(record.totalKilos) || 0,
-        total_usd: Number(record.monto_pedido ?? record.totalUSD) || 0,
-        condicion_pago: record.condicionPago || '',
-        items: record.items || [],
-        observaciones: observacionFormateada,
-        status: 'ENVIADO',
-        created_at: record.createdAt,
-        updated_at: new Date().toISOString()
-      });
-      if (supaErr) {
-        console.warn("[SUPABASE LOCAL] Error en upsert de pedidos_alkosto:", supaErr.message);
-      }
+  async function processAndPersistSingleAlkostoOrder(
+    item: any,
+    headerIdempotencyKey?: string
+  ): Promise<any> {
+    if (!item || typeof item !== 'object') {
+      throw new AlkostoHttpError(400, 'Datos de pedido requeridos o inválidos.');
     }
 
-    // 3. Sincronizar de inmediato y con await con la Sala de Espera de Pedidos Manuales
-    await syncAlkostoOrderToExternal(record);
+    // 1. Validación previa estricta de ítems con cantidad > 0
+    const gestorArticles = extraerArticulosHomologadosSalaEspera(item);
+    if (gestorArticles.length === 0) {
+      throw new AlkostoHttpError(
+        400,
+        'Validación previa: El pedido debe contener al menos un producto válido con cantidad mayor a cero.'
+      );
+    }
 
-    return record;
+    const cadenaNorm = normalizarCadenaEstricta(
+      item.cadena || item.sucursalTag || item.sucursalCodigo || item.id_cliente,
+      item.sucursal_cliente || item.sucursalNombre || item.cliente
+    );
+    const sucursalNombreClean = String(
+      item.sucursal_cliente || item.sucursalNombre || item.cliente || cadenaNorm
+    )
+      .trim()
+      .toUpperCase();
+    const numeroOcClean = String(
+      item.numero_oc || item.ordenCompraAlkosto || item.orden_compra_alkosto || 'S/N'
+    ).trim();
+    const direccionClean = String(
+      item.direccion_despacho || item.direccionEntrega || item.observaciones || 'Entrega según Orden de Compra'
+    ).trim();
+    const fechaISO = item.fechaPedido || item.fecha
+      ? String(item.fechaPedido || item.fecha).split('T')[0]
+      : new Date().toISOString().split('T')[0];
+
+    const rawIdInput = String(item.id || '').trim();
+    const rawClientCode = String(item.id_cliente || item.sucursalCodigo || '').trim();
+    const tagSlug = String(item.sucursalTag || item.sucursal_tag || 'doc')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '') || 'doc';
+
+    const deterministicId =
+      rawIdInput && !/^alk-ord-/i.test(rawIdInput)
+        ? rawIdInput
+        : String(headerIdempotencyKey || item.idempotencyKey || '').trim() ||
+          generarIdDeterministaPedidoAlkosto({
+            tagSlug,
+            idCliente: rawClientCode,
+            numeroOc: numeroOcClean,
+            fechaISO,
+            renglones: gestorArticles.map((a: any) => ({
+              codigo: a.codigo,
+              unidad_medida: a.unidad_original || a.unidad_medida,
+              cantidad: a.cantidad_solicitada,
+              precio_unitario: a.precio_unitario,
+              descuento: a.descuento,
+              subtotal: a.sub_total
+            }))
+          });
+
+    const idempotencyKey = String(
+      headerIdempotencyKey || item.idempotencyKey || deterministicId
+    ).trim();
+
+    // 2. Deduplicación de peticiones concurrentes (anti-doble clic) y caché reciente de idempotencia
+    const existingInFlight = inFlightAlkostoSubmissions.get(idempotencyKey);
+    if (existingInFlight) {
+      return existingInFlight;
+    }
+
+    const cachedRecent = recentAlkostoSubmissions.get(idempotencyKey);
+    if (
+      cachedRecent &&
+      !item.forceRetransmit &&
+      Date.now() - cachedRecent.timestamp < IDEMPOTENCY_TTL_MS
+    ) {
+      return cachedRecent.record;
+    }
+
+    const runPromise = (async () => {
+      const correlativo = await allocateNextCorrelativo(
+        item.correlativo && item.correlativo !== 'AUTO' && item.numeroPedido !== 'PENDIENTE'
+          ? item.correlativo
+          : undefined
+      );
+
+      const observacionFormateada =
+        item.observacion_formateada && String(item.observacion_formateada).includes(' | OC ')
+          ? String(item.observacion_formateada).trim()
+          : construirObservacionFormateada({
+              sucursal_cliente: sucursalNombreClean,
+              cadena: cadenaNorm,
+              numero_oc: numeroOcClean,
+              direccion_despacho: direccionClean
+            });
+
+      const vendedorHomologado = normalizarNombreVendedorSairu(
+        item.vendedor || item.vendedora || item.ruta
+      );
+      const totalMonto = Number(
+        gestorArticles.reduce((acc: number, a: any) => acc + Number(a.sub_total || 0), 0).toFixed(2)
+      );
+      const totalBultos = Number(
+        gestorArticles.reduce((acc: number, a: any) => acc + Number(a.cantidad_solicitada || 0), 0).toFixed(2)
+      );
+
+      const draftRecord = {
+        ...item,
+        id: deterministicId,
+        idempotencyKey,
+        correlativo,
+        numeroPedido: correlativo,
+        ordenCompraAlkosto: numeroOcClean !== 'S/N' ? numeroOcClean : (item.ordenCompraAlkosto || ''),
+        sucursalNombre: sucursalNombreClean,
+        direccionEntrega: direccionClean,
+        vendedora: vendedorHomologado,
+        vendedor: vendedorHomologado,
+        ruta: vendedorHomologado,
+        observaciones: observacionFormateada,
+        observacion_formateada: observacionFormateada,
+        cadena: cadenaNorm,
+        sucursal_cliente: sucursalNombreClean,
+        numero_oc: numeroOcClean,
+        direccion_despacho: direccionClean,
+        totalBultos: Number(item.totalBultos) > 0 ? Number(item.totalBultos) : totalBultos,
+        totalUSD: totalMonto,
+        monto_pedido: totalMonto,
+        total_renglones: gestorArticles.length,
+        origen: 'APP FDV',
+        createdAt: item.createdAt || new Date().toISOString()
+      };
+
+      // 3. Insertar PRIMERO en la Sala de Espera de Pedidos Manuales y exigir confirmación real del ID en BD
+      const externalConfirmation = await syncAlkostoOrderToExternal(draftRecord, gestorArticles);
+      const confirmedId = externalConfirmation.confirmedId;
+      const nowIso = new Date().toISOString();
+
+      const confirmedRecord = {
+        ...draftRecord,
+        id: confirmedId,
+        salaEsperaId: confirmedId,
+        estadoSalaEspera: externalConfirmation.status,
+        estado: 'ENVIADO',
+        status: 'ENVIADO',
+        transmitido_a_pedidos_manuales: true,
+        fecha_transmision: nowIso
+      };
+
+      // 4. Solo tras confirmación real de Sala de Espera, persistir estado ENVIADO en Firestore y Supabase local
+      await setDoc(doc(db, 'alkosto_orders', confirmedId), confirmedRecord, { merge: true }).catch(err =>
+        console.warn("[FIRESTORE] Aviso guardando pedido Alkosto:", err?.message)
+      );
+
+      if (supabase) {
+        const { error: supaErr } = await supabase.from('pedidos_alkosto').upsert({
+          id: confirmedRecord.id,
+          numero_pedido: confirmedRecord.numeroPedido || '',
+          correlativo: confirmedRecord.correlativo || confirmedRecord.numeroPedido || '',
+          orden_compra_alkosto: confirmedRecord.ordenCompraAlkosto || '',
+          sucursal_codigo: confirmedRecord.sucursalCodigo || '',
+          sucursal_nombre: confirmedRecord.sucursalNombre || '',
+          vendedora: vendedorHomologado,
+          ruta: vendedorHomologado,
+          fecha_pedido: confirmedRecord.fechaPedido ? new Date(confirmedRecord.fechaPedido).toISOString().split('T')[0] : null,
+          total_bultos: Number(confirmedRecord.totalBultos) || 0,
+          total_kilos: Number(confirmedRecord.totalKilos) || 0,
+          total_usd: totalMonto,
+          condicion_pago: confirmedRecord.condicionPago || '',
+          items: confirmedRecord.items || [],
+          observaciones: observacionFormateada,
+          status: 'ENVIADO',
+          created_at: confirmedRecord.createdAt,
+          updated_at: nowIso
+        });
+        if (supaErr) {
+          console.warn("[SUPABASE LOCAL] Error en upsert de pedidos_alkosto:", supaErr.message);
+        }
+      }
+
+      recentAlkostoSubmissions.set(idempotencyKey, {
+        timestamp: Date.now(),
+        record: confirmedRecord
+      });
+
+      return confirmedRecord;
+    })();
+
+    inFlightAlkostoSubmissions.set(idempotencyKey, runPromise);
+    try {
+      return await runPromise;
+    } finally {
+      inFlightAlkostoSubmissions.delete(idempotencyKey);
+    }
   }
 
   app.post("/api/alkosto/pedidos", authenticateToken, async (req: any, res: any) => {
     try {
       const item = req.body;
-      if (!item || (!item.sucursalNombre && !item.sucursal_cliente)) {
-        return res.status(400).json({ error: "Falta sucursalNombre / sucursal_cliente" });
+      if (!item || (!item.sucursalNombre && !item.sucursal_cliente && !item.sucursalCodigo)) {
+        return res.status(400).json({ success: false, error: "Falta sucursalNombre / sucursal_cliente" });
       }
-      const record = await processAndPersistSingleAlkostoOrder(item);
-      res.json({ success: true, data: record });
+      const idempHeader = req.headers['x-idempotency-key'] ? String(req.headers['x-idempotency-key']) : undefined;
+      const record = await processAndPersistSingleAlkostoOrder(item, idempHeader);
+      res.json({
+        success: true,
+        id: record.salaEsperaId || record.id,
+        salaEsperaId: record.salaEsperaId || record.id,
+        data: record
+      });
     } catch (err: any) {
-      console.error("Error saving Alkosto order:", err);
-      res.status(500).json({ error: "Error saving Alkosto order", details: err?.message });
+      const statusCode = err instanceof AlkostoHttpError ? err.statusCode : 500;
+      console.error("Error saving Alkosto order:", err?.message || err);
+      res.status(statusCode).json({
+        success: false,
+        error: err?.message || "Error saving Alkosto order",
+        details: err?.message
+      });
     }
   });
 
@@ -1721,7 +2011,7 @@ async function startServer() {
         try {
           const saved = await processAndPersistSingleAlkostoOrder(p);
           insertados.push(saved);
-          console.log(`[ENVIO_FDV LOTE] Pedido ${i + 1}/${pedidosInput.length} procesado con ID ${saved.id} (Correlativo: ${saved.correlativo})`);
+          console.log(`[ENVIO_FDV LOTE] Pedido ${i + 1}/${pedidosInput.length} confirmado en Sala de Espera con ID ${saved.id} (Correlativo: ${saved.correlativo})`);
         } catch (err: any) {
           fallidos.push({
             index: i,
@@ -1747,18 +2037,27 @@ async function startServer() {
   app.post("/api/alkosto/pedidos/transmitir", authenticateToken, async (req: any, res: any) => {
     try {
       const item = req.body;
-      if (!item || (!item.id && !item.numeroPedido)) {
+      if (!item || (!item.id && !item.numeroPedido && !item.sucursalNombre && !item.sucursal_cliente)) {
         return res.status(400).json({ success: false, error: "Datos de pedido requeridos o inválidos para transmisión" });
       }
-      const record = await processAndPersistSingleAlkostoOrder(item);
+      const idempHeader = req.headers['x-idempotency-key'] ? String(req.headers['x-idempotency-key']) : undefined;
+      const record = await processAndPersistSingleAlkostoOrder(item, idempHeader);
+      const confirmedId = record.salaEsperaId || record.id;
       res.json({ 
         success: true, 
+        id: confirmedId,
+        salaEsperaId: confirmedId,
         data: record,
-        message: `Pedido N° ${record.correlativo || record.numeroPedido} transmitido directamente a la Sala de Espera del Gestor de Pedidos Manuales` 
+        message: `Pedido N° ${record.correlativo || record.numeroPedido} transmitido y confirmado en la Sala de Espera (ID: ${confirmedId})` 
       });
     } catch (err: any) {
-      console.error("Error transmitiendo pedido:", err);
-      res.status(500).json({ success: false, error: "Error transmitiendo pedido", details: err?.message });
+      const statusCode = err instanceof AlkostoHttpError ? err.statusCode : 500;
+      console.error("Error transmitiendo pedido:", err?.message || err);
+      res.status(statusCode).json({
+        success: false,
+        error: err?.message || "Error transmitiendo pedido",
+        details: err?.message
+      });
     }
   });
 
@@ -1792,9 +2091,20 @@ async function startServer() {
   app.delete("/api/alkosto/pedidos/:id", authenticateToken, async (req: any, res: any) => {
     try {
       const { id } = req.params;
-      await deleteDoc(doc(db, 'alkosto_orders', id));
+      await deleteDoc(doc(db, 'alkosto_orders', id)).catch(() => {});
       if (supabase) {
         Promise.resolve(supabase.from('pedidos_alkosto').delete().eq('id', id)).catch(err => console.warn("[SUPABASE] Error eliminando pedido Alkosto:", err?.message));
+      }
+      // Si es un registro de prueba automatizada (test-int-* / test-qa-*), limpiar también de Sala de Espera para cero contaminación
+      if (/^test-(int|qa)-/i.test(String(id))) {
+        const cleanUrl = `${PEDIDOS_MANUALES_SUPABASE_URL.replace(/\/+$/, '')}/rest/v1/orders?id=eq.${encodeURIComponent(String(id))}`;
+        await fetch(cleanUrl, {
+          method: 'DELETE',
+          headers: {
+            'apikey': PEDIDOS_MANUALES_SUPABASE_KEY,
+            'Authorization': `Bearer ${PEDIDOS_MANUALES_SUPABASE_KEY}`
+          }
+        }).catch(() => {});
       }
       res.json({ success: true, id });
     } catch (err: any) {
@@ -1805,7 +2115,8 @@ async function startServer() {
 
   // DICCIONARIO MAESTRO OFICIAL DE PRODUCTOS Y CÓDIGOS CODIZULCA
   const MASTER_PRODUCTOS_DICT = [
-    { sku: '1496', nombre: 'MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR', barcode: '7590377000077', chainCodes: ['1461', '1496', '7590377000077'], unid: 'CJ' },
+    { sku: '1496', nombre: 'MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR', barcode: '7590377000077', chainCodes: ['1496', '7590377000077'], unid: 'CJ' },
+    { sku: '1497', nombre: 'MORTADELA ESP D/POLLO ASTURIAS 20UNDX500GR', barcode: '7590377000589', chainCodes: ['1497', '7590377000589'], unid: 'CJ' },
     { sku: '1519', nombre: 'MORTADELA ESP D/POLLO SALPICAO 10UNDX900GR', barcode: '', chainCodes: ['1462', '1519'], unid: 'CJ' },
     { sku: '21', nombre: 'MORTADELA DE POLLO DEL CORRAL 1KG', barcode: '7591289609129', chainCodes: ['21', '021', '1463', '7591289609129'], unid: 'CJ' },
     { sku: '047', nombre: 'NUGGETS DE POLLO DEL CORRAL 460GR', barcode: '7591289400023', chainCodes: ['047', '47', '7591289400023'], unid: 'UND' },

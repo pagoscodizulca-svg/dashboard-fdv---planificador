@@ -1008,208 +1008,547 @@ export async function saveAlkostoOrder(
   return order;
 }
 
-export async function transmitirPedidoAlkosto(order: AlkostoOrder): Promise<{ success: boolean; message: string; data?: any }> {
+const inFlightOrderSubmissions = new Map<string, Promise<any>>();
+
+function homologarVendedorSairu(raw?: string): string {
+  const s = String(raw || '').trim();
+  if (!s) return 'Sairu Valles';
+  const upper = s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+  if (upper.includes('SAIRU') || upper.includes('VALLES') || upper.includes('CUENTAS CLAVE')) {
+    return 'Sairu Valles';
+  }
+  return s;
+}
+
+function construirClaveIdempotenciaCliente(pedido: AlkostoOrder): string {
+  const existing = String(pedido.idempotencyKey || '').trim();
+  if (existing) return existing;
+  const rawId = String(pedido.id || '').trim();
+  if (rawId && !/^alk-ord-/i.test(rawId)) return rawId;
+
+  const branchKey = String(pedido.sucursalTag || pedido.sucursalCodigo || 'doc')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '') || 'doc';
+  const ocClean = String(pedido.numero_oc || pedido.ordenCompraAlkosto || 'SN')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .replace(/^0+/, '') || 'SN';
+  const itemsSource = Array.isArray(pedido.renglones) && pedido.renglones.length > 0
+    ? pedido.renglones.map(r => `${r.codigo}:${Number(r.cantidad || 0).toFixed(2)}:${Number(r.precio_unitario || 0).toFixed(4)}:${Number(r.descuento || 0).toFixed(2)}`)
+    : (Array.isArray(pedido.items) ? pedido.items : []).map(it => `${it.sku}:${Number(it.cantidadCajas || 0).toFixed(2)}:${Number(it.precioUnitarioUSD || 0).toFixed(4)}:${Number(it.descuento || 0).toFixed(2)}`);
+  const seed = `${branchKey}|${ocClean}|${String(pedido.fechaPedido || '').slice(0, 10)}|${itemsSource.sort().join('|')}`;
+  let h = 0x811c9dc5;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return `alk-${branchKey}-${ocClean.slice(-6).toLowerCase()}${(h >>> 0).toString(36)}`;
+}
+
+function esErrorTransitorioReintentable(err: any, httpStatus?: number): boolean {
+  if (typeof httpStatus === 'number') {
+    return httpStatus === 408 || httpStatus === 429 || httpStatus >= 500;
+  }
+  const msg = String(err?.message || err || '').toLowerCase();
+  if (
+    msg.includes('http 400') ||
+    msg.includes('http 401') ||
+    msg.includes('http 403') ||
+    msg.includes('http 422') ||
+    msg.includes('validación')
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Validación previa estricta de producción antes de permitir cualquier envío a Sala de Espera:
+ * - Verifica cliente/sucursal válida.
+ * - Verifica al menos 1 producto válido con cantidad > 0 y descripción o SKU presente.
+ */
+export function validarPedidoAlkostoAntesDeEnviar(
+  pedidoInput: Partial<AlkostoOrder> | null | undefined
+): {
+  valido: boolean;
+  errores: string[];
+  pedidoSanitizado: AlkostoOrder | null;
+} {
+  const errores: string[] = [];
+  if (!pedidoInput || typeof pedidoInput !== 'object') {
+    return {
+      valido: false,
+      errores: ['El pedido está vacío o tiene un formato inválido.'],
+      pedidoSanitizado: null
+    };
+  }
+
+  const sucursalNombre = String(
+    pedidoInput.sucursal_cliente || pedidoInput.sucursalNombre || ''
+  ).trim();
+  const sucursalCodigo = String(
+    pedidoInput.sucursalCodigo || pedidoInput.strict_payload?.id_cliente || ''
+  ).trim();
+
+  if (!sucursalNombre && !sucursalCodigo) {
+    errores.push('Debe seleccionar una sucursal/tienda de ALKOSTO o FAMILIA CENTER válida.');
+  }
+
+  const sanitizado = sanitizarPedidoSucursalAntesDeEnviar(pedidoInput as AlkostoOrder);
+  if (!sanitizado) {
+    errores.push('El pedido debe contener al menos un producto válido con cantidad mayor a cero (cantidad > 0).');
+    return { valido: false, errores, pedidoSanitizado: null };
+  }
+
+  const renglonesValidos = (sanitizado.renglones || []).filter(
+    r =>
+      Number.isFinite(r.cantidad) &&
+      r.cantidad > 0 &&
+      (String(r.codigo || '').trim() !== '' || String(r.descripcion || '').trim() !== '')
+  );
+
+  if (renglonesValidos.length === 0) {
+    errores.push('El pedido debe contener al menos un producto válido con código/descripción y cantidad mayor a cero.');
+    return { valido: false, errores, pedidoSanitizado: null };
+  }
+
+  return {
+    valido: errores.length === 0,
+    errores,
+    pedidoSanitizado: errores.length === 0 ? sanitizado : null
+  };
+}
+
+/**
+ * Transmite un pedido desde el Historial / Detalle hacia la Sala de Espera de Pedidos Manuales
+ * con validación previa, idempotencia, hasta 2 reintentos automáticos ante micro-cortes de red
+ * y confirmación estricta del `id` retornado por la base de datos destino.
+ */
+export async function transmitirPedidoAlkosto(
+  order: AlkostoOrder
+): Promise<{ success: boolean; id: string; message: string; data?: any; attempts?: number }> {
+  const validacion = validarPedidoAlkostoAntesDeEnviar(order);
+  if (!validacion.valido || !validacion.pedidoSanitizado) {
+    throw new Error(`Validación previa fallida: ${validacion.errores.join(' ')}`);
+  }
+
+  const pedidoLimpio = validacion.pedidoSanitizado;
+  const idempotencyKey = construirClaveIdempotenciaCliente(pedidoLimpio);
+
+  // Deduplicación en vuelo (anti-doble clic concurrente)
+  const existingFlight = inFlightOrderSubmissions.get(`transmitir:${idempotencyKey}`);
+  if (existingFlight) {
+    return existingFlight;
+  }
+
+  const executionPromise = (async () => {
+    const maxIntentos = 3; // 1 intento inicial + hasta 2 reintentos automáticos
+    let ultimoError: Error | null = null;
+
+    for (let intento = 1; intento <= maxIntentos; intento++) {
+      let lastStatus: number | undefined;
+      try {
+        const res = await fetch('/api/alkosto/pedidos/transmitir', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Idempotency-Key': idempotencyKey,
+            ...getAuthHeaders()
+          },
+          body: JSON.stringify({
+            ...pedidoLimpio,
+            id: pedidoLimpio.id || idempotencyKey,
+            idempotencyKey
+          })
+        });
+
+        lastStatus = res.status;
+        const resText = await res.text();
+        let data: any = {};
+        try {
+          data = JSON.parse(resText);
+        } catch {}
+
+        if (!res.ok || data?.success === false) {
+          const errMsg = data?.error || data?.details || `Error transmitiendo pedido (HTTP ${res.status})`;
+          const httpErr = new Error(errMsg);
+          (httpErr as any).status = res.status;
+          throw httpErr;
+        }
+
+        const confirmedId = String(
+          data?.salaEsperaId || data?.data?.salaEsperaId || data?.data?.id || ''
+        ).trim();
+
+        if (!confirmedId) {
+          throw new Error('La Sala de Espera no devolvió el ID de confirmación de la base de datos.');
+        }
+
+        return {
+          success: true,
+          id: confirmedId,
+          attempts: intento,
+          message:
+            data.message ||
+            `Pedido confirmado en Sala de Espera (ID: ${confirmedId})`,
+          data: {
+            ...(data.data || pedidoLimpio),
+            id: confirmedId,
+            salaEsperaId: confirmedId
+          }
+        };
+      } catch (err: any) {
+        ultimoError = err instanceof Error ? err : new Error(String(err));
+        const status = (err as any)?.status ?? lastStatus;
+        const canRetry = intento < maxIntentos && esErrorTransitorioReintentable(ultimoError, status);
+        console.warn(
+          `[ENVIO_FDV] Intento ${intento}/${maxIntentos} en transmitirPedidoAlkosto (${pedidoLimpio.sucursalNombre}): ${ultimoError.message}`
+        );
+        if (!canRetry) {
+          break;
+        }
+        await new Promise(resolve => setTimeout(resolve, 350 * intento));
+      }
+    }
+
+    throw ultimoError || new Error('No se pudo confirmar la inserción del pedido en la Sala de Espera.');
+  })();
+
+  inFlightOrderSubmissions.set(`transmitir:${idempotencyKey}`, executionPromise);
   try {
-    const res = await fetch('/api/alkosto/pedidos/transmitir', {
-      method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        ...getAuthHeaders()
-      },
-      body: JSON.stringify(order)
-    });
-
-    const resText = await res.text();
-    let data: any = {};
-    try {
-      data = JSON.parse(resText);
-    } catch {}
-
-    if (res.ok && data?.success !== false) {
-      return {
-        success: true,
-        message: data.message || "Pedido transmitido con éxito",
-        data: data.data
-      };
-    } else {
-      throw new Error(data.error || `Error transmitiendo pedido (HTTP ${res.status})`);
-    }
-  } catch (err: any) {
-    console.warn("Fallo transmisión por backend, intentando fallback:", err);
-    // Fallback directo a webhook si el servidor proxy fallara
-    try {
-      const webhookUrl = (import.meta as any).env?.VITE_GOOGLE_SHEETS_WEBHOOK_URL || 'https://script.google.com/macros/s/AKfycbx6JMUR1IubQuZ97Ics7emw_I0G9UAy-5vig4Vl8zPwW8yMBbZldvQGeGOPNiNbUmVTaQ/exec';
-      await fetch(webhookUrl, {
-        method: 'POST',
-        mode: 'no-cors',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'ADD_PEDIDO_ALKOSTO',
-          timestamp: new Date().toISOString(),
-          ...order
-        })
-      });
-      return { success: true, message: "Pedido enviado al programa externo (modo directo)" };
-    } catch (e: any) {
-      throw new Error(err.message || "No se pudo transmitir el pedido");
-    }
+    return await executionPromise;
+  } finally {
+    inFlightOrderSubmissions.delete(`transmitir:${idempotencyKey}`);
   }
 }
 
 /**
  * Sanitiza un pedido de sucursal antes de enviarlo:
  * - Filtra cualquier renglón residual con `cantidad <= 0` o `isNaN(cantidad)`.
- * - Calcula `monto_pedido` como la suma exacta de `round(cantidad * precio_unitario, 2)` de los renglones activos.
+ * - Homologa `vendedor: 'Sairu Valles'`, `cadena` (`'ALKOSTO' | 'FAMILIA CENTER'`) y `estadoSalaEspera: 'POR_VALIDAR'`.
+ * - Preserva 100% de los atributos de cada ítem: `codigo`/`sku`, `descripcion`, `cantidad`, `cajas`, `unidades`, `kilos`, `precio`, `descuento` y `subtotal`.
  */
 export function sanitizarPedidoSucursalAntesDeEnviar(pedido: AlkostoOrder): AlkostoOrder | null {
+  if (!pedido || typeof pedido !== 'object') return null;
+
   const itemsActivos = (Array.isArray(pedido.items) ? pedido.items : [])
-    .filter(it => {
-      const cant = Number(it.cantidadCajas);
-      return Number.isFinite(cant) && !Number.isNaN(cant) && cant > 0;
-    })
-    .map(it => {
-      const cant = Number(it.cantidadCajas);
-      const precio = Number.isFinite(Number(it.precioUnitarioUSD)) ? Number(it.precioUnitarioUSD) : 0;
-      const sub = Number((cant * precio).toFixed(2));
+    .map((it: any, idx: number) => {
+      const cant = Number(
+        it.cantidadCajas ?? it.cantidad ?? it.bultos ?? it.cajas ?? it.cantSolicitada ?? it.cantidad_solicitada ?? 0
+      );
+      if (!Number.isFinite(cant) || Number.isNaN(cant) || cant <= 0) return null;
+
+      const skuClean = String(it.sku ?? it.codigo ?? '').trim();
+      const prodClean = String(it.producto ?? it.descripcion ?? '').trim();
+      if (!skuClean && !prodClean) return null;
+
+      const precioBruto = Number.isFinite(Number(it.precioBrutoUSD ?? it.precio_bruto))
+        ? Number(it.precioBrutoUSD ?? it.precio_bruto)
+        : 0;
+      const descuento = Number.isFinite(Number(it.descuento)) && Number(it.descuento) > 0
+        ? Number(Number(it.descuento).toFixed(2))
+        : 0;
+      let precio = Number.isFinite(Number(it.precioUnitarioUSD ?? it.precio_unitario ?? it.precio))
+        ? Number(it.precioUnitarioUSD ?? it.precio_unitario ?? it.precio)
+        : 0;
+      if (precio <= 0 && precioBruto > 0 && descuento > 0 && descuento <= 100) {
+        precio = Number((precioBruto * (1 - descuento / 100)).toFixed(4));
+      }
+
+      const rawSub = Number(it.subtotalUSD ?? it.subtotal ?? it.sub_total ?? 0);
+      const sub = precio > 0
+        ? Number((cant * precio).toFixed(2))
+        : (Number.isFinite(rawSub) && rawSub >= 0 ? Number(rawSub.toFixed(2)) : 0);
+
+      const pres = String(it.presentacion ?? it.unidad_medida ?? 'CJ').trim().toUpperCase();
+      const isBox = ['CJ', 'CJA', 'CAJA', 'CAJAS', 'BLT', 'BULTO', 'BULTOS'].includes(pres) || pres.startsWith('CAJA');
+      const isUnit = ['UND', 'UNID', 'UNIDAD', 'UNIDADES'].includes(pres);
+      const kxBox = Number(it.kilosPorCaja) > 0 ? Number(it.kilosPorCaja) : (pres === 'KG' ? 1 : 10);
+      const totalK = Number(it.totalKilos ?? it.kilos) > 0
+        ? Number(Number(it.totalKilos ?? it.kilos).toFixed(2))
+        : Number((pres === 'KG' ? cant : cant * kxBox).toFixed(2));
+
       return {
         ...it,
-        cantidadCajas: cant,
-        precioUnitarioUSD: precio,
+        id: it.id || `item-${idx + 1}`,
+        sku: skuClean,
+        producto: prodClean,
+        categoria: it.categoria || 'CHARCUTERIA / CARNES',
+        presentacion: it.presentacion || pres,
+        cantidadCajas: Number(cant.toFixed(2)),
+        cajas: Number.isFinite(Number(it.cajas)) ? Number(it.cajas) : (isBox ? Number(cant.toFixed(2)) : 0),
+        unidades: Number.isFinite(Number(it.unidades)) ? Number(it.unidades) : (isUnit ? Number(cant.toFixed(2)) : 0),
+        kilosPorCaja: kxBox,
+        totalKilos: totalK,
+        precioUnitarioUSD: Number(precio.toFixed(4)),
+        ...(precioBruto > 0 ? { precioBrutoUSD: Number(precioBruto.toFixed(4)) } : {}),
+        descuento,
         subtotalUSD: sub
-      };
-    });
+      } as AlkostoOrderItem;
+    })
+    .filter((it): it is AlkostoOrderItem => it !== null);
 
   const renglonesBase = Array.isArray(pedido.renglones) && pedido.renglones.length > 0
     ? pedido.renglones
     : itemsActivos.map(it => ({
         codigo: it.sku,
+        sku: it.sku,
         descripcion: it.producto,
         unidad_medida: it.presentacion,
         cantidad: it.cantidadCajas,
+        cajas: it.cajas,
+        unidades: it.unidades,
+        kilos: it.totalKilos,
         precio_unitario: it.precioUnitarioUSD,
+        precio_bruto: it.precioBrutoUSD,
+        descuento: it.descuento ?? 0,
         subtotal: it.subtotalUSD
       }));
 
   const renglonesActivos = renglonesBase
-    .filter(r => {
-      const cant = Number(r.cantidad);
-      return Number.isFinite(cant) && !Number.isNaN(cant) && cant > 0;
-    })
-    .map(r => {
-      const cant = Number(r.cantidad);
-      const precio = Number.isFinite(Number(r.precio_unitario)) ? Number(r.precio_unitario) : 0;
-      const sub = Number((cant * precio).toFixed(2));
+    .map((r: any) => {
+      const cant = Number(r.cantidad ?? r.cantidad_solicitada ?? r.cantidadCajas ?? r.bultos ?? 0);
+      if (!Number.isFinite(cant) || Number.isNaN(cant) || cant <= 0) return null;
+
+      const codigo = String(r.codigo ?? r.sku ?? '').trim();
+      const descripcion = String(r.descripcion ?? r.producto ?? '').trim();
+      if (!codigo && !descripcion) return null;
+
+      const precioBruto = Number.isFinite(Number(r.precio_bruto ?? r.precioBrutoUSD))
+        ? Number(r.precio_bruto ?? r.precioBrutoUSD)
+        : 0;
+      const descuento = Number.isFinite(Number(r.descuento)) && Number(r.descuento) > 0
+        ? Number(Number(r.descuento).toFixed(2))
+        : 0;
+      let precio = Number.isFinite(Number(r.precio_unitario ?? r.precio ?? r.precioUnitarioUSD))
+        ? Number(r.precio_unitario ?? r.precio ?? r.precioUnitarioUSD)
+        : 0;
+      if (precio <= 0 && precioBruto > 0 && descuento > 0 && descuento <= 100) {
+        precio = Number((precioBruto * (1 - descuento / 100)).toFixed(4));
+      }
+
+      const rawSub = Number(r.subtotal ?? r.sub_total ?? r.subtotalUSD ?? 0);
+      const sub = precio > 0
+        ? Number((cant * precio).toFixed(2))
+        : (Number.isFinite(rawSub) && rawSub >= 0 ? Number(rawSub.toFixed(2)) : 0);
+
+      const unid = String(r.unidad_medida ?? 'CJ').trim().toUpperCase();
+      const isBox = ['CJ', 'CJA', 'CAJA', 'CAJAS', 'BLT', 'BULTO', 'BULTOS'].includes(unid) || unid.startsWith('CAJA');
+      const isUnit = ['UND', 'UNID', 'UNIDAD', 'UNIDADES'].includes(unid);
+
       return {
         ...r,
-        cantidad: cant,
-        precio_unitario: precio,
+        codigo,
+        sku: String(r.sku || codigo).trim(),
+        descripcion,
+        unidad_medida: r.unidad_medida || 'CJ',
+        cantidad: Number(cant.toFixed(2)),
+        cajas: Number.isFinite(Number(r.cajas)) ? Number(r.cajas) : (isBox ? Number(cant.toFixed(2)) : 0),
+        unidades: Number.isFinite(Number(r.unidades)) ? Number(r.unidades) : (isUnit ? Number(cant.toFixed(2)) : 0),
+        ...(Number.isFinite(Number(r.kilos)) ? { kilos: Number(Number(r.kilos).toFixed(2)) } : {}),
+        precio_unitario: Number(precio.toFixed(4)),
+        ...(precioBruto > 0 ? { precio_bruto: Number(precioBruto.toFixed(4)) } : {}),
+        descuento,
         subtotal: sub
       };
-    });
+    })
+    .filter((r): r is NonNullable<typeof r> => r !== null);
 
-  if (renglonesActivos.length === 0 && itemsActivos.length === 0) {
+  if (renglonesActivos.length === 0) {
     return null;
   }
 
+  // Asegurar que `items` nunca quede vacío si el pedido vino únicamente con `renglones`
+  const itemsSincronizados: AlkostoOrderItem[] =
+    itemsActivos.length > 0
+      ? itemsActivos
+      : renglonesActivos.map((r, idx) => ({
+          id: `item-${idx + 1}`,
+          sku: r.codigo,
+          producto: r.descripcion,
+          categoria: 'CHARCUTERIA / CARNES',
+          presentacion: String(r.unidad_medida || 'CJ'),
+          cantidadCajas: r.cantidad,
+          cajas: r.cajas,
+          unidades: r.unidades,
+          kilosPorCaja: String(r.unidad_medida || '').toUpperCase() === 'KG' ? 1 : 10,
+          totalKilos: Number(r.kilos ?? r.cantidad),
+          precioUnitarioUSD: r.precio_unitario,
+          ...(r.precio_bruto ? { precioBrutoUSD: r.precio_bruto } : {}),
+          descuento: r.descuento ?? 0,
+          subtotalUSD: r.subtotal
+        }));
+
   const montoPedidoExacto = Number(
-    renglonesActivos.reduce((acc, r) => acc + Number((r.cantidad * r.precio_unitario).toFixed(2)), 0).toFixed(2)
+    renglonesActivos.reduce((acc, r) => acc + Number(r.subtotal || 0), 0).toFixed(2)
   );
   const totalBultosExacto = Number(
     renglonesActivos.reduce((acc, r) => acc + r.cantidad, 0).toFixed(2)
   );
 
-  return {
+  const vendedorHomologado = homologarVendedorSairu(pedido.vendedor || pedido.vendedora || pedido.ruta);
+  const detectedChain =
+    pedido.cadena ||
+    (detectCadenaFromTagOrName(
+      `${pedido.sucursalTag || ''} ${pedido.sucursal_cliente || ''} ${pedido.sucursalNombre || ''}`
+    ) === 'FAMILIA_CENTER'
+      ? 'FAMILIA CENTER'
+      : 'ALKOSTO');
+
+  const sanitizedBase: AlkostoOrder = {
     ...pedido,
-    items: itemsActivos,
+    cadena: detectedChain,
+    vendedora: vendedorHomologado,
+    vendedor: vendedorHomologado,
+    ruta: vendedorHomologado,
+    estadoSalaEspera: 'POR_VALIDAR',
+    items: itemsSincronizados,
     renglones: renglonesActivos,
     total_renglones: renglonesActivos.length,
     totalBultos: totalBultosExacto,
     totalUSD: montoPedidoExacto,
     monto_pedido: montoPedidoExacto,
+    totalNeto: montoPedidoExacto,
     strict_payload: pedido.strict_payload
       ? {
           ...pedido.strict_payload,
+          cadena: detectedChain,
+          vendedor: vendedorHomologado,
+          estado: 'POR VALIDAR',
+          estado_sala_espera: 'POR_VALIDAR',
           renglones: renglonesActivos,
           total_renglones: renglonesActivos.length,
           monto_pedido: montoPedidoExacto
         }
       : undefined
   };
+
+  const idempKey = construirClaveIdempotenciaCliente(sanitizedBase);
+  sanitizedBase.idempotencyKey = idempKey;
+  if (!sanitizedBase.id || /^alk-ord-/i.test(sanitizedBase.id)) {
+    sanitizedBase.id = idempKey;
+  }
+
+  return sanitizedBase;
 }
 
 /**
- * Envía un único pedido de forma transaccional con reintentos automáticos (hasta 3 intentos)
- * y emite los logs de auditoría requeridos en consola (`[ENVIO_FDV]`).
+ * Envía un único pedido de forma transaccional con validación previa, idempotencia,
+ * hasta 2 reintentos automáticos (3 intentos totales) ante micro-cortes de red,
+ * y verificación estricta del `id` confirmado por la base de datos de Sala de Espera.
  */
 export async function enviarPedidoAlkostoTransaccional(
   pedidoInput: AlkostoOrder,
   indiceActual: number,
   totalLote: number
 ): Promise<AlkostoOrder> {
-  const pedido = sanitizarPedidoSucursalAntesDeEnviar(pedidoInput) || pedidoInput;
-  const maxIntentos = 3;
-  let ultimoError: Error | null = null;
+  const validacion = validarPedidoAlkostoAntesDeEnviar(pedidoInput);
+  if (!validacion.valido || !validacion.pedidoSanitizado) {
+    throw new Error(`Validación previa fallida: ${validacion.errores.join(' ')}`);
+  }
 
-  for (let intento = 1; intento <= maxIntentos; intento++) {
-    try {
-      // Enviar al endpoint transaccional del servidor (que asigna correlativo atómico, guarda en Supabase local con status ENVIADO e inserta en Sala de Espera con status POR_VALIDAR)
-      const res = await fetch('/api/alkosto/pedidos', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders()
-        },
-        body: JSON.stringify({
-          ...pedido,
-          estado: 'ENVIADO',
-          transmitido_a_pedidos_manuales: true
-        })
-      });
+  const pedido = validacion.pedidoSanitizado;
+  const idempotencyKey = construirClaveIdempotenciaCliente(pedido);
 
-      const resText = await res.text();
-      let payload: any = null;
+  const existingFlight = inFlightOrderSubmissions.get(`enviar:${idempotencyKey}`);
+  if (existingFlight) {
+    return existingFlight;
+  }
+
+  const executionPromise = (async () => {
+    const maxIntentos = 3; // 1 intento inicial + hasta 2 reintentos automáticos
+    let ultimoError: Error | null = null;
+
+    for (let intento = 1; intento <= maxIntentos; intento++) {
+      let lastStatus: number | undefined;
       try {
-        payload = JSON.parse(resText);
-      } catch {}
+        const res = await fetch('/api/alkosto/pedidos', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Idempotency-Key': idempotencyKey,
+            ...getAuthHeaders()
+          },
+          body: JSON.stringify({
+            ...pedido,
+            id: pedido.id || idempotencyKey,
+            idempotencyKey,
+            estado: 'ENVIADO',
+            estadoSalaEspera: 'POR_VALIDAR'
+          })
+        });
 
-      if (!res.ok || !payload?.success) {
-        throw new Error(payload?.error || payload?.details || `Error HTTP ${res.status} al insertar pedido`);
-      }
+        lastStatus = res.status;
+        const resText = await res.text();
+        let payload: any = null;
+        try {
+          payload = JSON.parse(resText);
+        } catch {}
 
-      const serverRecord = payload.data || {};
-      const pedidoConfirmado: AlkostoOrder = {
-        ...pedido,
-        id: String(serverRecord.id || pedido.id),
-        correlativo: String(serverRecord.correlativo || pedido.correlativo || pedido.numeroPedido),
-        numeroPedido: String(serverRecord.numeroPedido || serverRecord.correlativo || pedido.numeroPedido),
-        estado: 'ENVIADO',
-        transmitido_a_pedidos_manuales: true,
-        fecha_transmision: serverRecord.fecha_transmision || new Date().toISOString()
-      };
+        if (!res.ok || !payload?.success) {
+          const err = new Error(payload?.error || payload?.details || `Error HTTP ${res.status} al insertar pedido`);
+          (err as any).status = res.status;
+          throw err;
+        }
 
-      // Sincronizar caché local y Firestore con el ID y correlativo definitivos (sin volver a disparar POST al backend)
-      await saveAlkostoOrder(pedidoConfirmado, { skipBackendSync: true });
+        const serverRecord = payload.data || {};
+        const confirmedId = String(
+          payload?.salaEsperaId || serverRecord?.salaEsperaId || serverRecord?.id || ''
+        ).trim();
 
-      const renglonesCount = pedidoConfirmado.total_renglones ?? pedidoConfirmado.renglones?.length ?? pedidoConfirmado.items?.length ?? 0;
-      const montoVal = Number(pedidoConfirmado.monto_pedido ?? pedidoConfirmado.totalUSD ?? 0);
+        if (!confirmedId) {
+          throw new Error('La base de datos de la Sala de Espera no devolvió el ID del pedido insertado.');
+        }
 
-      console.log(
-        `[ENVIO_FDV] Pedido ${indiceActual}/${totalLote} enviado con ID ${pedidoConfirmado.id} | Cliente ID: ${pedidoConfirmado.sucursalCodigo} (${pedidoConfirmado.sucursal_cliente || pedidoConfirmado.sucursalNombre}) | Correlativo: N° ${pedidoConfirmado.correlativo} | OC: ${pedidoConfirmado.numero_oc || pedidoConfirmado.ordenCompraAlkosto || 'S/N'} | Renglones: ${renglonesCount} | Monto: $${montoVal.toFixed(2)}`
-      );
+        const pedidoConfirmado: AlkostoOrder = {
+          ...pedido,
+          id: confirmedId,
+          salaEsperaId: confirmedId,
+          idempotencyKey,
+          correlativo: String(serverRecord.correlativo || pedido.correlativo || pedido.numeroPedido),
+          numeroPedido: String(serverRecord.numeroPedido || serverRecord.correlativo || pedido.numeroPedido),
+          estado: 'ENVIADO',
+          estadoSalaEspera: 'POR_VALIDAR',
+          transmitido_a_pedidos_manuales: true,
+          fecha_transmision: serverRecord.fecha_transmision || new Date().toISOString()
+        };
 
-      return pedidoConfirmado;
-    } catch (err: any) {
-      ultimoError = err instanceof Error ? err : new Error(String(err));
-      console.warn(
-        `[ENVIO_FDV] Intento ${intento}/${maxIntentos} fallido para pedido ${indiceActual}/${totalLote} (${pedido.sucursal_cliente || pedido.sucursalNombre}): ${ultimoError.message}`
-      );
-      if (intento < maxIntentos) {
+        // Sincronizar caché local y Firestore con el ID y correlativo definitivos (sin volver a disparar POST al backend)
+        await saveAlkostoOrder(pedidoConfirmado, { skipBackendSync: true });
+
+        const renglonesCount = pedidoConfirmado.total_renglones ?? pedidoConfirmado.renglones?.length ?? pedidoConfirmado.items?.length ?? 0;
+        const montoVal = Number(pedidoConfirmado.monto_pedido ?? pedidoConfirmado.totalUSD ?? 0);
+
+        console.log(
+          `[ENVIO_FDV] Pedido ${indiceActual}/${totalLote} confirmado en Sala de Espera con ID ${confirmedId} | Vendedor: ${pedidoConfirmado.vendedor} | Cliente ID: ${pedidoConfirmado.sucursalCodigo} (${pedidoConfirmado.sucursal_cliente || pedidoConfirmado.sucursalNombre}) | Correlativo: N° ${pedidoConfirmado.correlativo} | OC: ${pedidoConfirmado.numero_oc || pedidoConfirmado.ordenCompraAlkosto || 'S/N'} | Renglones: ${renglonesCount} | Monto: $${montoVal.toFixed(2)}`
+        );
+
+        return pedidoConfirmado;
+      } catch (err: any) {
+        ultimoError = err instanceof Error ? err : new Error(String(err));
+        const status = (err as any)?.status ?? lastStatus;
+        const canRetry = intento < maxIntentos && esErrorTransitorioReintentable(ultimoError, status);
+        console.warn(
+          `[ENVIO_FDV] Intento ${intento}/${maxIntentos} fallido para pedido ${indiceActual}/${totalLote} (${pedido.sucursal_cliente || pedido.sucursalNombre}): ${ultimoError.message}`
+        );
+        if (!canRetry) {
+          break;
+        }
         await new Promise(resolve => setTimeout(resolve, 400 * intento));
       }
     }
-  }
 
-  throw ultimoError || new Error(`Fallo al enviar el pedido de ${pedido.sucursal_cliente || pedido.sucursalNombre}`);
+    throw ultimoError || new Error(`Fallo al enviar el pedido de ${pedido.sucursal_cliente || pedido.sucursalNombre}`);
+  })();
+
+  inFlightOrderSubmissions.set(`enviar:${idempotencyKey}`, executionPromise);
+  try {
+    return await executionPromise;
+  } finally {
+    inFlightOrderSubmissions.delete(`enviar:${idempotencyKey}`);
+  }
 }
 
 /**
@@ -1227,7 +1566,11 @@ export async function enviarLotePedidosAlkosto(
   // Filtrar y sanitizar estrictamente cualquier pedido sin renglones con cantidad > 0
   const pedidosActivos = pedidosPorEnviar
     .map(p => sanitizarPedidoSucursalAntesDeEnviar(p))
-    .filter((p): p is AlkostoOrder => p !== null && (p.total_renglones ?? p.items.length) > 0 && (p.monto_pedido ?? p.totalUSD) > 0);
+    .filter((p): p is AlkostoOrder => p !== null && (p.total_renglones ?? p.items.length) > 0);
+
+  if (pedidosActivos.length === 0) {
+    throw new Error('Validación previa: Debe existir al menos un producto válido con cantidad mayor a cero antes de enviar.');
+  }
 
   const pedidosInsertados: AlkostoOrder[] = [];
   const pedidosFallidos: Array<{ pedido: AlkostoOrder; motivo: string }> = [];

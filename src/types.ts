@@ -110,19 +110,27 @@ export type EstadoPedidoAlkosto = 'BORRADOR' | 'POR VALIDAR' | 'POR_VALIDAR' | '
 
 export interface StrictOrderRenglon {
   codigo: string;
+  sku?: string;
   descripcion: string;
   unidad_medida?: string;
   cantidad: number;
+  cajas?: number;
+  unidades?: number;
+  kilos?: number;
   precio_unitario: number;
+  precio_bruto?: number;
+  descuento?: number;
   subtotal: number;
 }
 
 export interface StrictOrderPayload {
   id?: string;
+  idempotency_key?: string;
   correlativo?: string;
   cadena: 'ALKOSTO' | 'FAMILIA CENTER';
   id_cliente: string;
   sucursal_cliente: string;
+  sucursal_tag?: string;
   numero_oc: string;
   direccion_despacho: string;
   observacion_formateada: string;
@@ -131,6 +139,7 @@ export interface StrictOrderPayload {
   total_renglones: number;
   monto_pedido: number;
   estado: 'POR VALIDAR';
+  estado_sala_espera?: 'POR_VALIDAR';
   origen: 'APP FDV';
   fecha?: string;
   supervisor?: string;
@@ -145,14 +154,21 @@ export interface AlkostoOrderItem {
   categoria: string;
   presentacion: string;
   cantidadCajas: number;
+  cajas?: number;
+  unidades?: number;
   kilosPorCaja: number;
   totalKilos: number;
   precioUnitarioUSD: number;
+  precioBrutoUSD?: number;
+  descuento?: number;
   subtotalUSD: number;
 }
 
 export interface AlkostoOrder {
   id: string;
+  idempotencyKey?: string;
+  salaEsperaId?: string;
+  estadoSalaEspera?: string;
   numeroPedido: string;
   correlativo?: string;
   ordenCompraAlkosto?: string;
@@ -196,12 +212,16 @@ export interface CodizulcaNotaPedidoItem {
   renglon: number;
   unid: string; // 'CJ' | 'KG' | 'UND' | 'BLT'
   cantSolicitada: number;
+  cajas?: number;
+  unidades?: number;
   cantDespachada?: number | string;
   codigo: string;
   skuCodizulca?: string;
   codigoBarra?: string;
   descripcion: string;
   precio: number;
+  precioBruto?: number;
+  descuento?: number;
   subtotal: number;
   tiendas?: Record<string, number>;
 }

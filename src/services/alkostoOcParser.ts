@@ -1515,6 +1515,74 @@ export function construirObservacionFormateada(params: {
 }
 
 /**
+ * Homologa el identificador de vendedora para la Sala de Espera de Pedidos Manuales.
+ * Cualquier variante de Sairu Valles o Cuentas Clave 2 se estandariza exactamente a `'Sairu Valles'`
+ * para coincidir con el catálogo `VS["Sairu Valles"]` y el campo `vendedor` / `ruta` de `public.orders`.
+ */
+export function normalizarNombreVendedorSairu(raw?: string): string {
+  const s = String(raw || '').trim();
+  if (!s) return 'Sairu Valles';
+  const upper = s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+  if (upper.includes('SAIRU') || upper.includes('VALLES') || upper.includes('CUENTAS CLAVE')) {
+    return 'Sairu Valles';
+  }
+  return s;
+}
+
+/**
+ * Genera un ID y clave de idempotencia 100% determinista por sucursal, OC, fecha y huella de ítems,
+ * respetando el prefijo `alk-<akXX|fcXX|doc>-` esperado por el clasificador de la Sala de Espera.
+ * Evita duplicados en `public.orders` ante doble clic o reintentos de red.
+ */
+export function generarIdDeterministaPedidoAlkosto(params: {
+  tagSlug: string;
+  idCliente: string;
+  numeroOc: string;
+  fechaISO: string;
+  renglones: Array<{
+    codigo: string;
+    unidad_medida?: string;
+    cantidad: number;
+    precio_unitario: number;
+    descuento?: number;
+    subtotal: number;
+  }>;
+}): string {
+  const cleanTag = /^(ak\d+|fc\d+)$/i.test(params.tagSlug)
+    ? params.tagSlug.toLowerCase()
+    : 'doc';
+
+  const ocClean = String(params.numeroOc || 'SN')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '')
+    .replace(/^0+/, '') || 'SN';
+
+  const canonicalItems = [...params.renglones]
+    .map(r =>
+      `${String(r.codigo || '').trim().toUpperCase()}:${String(r.unidad_medida || '').toUpperCase()}:${Number(r.cantidad || 0).toFixed(2)}:${Number(r.precio_unitario || 0).toFixed(4)}:${Number(r.descuento || 0).toFixed(2)}:${Number(r.subtotal || 0).toFixed(2)}`
+    )
+    .sort()
+    .join('|');
+
+  const seed = `${cleanTag}|${String(params.idCliente || '').trim()}|${ocClean}|${String(params.fechaISO || '').slice(0, 10)}|${canonicalItems}`;
+
+  // FNV-1a 32-bit determinista dual para huella compacta libre de colisiones
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < seed.length; i++) {
+    const code = seed.charCodeAt(i);
+    h1 ^= code;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= code + (i & 0xff);
+    h2 = Math.imul(h2, 0x85ebca6b);
+  }
+  const hashHex = `${(h1 >>> 0).toString(36)}${(h2 >>> 0).toString(36)}`.slice(0, 10);
+  const ocPrefix = ocClean !== 'SN' ? ocClean.slice(-6).toLowerCase() : 'm';
+  return `alk-${cleanTag}-${ocPrefix}${hashHex}`;
+}
+
+/**
  * Construye un pedido bajo el Esquema de Datos Normalizado (Strict Payload) y su
  * correspondiente objeto AlkostoOrder listo para transmisión transaccional.
  */
@@ -1537,6 +1605,8 @@ export function construirPedidoNormalizadoSucursal(params: {
     unid?: string;
     cantidad: number;
     precio_unitario: number;
+    precio_bruto?: number;
+    descuento?: number;
     subtotal?: number;
   }>;
   orderIndex?: number;
@@ -1578,16 +1648,16 @@ export function construirPedidoNormalizadoSucursal(params: {
     direccion_despacho: direccionDespacho
   });
 
-  const vendedorClean = String(params.vendedor || 'SAIRU VALLES / CUENTAS CLAVES')
-    .trim()
-    .toUpperCase();
+  const vendedorHomologado = normalizarNombreVendedorSairu(params.vendedor);
 
   const renglonesNormalizados: StrictOrderRenglon[] = [];
   const itemsAlkosto: AlkostoOrder['items'] = [];
 
   params.filas.forEach((f, idx) => {
     const cantidad = parseNumeroEstricto(f.cantidad, 0);
-    const precioUnitario = parseNumeroEstricto(f.precio_unitario, 0);
+    const precioUnitarioRaw = parseNumeroEstricto(f.precio_unitario, 0);
+    const precioBrutoRaw = parseNumeroEstricto(f.precio_bruto, 0);
+    const descuentoRaw = Math.max(0, parseNumeroEstricto(f.descuento, 0));
     if (cantidad <= 0 && !f.codigo && !f.descripcion) return;
     if (cantidad <= 0) return;
 
@@ -1596,23 +1666,46 @@ export function construirPedidoNormalizadoSucursal(params: {
     const cleanDesc = limpiarDescripcionAlkosto(f.descripcion || (match ? match.producto : 'PRODUCTO'));
     const unid = normalizarUnidadMedidaAlkosto(f.unid, cleanDesc, undefined, match?.unidadSugerida);
 
+    // Si se indica precio bruto y descuento porcentual (0 < descuento <= 100) sin precio unitario neto explícito:
+    const precioUnitario =
+      precioUnitarioRaw > 0
+        ? precioUnitarioRaw
+        : precioBrutoRaw > 0 && descuentoRaw > 0 && descuentoRaw <= 100
+          ? Number((precioBrutoRaw * (1 - descuentoRaw / 100)).toFixed(4))
+          : 0;
+
+    const descuentoEfectivo =
+      descuentoRaw > 0
+        ? Number(descuentoRaw.toFixed(2))
+        : precioBrutoRaw > precioUnitario && precioUnitario > 0
+          ? Number((((precioBrutoRaw - precioUnitario) / precioBrutoRaw) * 100).toFixed(2))
+          : 0;
+
     const calcSub = precioUnitario > 0
       ? Number((cantidad * precioUnitario).toFixed(2))
       : Number(parseNumeroEstricto(f.subtotal, 0).toFixed(2));
     const safePrice = Number((Number.isFinite(precioUnitario) ? precioUnitario : 0).toFixed(4));
     const safeSub = Number((Number.isFinite(calcSub) ? calcSub : 0).toFixed(2));
 
-    renglonesNormalizados.push({
-      codigo: cleanSku,
-      descripcion: cleanDesc,
-      unidad_medida: unid,
-      cantidad,
-      precio_unitario: safePrice,
-      subtotal: safeSub
-    });
-
     const kxBox = match ? match.kilosPorCaja : (unid === 'KG' ? 1 : 10);
     const totalK = Number((unid === 'KG' ? cantidad : cantidad * kxBox).toFixed(2));
+    const cajasVal = unid === 'CJ' || unid === 'BLT' ? Number(cantidad.toFixed(2)) : 0;
+    const unidadesVal = unid === 'UND' ? Number(cantidad.toFixed(2)) : 0;
+
+    renglonesNormalizados.push({
+      codigo: cleanSku,
+      sku: cleanSku,
+      descripcion: cleanDesc,
+      unidad_medida: unid,
+      cantidad: Number(cantidad.toFixed(2)),
+      cajas: cajasVal,
+      unidades: unidadesVal,
+      kilos: totalK,
+      precio_unitario: safePrice,
+      ...(precioBrutoRaw > 0 ? { precio_bruto: Number(precioBrutoRaw.toFixed(4)) } : {}),
+      descuento: descuentoEfectivo,
+      subtotal: safeSub
+    });
 
     itemsAlkosto.push({
       id: `item-${f.renglon || idx + 1}`,
@@ -1620,10 +1713,14 @@ export function construirPedidoNormalizadoSucursal(params: {
       producto: cleanDesc,
       categoria: match ? match.categoria : 'CHARCUTERIA / CARNES',
       presentacion: unid,
-      cantidadCajas: cantidad,
+      cantidadCajas: Number(cantidad.toFixed(2)),
+      cajas: cajasVal,
+      unidades: unidadesVal,
       kilosPorCaja: kxBox,
       totalKilos: totalK,
       precioUnitarioUSD: safePrice,
+      ...(precioBrutoRaw > 0 ? { precioBrutoUSD: Number(precioBrutoRaw.toFixed(4)) } : {}),
+      descuento: descuentoEfectivo,
       subtotalUSD: safeSub
     });
   });
@@ -1640,25 +1737,38 @@ export function construirPedidoNormalizadoSucursal(params: {
   );
 
   const ts = (params.batchTimestamp || Date.now()) + (params.orderIndex || 0) * 50;
-  const tagSlug = String(suc?.tag || params.storeTagOrCode || 'doc')
+  const resolvedTag =
+    suc?.tag ||
+    (/^(AK|FC)\d{2}$/i.test(params.storeTagOrCode) ? params.storeTagOrCode.toUpperCase() : undefined);
+  const tagSlug = String(resolvedTag || 'doc')
     .toLowerCase()
     .replace(/[^a-z0-9]/g, '');
-  const uniqueId = `alk-${tagSlug}-${ts.toString(36)}-${Math.random().toString(36).substring(2, 7)}`;
+
+  const deterministicId = generarIdDeterministaPedidoAlkosto({
+    tagSlug,
+    idCliente: idClientePadded,
+    numeroOc: numeroOcFinal,
+    fechaISO: params.fechaISO,
+    renglones: renglonesNormalizados
+  });
 
   const strictPayload: StrictOrderPayload = {
-    id: uniqueId,
+    id: deterministicId,
+    idempotency_key: deterministicId,
     correlativo: params.explicitCorrelativo,
     cadena,
     id_cliente: idClientePadded,
     sucursal_cliente: sucursalCliente,
+    sucursal_tag: resolvedTag,
     numero_oc: numeroOcFinal,
     direccion_despacho: direccionDespacho,
     observacion_formateada: observacionFormateada,
-    vendedor: vendedorClean,
+    vendedor: vendedorHomologado,
     renglones: renglonesNormalizados,
     total_renglones: totalRenglones,
     monto_pedido: montoPedido,
     estado: 'POR VALIDAR',
+    estado_sala_espera: 'POR_VALIDAR',
     origen: 'APP FDV',
     fecha: params.fechaISO,
     supervisor: params.supervisor,
@@ -1667,16 +1777,17 @@ export function construirPedidoNormalizadoSucursal(params: {
   };
 
   const alkostoOrder: AlkostoOrder = {
-    id: uniqueId,
-    sucursalTag: suc?.tag || (/^(AK|FC)\d{2}$/i.test(params.storeTagOrCode) ? params.storeTagOrCode.toUpperCase() : undefined),
+    id: deterministicId,
+    idempotencyKey: deterministicId,
+    sucursalTag: resolvedTag,
     numeroPedido: params.explicitCorrelativo || 'AUTO',
     correlativo: params.explicitCorrelativo,
     ordenCompraAlkosto: numeroOcFinal !== 'S/N' ? numeroOcFinal : undefined,
     sucursalCodigo: sucursalCodigoCorto,
     sucursalNombre: sucursalCliente,
     direccionEntrega: direccionDespacho,
-    vendedora: vendedorClean.split('/')[0].trim() || 'SAIRU VALLES',
-    ruta: vendedorClean,
+    vendedora: vendedorHomologado,
+    ruta: vendedorHomologado,
     fechaPedido: params.fechaISO,
     fechaEntregaEstimada: params.fechaISO,
     items: itemsAlkosto,
@@ -1684,8 +1795,8 @@ export function construirPedidoNormalizadoSucursal(params: {
     totalKilos,
     totalUSD: montoPedido,
     estado: 'ENVIADO',
-    transmitido_a_pedidos_manuales: true,
-    fecha_transmision: new Date(ts).toISOString(),
+    estadoSalaEspera: 'POR_VALIDAR',
+    transmitido_a_pedidos_manuales: false,
     condicionPago: params.condicionPago || 'Crédito 21 días',
     observaciones: observacionFormateada,
     createdAt: new Date(ts).toISOString(),
@@ -1694,10 +1805,11 @@ export function construirPedidoNormalizadoSucursal(params: {
     numero_oc: numeroOcFinal,
     direccion_despacho: direccionDespacho,
     observacion_formateada: observacionFormateada,
-    vendedor: vendedorClean,
+    vendedor: vendedorHomologado,
     renglones: renglonesNormalizados,
     total_renglones: totalRenglones,
     monto_pedido: montoPedido,
+    totalNeto: montoPedido,
     origen: 'APP FDV',
     strict_payload: strictPayload
   };
@@ -1780,6 +1892,8 @@ export function extraerPedidosNormalizadosDeOC(params: {
     descripcion: string;
     unid: string;
     precio: number;
+    precioBruto?: number;
+    descuento?: number;
     cantSolicitada: number;
     tiendas?: Record<string, number>;
   }> = [];
@@ -1828,6 +1942,10 @@ export function extraerPedidosNormalizadosDeOC(params: {
         parseNumeroEstricto(editedRow?.precio, 0) ||
         parseNumeroEstricto(ocItem.costoUnitario, 0) ||
         (match?.precioSugeridoUSD ?? 0);
+      const finalPrecioBruto =
+        parseNumeroEstricto(editedRow?.precioBruto, 0) ||
+        parseNumeroEstricto(ocItem.costoBruto, 0);
+      const finalDescuento = parseNumeroEstricto(editedRow?.descuento, 0);
 
       masterRows.push({
         renglon: idx + 1,
@@ -1836,6 +1954,8 @@ export function extraerPedidosNormalizadosDeOC(params: {
         descripcion: finalDesc,
         unid: finalUnid,
         precio: finalPrecio,
+        precioBruto: finalPrecioBruto > 0 ? finalPrecioBruto : undefined,
+        descuento: finalDescuento > 0 ? finalDescuento : undefined,
         cantSolicitada: parseNumeroEstricto(editedRow?.cantSolicitada, 0) || parseNumeroEstricto(ocItem.totalCantidad, 0),
         tiendas: mergedTiendas
       });
@@ -1858,6 +1978,8 @@ export function extraerPedidosNormalizadosDeOC(params: {
       descripcion: limpiarDescripcionAlkosto(f.descripcion),
       unid: f.unid || 'CJ',
       precio: parseNumeroEstricto(f.precio, 0),
+      precioBruto: parseNumeroEstricto(f.precioBruto, 0) || undefined,
+      descuento: parseNumeroEstricto(f.descuento, 0) || undefined,
       cantSolicitada: cant,
       tiendas: f.tiendas
     });
@@ -1912,6 +2034,8 @@ export function extraerPedidosNormalizadosDeOC(params: {
             unid: r.unid,
             cantidad: cant,
             precio_unitario: precio,
+            precio_bruto: r.precioBruto,
+            descuento: r.descuento,
             subtotal: Number((cant * precio).toFixed(2))
           };
         })
@@ -1955,6 +2079,8 @@ export function extraerPedidosNormalizadosDeOC(params: {
           unid: f.unid,
           cantidad: cant,
           precio_unitario: precio,
+          precio_bruto: parseNumeroEstricto(f.precioBruto, 0) || undefined,
+          descuento: parseNumeroEstricto(f.descuento, 0) || undefined,
           subtotal: Number((cant * precio).toFixed(2))
         };
       });
