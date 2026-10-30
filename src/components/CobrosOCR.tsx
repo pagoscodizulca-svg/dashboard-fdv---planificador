@@ -20,6 +20,13 @@ import {
   consumeSharedReceiptFromIDB,
   CobroRecord
 } from '../utils/cobrosOfflineQueue';
+import {
+  isBeneficiaryName,
+  isBeneficiaryRif,
+  normalizeReceiptDates,
+  normalizeMetodoPago,
+  safeExtractReceiptJson
+} from '../services/venezuelanReceiptAuditor';
 
 // Error Boundary específico para CobrosOCR para evitar que cualquier fallo deje la pantalla en blanco
 interface ErrorBoundaryProps {
@@ -588,13 +595,27 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
         isPdf: false
       });
 
+      // Si la imagen subida pesa menos de 1 MB (ej. captures de WhatsApp de ~46 KB),
+      // NO reducir su resolución ni recomprimir en Canvas para preservar 100% la nitidez en textos pequeños
+      const ONE_MB_BYTES = 1024 * 1024;
+      if (finalFile.size > 0 && finalFile.size < ONE_MB_BYTES) {
+        const crispBase64 = rawDataUrl.includes(',') ? rawDataUrl.split(',')[1] : rawDataUrl;
+        notifyUser(
+          'success',
+          `Soporte cargado: ${resolvedName} (${formatFileSize(finalFile.size)}). Analizando...`,
+          4500
+        );
+        processOCR(crispBase64, validation.resolvedMime || 'image/jpeg');
+        return;
+      }
+
       const img = new Image();
       img.onload = () => {
         try {
           const canvas = document.createElement('canvas');
           let width = img.width || 800;
           let height = img.height || 800;
-          const MAX_DIM = 1200;
+          const MAX_DIM = 2200;
 
           if (width > MAX_DIM || height > MAX_DIM) {
             if (width > height) {
@@ -611,7 +632,7 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
           const ctx = canvas.getContext('2d');
           ctx?.drawImage(img, 0, 0, width, height);
 
-          const resizedBase64 = canvas.toDataURL('image/jpeg', 0.8);
+          const resizedBase64 = canvas.toDataURL('image/jpeg', 0.9);
           const approxCompressedBytes = Math.round((resizedBase64.length * 3) / 4);
           setPreviewPdfDataUrl(null);
           setPreviewImage(resizedBase64);
@@ -666,13 +687,13 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
     reader.readAsDataURL(finalFile);
   };
 
-  // OCR con el modelo Gemini del backend (soporta tanto imágenes como documentos PDF)
+  // Auditoría Bancaria y Extracción Financiera (soporta imágenes WhatsApp y documentos PDF)
   const processOCR = async (base64: string, mimeType: string = 'image/jpeg') => {
     setIsProcessing(true);
     setProcessingLabel(
       mimeType === 'application/pdf'
-        ? 'Analizando PDF con IA...'
-        : 'Analizando comprobante con IA...'
+        ? 'Auditando PDF bancario con IA...'
+        : 'Auditando comprobante con IA...'
     );
     try {
       const res = await fetch('/api/ocr', {
@@ -686,22 +707,97 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
 
       let data: any = {};
       try {
-        data = await res.json();
+        const rawBodyText = await res.text();
+        data = safeExtractReceiptJson(rawBodyText);
       } catch (e) {
         throw new Error("El servidor devolvió un formato no válido.");
       }
 
-      if (!res.ok) throw new Error(data.error || 'Error al procesar con OCR');
+      const camposCargados: string[] = [];
 
-      // Asignar los campos extraídos
-      if (data.banco && data.banco !== 'null') setBanco(data.banco);
-      if (data.metodo_pago && data.metodo_pago !== 'null') setMetodoPago(data.metodo_pago);
-      if (data.referencia && data.referencia !== 'null') setReferencia(String(data.referencia).trim());
-      if (data.titular && data.titular !== 'null') {
-        const titularStr = String(data.titular).trim();
+      // 1. Método de Pago estricto (seleccionado automáticamente en el selector)
+      if (data.metodo_pago && data.metodo_pago !== 'null') {
+        const normalizedMetodo = normalizeMetodoPago(data.metodo_pago);
+        setMetodoPago(normalizedMetodo);
+        if (res.ok || data.legible !== false) {
+          camposCargados.push(normalizedMetodo);
+        }
+      }
+
+      // 2. Banco normalizado (priorizando banco principal / origen / destino)
+      const resolvedBanco = data.banco ?? data.banco_origen ?? data.banco_destino ?? null;
+      if (resolvedBanco && resolvedBanco !== 'null') {
+        const cleanBanco = String(resolvedBanco).trim();
+        setBanco(cleanBanco);
+        if (cleanBanco) camposCargados.push(cleanBanco);
+      } else if (res.ok) {
+        setBanco('');
+      }
+
+      // 3. Monto en Bolívares (float estándar -> formato visual es-VE)
+      const rawMonto = data.monto_bs ?? data.monto ?? data.monto_texto_original;
+      if (rawMonto !== undefined && rawMonto !== null) {
+        const num = parseMontoExacto(rawMonto);
+        if (num > 0) {
+          const formattedMonto = new Intl.NumberFormat('es-VE', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+          }).format(num);
+          setMontoNumerico(num);
+          setMontoDisplay(formattedMonto);
+          camposCargados.push(`Bs. ${formattedMonto}`);
+        }
+      }
+
+      // 4. Número de Referencia (solo dígitos)
+      const resolvedRef = data.nro_referencia ?? data.referencia ?? null;
+      if (resolvedRef && resolvedRef !== 'null') {
+        const digitsRef = String(resolvedRef).replace(/\D/g, '').trim();
+        if (digitsRef) {
+          setReferencia(digitsRef);
+          camposCargados.push(`Ref: ${digitsRef}`);
+        } else if (res.ok) {
+          setReferencia('');
+        }
+      } else if (res.ok) {
+        setReferencia('');
+      }
+
+      // 5. Fecha real impresa en el comprobante (fecha_iso YYYY-MM-DD para <input type="date"> y consulta BCV)
+      const normalizedDates = normalizeReceiptDates(data.fecha_pago, data.fecha_iso);
+      const isoDate = data.fecha_iso && /^\d{4}-\d{2}-\d{2}$/.test(String(data.fecha_iso).trim())
+        ? String(data.fecha_iso).trim()
+        : normalizedDates.fecha_iso;
+
+      if (isoDate) {
+        setFechaPago(isoDate);
+        camposCargados.push(`Fecha: ${normalizedDates.fecha_pago || isoDate}`);
+
+        // Consultar tasa oficial BCV correspondiente a la fecha exacta del comprobante
+        try {
+          const rateRes = await fetch(`/api/tasa-bcv?date=${isoDate}`);
+          if (rateRes.ok) {
+            const rateText = await rateRes.text();
+            if (rateText.trim().startsWith('{') || rateText.includes('```')) {
+              const rateData = safeExtractReceiptJson(rateText);
+              if (rateData && rateData.tasa) {
+                setTasa(rateData.tasa.toString());
+              }
+            }
+          }
+        } catch (rErr) {
+          console.warn("No se pudo autocompletar la tasa:", rErr);
+        }
+      }
+
+      // 6. Distinción estricta Emisor vs. Beneficiario (NUNCA colocar CODIZULCA en Titular / RIF)
+      const resolvedTitular = data.titular_remitente ?? data.titular ?? null;
+      if (resolvedTitular && resolvedTitular !== 'null' && !isBeneficiaryName(String(resolvedTitular))) {
+        const titularStr = String(resolvedTitular).trim();
         setTitular(titularStr);
+        if (titularStr) camposCargados.push(`Remitente: ${titularStr}`);
 
-        // Auto-vincular cliente si no se ha seleccionado y coincide con titular
+        // Auto-vincular cliente si no se ha seleccionado y coincide con el emisor real
         if (!codigoCliente && titularStr.length > 3) {
           const tClean = titularStr.toLowerCase();
           const match = clientes.find(c => {
@@ -716,39 +812,37 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
             setRucCliente(foundCode);
           }
         }
-      }
-      if (data.rif && data.rif !== 'null') setRifTitular(data.rif);
-
-      if (data.monto !== undefined && data.monto !== null) {
-        const num = parseMontoExacto(data.monto);
-        if (num > 0) {
-          setMontoNumerico(num);
-          setMontoDisplay(new Intl.NumberFormat('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(num));
-        }
+      } else {
+        setTitular('');
       }
 
-      if (data.fecha_pago && data.fecha_pago !== 'null') {
-        const fStr = String(data.fecha_pago).trim();
-        setFechaPago(fStr);
-
-        // Consultar tasa oficial de esa fecha
-        try {
-          const rateRes = await fetch(`/api/tasa-bcv?date=${fStr}`);
-          if (rateRes.ok) {
-            const rateText = await rateRes.text();
-            if (rateText.trim().startsWith('{')) {
-              const rateData = JSON.parse(rateText);
-              if (rateData && rateData.tasa) {
-                setTasa(rateData.tasa.toString());
-              }
-            }
-          }
-        } catch (rErr) {
-          console.warn("No se pudo autocompletar la tasa:", rErr);
-        }
+      const resolvedRif = data.rif_ci_titular ?? data.rif ?? null;
+      if (resolvedRif && resolvedRif !== 'null' && !isBeneficiaryRif(String(resolvedRif))) {
+        const cleanRif = String(resolvedRif).trim();
+        setRifTitular(cleanRif);
+        if (cleanRif) camposCargados.push(`RIF/CI: ${cleanRif}`);
+      } else {
+        setRifTitular('');
       }
 
-      notifyUser('success', '¡Soporte cargado y datos extraídos con éxito! Valida o ajusta cualquier detalle.', 5000);
+      // Verificar si se extrajo al menos un campo financiero real (permitiendo lecturas parciales exitosas)
+      const tieneDatosFinancierosExtraidos = Boolean(
+        (resolvedBanco && resolvedBanco !== 'null') ||
+          (rawMonto !== undefined && rawMonto !== null && parseMontoExacto(rawMonto) > 0) ||
+          (resolvedRef && String(resolvedRef).replace(/\D/g, '').trim()) ||
+          isoDate ||
+          (resolvedTitular && resolvedTitular !== 'null' && !isBeneficiaryName(String(resolvedTitular)))
+      );
+
+      if (!tieneDatosFinancierosExtraidos && (!res.ok || data.legible === false)) {
+        throw new Error(data.observacion_ia || data.error || 'Error al procesar con OCR');
+      }
+
+      notifyUser(
+        'success',
+        `¡Datos cargados del comprobante! ${camposCargados.join(' • ')}`,
+        6000
+      );
     } catch (err: any) {
       console.error("Error en processOCR:", err);
       const raw = String(err?.message || '');
@@ -1977,9 +2071,10 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
                     className="w-full bg-neutral-900 border border-neutral-800 rounded-lg p-2.5 text-white text-sm focus:border-red-500 focus:outline-none transition-colors"
                   >
                     <option value="Pago Móvil">Pago Móvil</option>
-                    <option value="Transferencia Bancaria">Transferencia Bancaria</option>
-                    <option value="Zelle / Divisas">Zelle / Divisas</option>
-                    <option value="Efectivo Divisas">Efectivo Divisas</option>
+                    <option value="Transferencia">Transferencia</option>
+                    <option value="Zelle">Zelle</option>
+                    <option value="Divisas">Divisas</option>
+                    <option value="Efectivo">Efectivo</option>
                     <option value="Biopago / Punto">Biopago / Punto</option>
                   </select>
                 </div>

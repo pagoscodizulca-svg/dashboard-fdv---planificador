@@ -18,6 +18,13 @@ import {
   normalizarNombreVendedorSairu,
   generarIdDeterministaPedidoAlkosto
 } from "./src/services/alkostoOcParser";
+import {
+  VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT,
+  safeExtractReceiptJson,
+  auditAndNormalizeReceiptPayload,
+  parseVenezuelanReceiptText,
+  AuditedReceiptResult
+} from "./src/services/venezuelanReceiptAuditor";
 
 dotenv.config();
 
@@ -2591,193 +2598,286 @@ REGLAS ESTRICTAS OBLIGATORIAS:
 
   let cachedBcvRate = 875.65;
 
-  // LECTOR OCR INTELIGENTE DE COMPROBANTES DE PAGO Y COBROS (BANCOS VENEZOLANOS)
+  // AGENTE EXPERTO EN AUDITORÍA BANCARIA Y EXTRACCIÓN DE DATOS FINANCIEROS EN VENEZUELA
   app.post("/api/ocr", authenticateToken, rateLimiter(10 * 60000, 30, 'OCR Bancario'), async (req: any, res: any) => {
     try {
-      const { imageBase64, mimeType = "image/jpeg" } = req.body;
-      if (!imageBase64) return res.status(400).json({ error: "Falta la imagen del comprobante de pago" });
-      
+      const { imageBase64, mimeType = "image/jpeg" } = req.body || {};
+      if (!imageBase64) {
+        return res.status(400).json({ error: "Falta la imagen o PDF del comprobante de pago." });
+      }
+
       let cleanBase64 = String(imageBase64).trim();
-      let actualMime = mimeType;
-      if (cleanBase64.startsWith('data:')) {
-        const matches = cleanBase64.match(/^data:([^;]+);base64,(.+)$/);
+      let actualMime = String(mimeType || "image/jpeg").trim().toLowerCase();
+      if (cleanBase64.startsWith("data:")) {
+        const matches = cleanBase64.match(/^data:([^;]+);base64,([\s\S]+)$/);
         if (matches) {
-          actualMime = matches[1];
-          cleanBase64 = matches[2];
+          actualMime = matches[1].trim().toLowerCase();
+          cleanBase64 = matches[2].trim();
         }
       }
+      cleanBase64 = cleanBase64.replace(/\s+/g, "");
 
-      if (!process.env.GEMINI_API_KEY) {
-        return res.status(503).json({ 
-          error: "API Key de Gemini no configurada en el servidor (GEMINI_API_KEY en .env). Por favor ingresa los datos del pago manualmente.",
-          manualEntryRequired: true
-        });
+      const binaryBuffer = Buffer.from(cleanBase64, "base64");
+      if (!binaryBuffer || binaryBuffer.length < 32) {
+        return res.status(400).json({ error: "El archivo del comprobante está vacío o corrupto." });
       }
 
-      const ai = new GoogleGenAI({
-        apiKey: process.env.GEMINI_API_KEY,
-        httpOptions: {
-          headers: {
-            'User-Agent': 'aistudio-build',
-          }
-        }
-      });
+      // Detección real por magic bytes para tolerar MIME erróneos provenientes de WhatsApp / WebView
+      if (binaryBuffer.subarray(0, 4).toString("ascii") === "%PDF") {
+        actualMime = "application/pdf";
+      } else if (
+        binaryBuffer[0] === 0x89 &&
+        binaryBuffer[1] === 0x50 &&
+        binaryBuffer[2] === 0x4e &&
+        binaryBuffer[3] === 0x47
+      ) {
+        actualMime = "image/png";
+      } else if (
+        binaryBuffer[0] === 0xff &&
+        binaryBuffer[1] === 0xd8 &&
+        binaryBuffer[2] === 0xff
+      ) {
+        actualMime = "image/jpeg";
+      } else if (
+        binaryBuffer.subarray(0, 4).toString("ascii") === "RIFF" &&
+        binaryBuffer.subarray(8, 12).toString("ascii") === "WEBP"
+      ) {
+        actualMime = "image/webp";
+      }
 
-      const prompt = `Analiza detalladamente esta imagen de comprobante bancario, captura de pantalla de Pago Móvil, transferencia o recibo de pago venezolano.
-Extrae la información financiera exacta de la transacción y devuelve estrictamente un objeto JSON con los siguientes campos:
+      // Descubrir y limpiar claves de API de Gemini configuradas en el entorno
+      const rawKeyCandidates = [
+        process.env.GEMINI_API_KEY,
+        process.env.GOOGLE_API_KEY,
+        process.env.VITE_GEMINI_API_KEY
+      ]
+        .filter(Boolean)
+        .flatMap((k) => String(k).split(","))
+        .map((k) => k.trim().replace(/^["']+|["']+$/g, "").trim())
+        .filter((k) => k.length > 10);
+      const apiKeys = Array.from(new Set(rawKeyCandidates));
 
-REGLAS CRÍTICAS DE EXTRACCIÓN PARA COMPROBANTES BANCARIOS VENEZOLANOS:
-1. "banco": Nombre oficial del banco de origen o emisor. Ejemplos comunes:
-   - "Banco de Venezuela" (BDV, BDVenlínea, PagoMóvilBDV)
-   - "Banesco" (Banesco Pago Móvil, BanescOnline)
-   - "Banco Mercantil" (Mercantil Móvil, Tpago)
-   - "BBVA Banco Provincial" (Provinet Móvil, Dinero Rápido)
-   - "Bancamiga" (Bancamiga Pago Móvil)
-   - "Banco Nacional de Crédito (BNC)"
-   - "Bancaribe" (Mi Pago Bancaribe)
-   - "Banplus" (Pago Plus)
-   - "Banco Plaza" (Tu Pago Plaza)
-   - "Banco del Tesoro" (Tesoro Pago Móvil)
-   - "Banco Exterior", "Banco Bicentenario", "Zelle", "Dólares Efectivo".
-
-2. "monto": Número decimal exacto pagado en Bolívares o Dólares (punto para decimales).
-   - OJO VENEZUELA: Los recibos usan coma como decimal y punto como miles (ej: "Bs. 1.250,50" -> 1250.50; "Bs. 520,00" -> 520.00; "Bs. 5.400,00" -> 5400.00; "35,00 USD" -> 35.00).
-   - NUNCA omitas decimales ni multipliques por 100 (ej: 520,00 NUNCA es 52000).
-
-3. "referencia": El número de comprobante, secuencia, referencia bancaria o código de aprobación de la transacción (ej: "019283", "00281902", "12849201", "829103").
-   - IMPORTANTE: En Pago Móvil NUNCA extraigas el número de teléfono celular (0414..., 0424..., 0412..., 0416...) ni la cédula. Extrae estrictamente el NÚMERO DE REFERENCIA / SECUENCIA bancario. Elimina palabras como "REF", "NRO", "OP", "APROBACIÓN".
-
-4. "fecha_pago": Fecha en la que se efectuó el pago en formato YYYY-MM-DD.
-   - En Venezuela los comprobantes están en formato DD/MM/YYYY (ej: 12/10/2026 -> "2026-10-12").
-   - Si no aparece el año explícito pero sí el día y mes (ej: "12 Octubre"), asume el año en curso (2026).
-
-5. "titular": Nombre de la persona o comercio que REALIZÓ el pago (el emisor/ordenante/cliente).
-   - NUNCA pongas "Codizulca", "Distribuidora Codizulca" ni los datos de la cuenta receptora de la empresa.
-
-6. "rif": Cédula de Identidad o RIF del pagador/emisor (ej: "V-18293041", "J-30192834-0").
-
-7. "metodo_pago": Clasifica el método de pago en una de estas opciones exactas:
-   - "Pago Móvil"
-   - "Transferencia Bancaria"
-   - "Zelle / Divisas"
-   - "Efectivo Divisas"
-   - "Biopago / Punto"`;
-
-      const cobroSchema = {
+      const auditedReceiptSchema = {
         type: Type.OBJECT,
         properties: {
-          banco: { type: Type.STRING },
+          legible: { type: Type.BOOLEAN },
+          confianza: { type: Type.NUMBER },
           metodo_pago: { type: Type.STRING },
-          monto: { type: Type.NUMBER },
-          referencia: { type: Type.STRING },
-          fecha_pago: { type: Type.STRING },
-          titular: { type: Type.STRING },
-          rif: { type: Type.STRING }
+          banco: { type: Type.STRING, nullable: true },
+          banco_origen: { type: Type.STRING, nullable: true },
+          banco_destino: { type: Type.STRING, nullable: true },
+          monto_bs: { type: Type.NUMBER, nullable: true },
+          monto_texto_original: { type: Type.STRING, nullable: true },
+          nro_referencia: { type: Type.STRING, nullable: true },
+          fecha_pago: { type: Type.STRING, nullable: true },
+          fecha_iso: { type: Type.STRING, nullable: true },
+          titular_remitente: { type: Type.STRING, nullable: true },
+          rif_ci_titular: { type: Type.STRING, nullable: true },
+          beneficiario_detectado: { type: Type.STRING, nullable: true },
+          observacion_ia: { type: Type.STRING }
         },
-        required: ["monto", "referencia"]
+        required: ["legible", "metodo_pago"]
       };
 
-      const candidateModels = ["gemini-2.5-flash", "gemini-2.5-pro"];
-      let rawResponseText = '';
-      let lastModelError: any = null;
+      const userInstruction =
+        "Analiza este comprobante de pago venezolano (imagen o PDF) y extrae los datos exactos cumpliendo estrictamente las 7 reglas críticas de auditoría bancaria. Responde únicamente con el objeto JSON válido del esquema obligatorio.";
 
-      for (const modelName of candidateModels) {
-        try {
-          const response = await ai.models.generateContent({
-            model: modelName,
-            contents: [
-              {
-                role: "user",
-                parts: [
-                  { inlineData: { mimeType: actualMime, data: cleanBase64 } },
-                  { text: prompt }
-                ]
+      let aiResult: AuditedReceiptResult | null = null;
+      let lastAiError: any = null;
+
+      if (apiKeys.length > 0) {
+        const candidateModels = [
+          "gemini-2.5-flash",
+          "gemini-2.5-flash-lite",
+          "gemini-2.0-flash",
+          "gemini-2.5-pro"
+        ];
+
+        outerLoop: for (const apiKey of apiKeys) {
+          const ai = new GoogleGenAI({ apiKey });
+
+          for (const modelName of candidateModels) {
+            try {
+              let rawText = "";
+              try {
+                const response = await ai.models.generateContent({
+                  model: modelName,
+                  contents: [
+                    {
+                      role: "user",
+                      parts: [
+                        { inlineData: { mimeType: actualMime, data: cleanBase64 } },
+                        { text: userInstruction }
+                      ]
+                    }
+                  ],
+                  config: {
+                    systemInstruction: VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT,
+                    responseMimeType: "application/json",
+                    responseSchema: auditedReceiptSchema,
+                    temperature: 0.0
+                  }
+                });
+                rawText = response.text || "";
+              } catch (schemaErr: any) {
+                const sMsg = String(schemaErr?.message || "");
+                // Si el modelo rechaza responseSchema por compatibilidad OpenAPI, reintentar forzando JSON vía responseMimeType
+                if (/schema|INVALID_ARGUMENT|400/i.test(sMsg) && !/API_KEY_INVALID|API key not valid/i.test(sMsg)) {
+                  const fallbackRes = await ai.models.generateContent({
+                    model: modelName,
+                    contents: [
+                      {
+                        role: "user",
+                        parts: [
+                          { inlineData: { mimeType: actualMime, data: cleanBase64 } },
+                          { text: userInstruction }
+                        ]
+                      }
+                    ],
+                    config: {
+                      systemInstruction: VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT,
+                      responseMimeType: "application/json",
+                      temperature: 0.0
+                    }
+                  });
+                  rawText = fallbackRes.text || "";
+                } else {
+                  throw schemaErr;
+                }
               }
-            ],
-            config: {
-              responseMimeType: "application/json",
-              responseSchema: cobroSchema,
-              temperature: 0.1
-            }
-          });
 
-          rawResponseText = response.text || '';
-          if (rawResponseText) break;
-        } catch (err: any) {
-          lastModelError = err;
-          console.warn(`[OCR COBROS] Falló modelo ${modelName}, intentando siguiente:`, err?.message);
+              if (rawText) {
+                const parsedJson = safeExtractReceiptJson(rawText);
+                const audited = auditAndNormalizeReceiptPayload(parsedJson);
+                if (audited.legible) {
+                  return res.json(audited);
+                }
+                aiResult = audited;
+                break outerLoop;
+              }
+            } catch (err: any) {
+              lastAiError = err;
+              const msg = String(err?.message || "");
+              console.warn(`[OCR COBROS IA] Falló modelo ${modelName}:`, msg.slice(0, 220));
+              // Si la API Key específica es inválida o revocada, saltar de inmediato a la siguiente clave o al motor local
+              if (/API_KEY_INVALID|API key not valid|reported as leaked|PERMISSION_DENIED/i.test(msg)) {
+                break;
+              }
+            }
+          }
         }
       }
 
-      if (!rawResponseText) {
-        throw new Error(lastModelError?.message || "No se pudo extraer la información del comprobante.");
+      // MOTOR SECUNDARIO DETERMINISTA / OCR LOCAL (PDF Digital + Tesseract.js en Español)
+      // Garantiza extracción continua incluso sin GEMINI_API_KEY o ante caída/cuota de API externa
+      let fallbackResult: AuditedReceiptResult | null = null;
+      try {
+        if (actualMime === "application/pdf") {
+          const { PDFParse } = await import("pdf-parse");
+          const pdfParser = new PDFParse({ data: binaryBuffer });
+          try {
+            const textRes = await pdfParser.getText();
+            const extractedPdfText = String(textRes?.text || "").trim();
+            if (extractedPdfText.length >= 12) {
+              fallbackResult = parseVenezuelanReceiptText(extractedPdfText);
+            }
+            // Si el PDF es una imagen escaneada incrustada sin capa de texto digital
+            if (!fallbackResult?.legible) {
+              const imgRes = await pdfParser.getImage({ imageBuffer: true, first: 1 });
+              const firstPageImgs = imgRes?.pages?.[0]?.images || [];
+              if (firstPageImgs.length > 0 && firstPageImgs[0]?.data) {
+                const TesseractMod: any = await import("tesseract.js");
+                const recognizeFn = TesseractMod.recognize || TesseractMod.default?.recognize;
+                if (typeof recognizeFn === "function") {
+                  const ocrOut = await recognizeFn(Buffer.from(firstPageImgs[0].data), "spa");
+                  const ocrText = String(ocrOut?.data?.text || "").trim();
+                  if (ocrText) {
+                    fallbackResult = parseVenezuelanReceiptText(ocrText);
+                  }
+                }
+              }
+            }
+          } finally {
+            await pdfParser.destroy().catch(() => {});
+          }
+        } else if (actualMime.startsWith("image/")) {
+          const TesseractMod: any = await import("tesseract.js");
+          const recognizeFn = TesseractMod.recognize || TesseractMod.default?.recognize;
+          if (typeof recognizeFn === "function") {
+            const ocrOut = await recognizeFn(binaryBuffer, "spa");
+            const ocrText = String(ocrOut?.data?.text || "").trim();
+            if (ocrText) {
+              fallbackResult = parseVenezuelanReceiptText(ocrText);
+            }
+          }
+        }
+      } catch (localOcrErr: any) {
+        console.warn("[OCR COBROS LOCAL] Advertencia en motor local PDF/Tesseract:", localOcrErr?.message);
       }
 
-      const parsed = JSON.parse(rawResponseText);
-
-      // Post-procesamiento y Sanitización Robusta
-      let refClean = String(parsed.referencia || '').trim();
-      refClean = refClean.replace(/^(REF|REFERENCIA|NRO|NUM|OPERACION|OP|SECUENCIA|APROB|APROBACION|#)[:\s-]*/gi, '').trim();
-
-      const montoNum = parseNumeroSeguro(parsed.monto);
-
-      let fechaClean = String(parsed.fecha_pago || '').trim();
-      if (/^\d{2}[/-]\d{2}[/-]\d{4}$/.test(fechaClean)) {
-        const parts = fechaClean.split(/[/-]/);
-        fechaClean = `${parts[2]}-${parts[1].padStart(2, '0')}-${parts[0].padStart(2, '0')}`;
-      } else if (!/^\d{4}-\d{2}-\d{2}$/.test(fechaClean)) {
-        fechaClean = new Date().toISOString().split('T')[0];
+      if (fallbackResult && fallbackResult.legible) {
+        return res.json(fallbackResult);
       }
 
-      let bancoClean = String(parsed.banco || '').trim();
-      if (/venezuela|bdv/i.test(bancoClean)) bancoClean = 'Banco de Venezuela';
-      else if (/banesco/i.test(bancoClean)) bancoClean = 'Banesco';
-      else if (/mercantil/i.test(bancoClean)) bancoClean = 'Banco Mercantil';
-      else if (/provincial|bbva/i.test(bancoClean)) bancoClean = 'BBVA Banco Provincial';
-      else if (/bancamiga/i.test(bancoClean)) bancoClean = 'Bancamiga';
-      else if (/bnc|nacional de cr/i.test(bancoClean)) bancoClean = 'Banco Nacional de Crédito (BNC)';
-      else if (/bancaribe/i.test(bancoClean)) bancoClean = 'Bancaribe';
-      else if (/banplus/i.test(bancoClean)) bancoClean = 'Banplus';
-      else if (/plaza/i.test(bancoClean)) bancoClean = 'Banco Plaza';
-      else if (/tesoro/i.test(bancoClean)) bancoClean = 'Banco del Tesoro';
-      else if (/zelle/i.test(bancoClean)) bancoClean = 'Zelle';
-
-      let metodoClean = String(parsed.metodo_pago || '').trim();
-      if (/zelle/i.test(metodoClean) || /zelle/i.test(bancoClean)) metodoClean = 'Zelle / Divisas';
-      else if (/transferencia/i.test(metodoClean)) metodoClean = 'Transferencia Bancaria';
-      else if (/efectivo/i.test(metodoClean)) metodoClean = 'Efectivo Divisas';
-      else if (/biopago|punto/i.test(metodoClean)) metodoClean = 'Biopago / Punto';
-      else metodoClean = 'Pago Móvil';
-
-      const sinReferencia = !refClean || /^(NO[_ ]?ENCONTRADA|NULL|N\/A)$/i.test(refClean);
-      if (montoNum <= 0 && sinReferencia) {
+      if (aiResult) {
         return res.status(422).json({
-          error: "No se pudo leer el comprobante. Toma la foto de frente, con buena luz y sin recortes, o ingresa los datos manualmente.",
-          code: 'OCR_EMPTY'
+          ...aiResult,
+          legible: false,
+          error: aiResult.observacion_ia || "No se pudo leer con claridad el monto o la referencia del comprobante."
         });
       }
 
-      return res.json({
-        banco: bancoClean || '',
-        metodo_pago: metodoClean,
-        monto: montoNum,
-        referencia: sinReferencia ? '' : refClean,
-        fecha_pago: fechaClean,
-        titular: String(parsed.titular || '').trim(),
-        rif: String(parsed.rif || '').trim()
+      const rawAiErrMsg = String(lastAiError?.message || "");
+      const isQuotaOrKeyIssue =
+        apiKeys.length === 0 ||
+        /RESOURCE_EXHAUSTED|prepayment credits|"code"\s*:\s*(402|429)|quota|billing|API_KEY_INVALID|API key not valid|reported as leaked|PERMISSION_DENIED/i.test(
+          rawAiErrMsg
+        );
+
+      const unreadablePayload: AuditedReceiptResult = {
+        legible: false,
+        confianza: 0.0,
+        metodo_pago: "Pago Móvil",
+        banco: null,
+        banco_origen: null,
+        banco_destino: null,
+        monto_bs: null,
+        monto_texto_original: null,
+        nro_referencia: null,
+        fecha_pago: null,
+        fecha_iso: null,
+        titular_remitente: null,
+        rif_ci_titular: null,
+        beneficiario_detectado: null,
+        observacion_ia: isQuotaOrKeyIssue
+          ? "No se pudo completar la lectura automática en este soporte. Por favor ingresa o verifica los datos manualmente."
+          : "Comprobante ilegible o con baja resolución. Toma la captura nítida sin recortes o ingresa los datos manualmente."
+      };
+
+      return res.status(isQuotaOrKeyIssue ? 503 : 422).json({
+        ...unreadablePayload,
+        error: unreadablePayload.observacion_ia
       });
-
     } catch (err: any) {
-      console.error("[OCR COBROS] Error procesando comprobante:", err);
-      const rawMsg = String(err?.message || '');
-      const isQuota = /RESOURCE_EXHAUSTED|prepayment credits|"code"\s*:\s*(402|429)|quota|billing/i.test(rawMsg);
-      if (isQuota) {
-        return res.status(503).json({
-          error: "El lector automático (IA) no está disponible temporalmente. Ingresa los datos del pago manualmente; el resto del módulo funciona con normalidad.",
-          code: 'AI_QUOTA_EXHAUSTED'
-        });
-      }
-      return res.status(500).json({ error: "No se pudo interpretar el comprobante. Puedes ingresar los datos manualmente." });
+      console.error("[OCR COBROS] Error inesperado procesando comprobante:", err);
+      return res.status(500).json({
+        legible: false,
+        confianza: 0.0,
+        metodo_pago: "Pago Móvil",
+        banco: null,
+        banco_origen: null,
+        banco_destino: null,
+        monto_bs: null,
+        monto_texto_original: null,
+        nro_referencia: null,
+        fecha_pago: null,
+        fecha_iso: null,
+        titular_remitente: null,
+        rif_ci_titular: null,
+        beneficiario_detectado: null,
+        observacion_ia: "Error interno al procesar el comprobante. Puedes ingresar los datos manualmente.",
+        error: "No se pudo interpretar el comprobante. Puedes ingresar los datos manualmente."
+      });
     }
   });
 

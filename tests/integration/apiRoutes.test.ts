@@ -506,4 +506,57 @@ describe('Integration: API Server Routes & Authentication Flow', () => {
       expect(ninguno.periodosDisponibles.length).toBe(todos.periodosDisponibles.length);
     }, 30000);
   });
+
+  describe('POST /api/ocr (Agente Experto en Auditoría Bancaria Venezolana)', () => {
+    it('should audit a Banesco Pago Móvil PDF receipt and return the exact 15-field mandatory JSON schema', async () => {
+      const { jsPDF } = await import('jspdf');
+      const doc = new jsPDF();
+      doc.setFontSize(14);
+      doc.text('Banesco - Operacion Exitosa', 20, 20);
+      doc.setFontSize(11);
+      doc.text('Pago Movil', 20, 30);
+      doc.text('Bs. 203.242,47', 20, 40);
+      doc.text('Fecha: 29/10/2026 06:54:03 PM', 20, 50);
+      doc.text('Banco Destino: 0134 - Banesco', 20, 60);
+      doc.text('Beneficiario: CODIZULCA C.A.', 20, 70);
+      doc.text('RIF: J-40987613-6', 20, 80);
+      doc.text('Telefono: 0414-6123456', 20, 90);
+      doc.text('Numero de Referencia: 460284758160', 20, 100);
+
+      const pdfArrayBuffer = doc.output('arraybuffer');
+      const pdfBase64 = Buffer.from(pdfArrayBuffer).toString('base64');
+
+      const res = await fetch(`${baseUrl}/api/ocr`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminToken}`
+        },
+        body: JSON.stringify({
+          imageBase64: pdfBase64,
+          mimeType: 'application/pdf'
+        })
+      });
+
+      expect(res.status).toBe(200);
+      const data = await res.json();
+
+      expect(data).toMatchObject({
+        legible: true,
+        metodo_pago: 'Pago Móvil',
+        banco: 'Banesco',
+        banco_origen: null,
+        banco_destino: 'Banesco',
+        monto_bs: 203242.47,
+        nro_referencia: '460284758160',
+        fecha_pago: '29/10/2026',
+        fecha_iso: '2026-10-29',
+        titular_remitente: null,
+        rif_ci_titular: null,
+        beneficiario_detectado: 'CODIZULCA C.A.'
+      });
+      expect(typeof data.confianza).toBe('number');
+      expect(typeof data.observacion_ia).toBe('string');
+    }, 25000);
+  });
 });
