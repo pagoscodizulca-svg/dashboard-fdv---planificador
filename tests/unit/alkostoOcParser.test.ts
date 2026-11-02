@@ -20,6 +20,10 @@ import {
   detectAlkostoFileMimeType,
   sanitizeAndParseOcJson,
   construirDistribucionPorTienda,
+  construirDistribucionTiendasCanonico,
+  normalizarFechaISOAlkosto,
+  toCanonicalAlkostoOcJson,
+  ALKOSTO_OC_EXTRACTION_SYSTEM_PROMPT,
   AlkostoParseValidationError
 } from '../../src/services/alkostoOcParser';
 import { resolverProductoPorCodigoODescripcion } from '../../src/services/alkostoService';
@@ -268,7 +272,8 @@ describe('Unit & Regression: alkostoOcParser', () => {
       { file: 'ORDEN CODIZULCA ASTURIA 19-10.pdf', oc: '0000055165', subAk: 11032.25, subFc: 3785.25, count: 5 },
       { file: 'ORDEN CODIZULCA 19-10.pdf', oc: '0000055175', subAk: 11429.70, subFc: 1513.63, count: 5 },
       { file: 'ORDEN CODIZULCA 13-10.pdf', oc: '0000054877', subAk: 15605.15, subFc: 2158.48, count: 6 },
-      { file: 'ORDEN CODIZULCA ASTURIA 06-10.pdf', oc: '0000054461', subAk: 14500.50, subFc: 3944.25, count: 4 }
+      { file: 'ORDEN CODIZULCA ASTURIA 06-10.pdf', oc: '0000054461', subAk: 14500.50, subFc: 3944.25, count: 4 },
+      { file: 'CODIZULCA LECHE.pdf', oc: '0000054457', subAk: 35700.00, subFc: 10450.00, count: 2 }
     ];
 
     for (const cand of pdfCandidates) {
@@ -604,6 +609,152 @@ describe('Unit & Regression: alkostoOcParser', () => {
       expect(item.distribucionPorTienda).toEqual([
         { codigoTienda: 'AK01', nombreTienda: 'Alkosto 1 san Felipe', cantidad: 10 },
         { codigoTienda: 'AK04', nombreTienda: 'Alkosto 4 - Coromoto', cantidad: 20 }
+      ]);
+    });
+
+    it('should validate and export the Canonical JSON Schema (cabecera_orden, renglones, resumen_totales) and enforce all 6 extraction rules', () => {
+      expect(ALKOSTO_OC_EXTRACTION_SYSTEM_PROMPT).toContain('cabecera_orden');
+      expect(ALKOSTO_OC_EXTRACTION_SYSTEM_PROMPT).toContain('distribucion_tiendas');
+      expect(ALKOSTO_OC_EXTRACTION_SYSTEM_PROMPT).toContain('resumen_totales');
+
+      // Regla 4: Formato numérico estándar con $, Bs., % y miles/decimales mixtos
+      expect(parseNumeroEstricto('Bs. 1.250,50')).toBe(1250.5);
+      expect(parseNumeroEstricto('$ 1,250.00')).toBe(1250);
+      expect(parseNumeroEstricto('16%')).toBe(16);
+      expect(normalizarFechaISOAlkosto('19/10/2026')).toBe('2026-10-19');
+
+      // Regla 1, 2, 3, 5 y 6: Entrada en formato canónico con comentario JS que debe limpiarse,
+      // separación de códigos (codigo_principal, codigo_ean, codigo_interno_alkosto) y alerta_revision en discrepancia OCR
+      const rawCanonicalWithComments = `
+      {
+        "cabecera_orden": {
+          "cliente_emisor": "ALKOSTO",
+          "receptor_destino": "CODIZULCA",
+          "numero_orden_compra": "0000054457",
+          "fecha_emision": "06/10/2026",
+          "fecha_entrega_estimada": "12/10/2026",
+          "moneda": "USD",
+          "condicion_pago": "30 DIAS CREDITO",
+          "observaciones_generales": "BCV, DESPACHO POR TIENDA / PEDIDO EN BULTOS, DESPACHO 12-13/10"
+        },
+        "renglones": [
+          {
+            "numero_renglon": 1,
+            "codigo_principal": "7590377000503",
+            "codigo_ean": "7590377000503",
+            "codigo_interno_alkosto": null,
+            "descripcion_producto": "LECHE EN POLVO COMPLETA VENCAMPO 400GR / 2.98",
+            "unidad_medida": "BTO",
+            "unidades_por_empaque": 24,
+            "cantidad_total": 300,
+            "distribucion_tiendas": [
+              { "codigo_tienda": "AK01", "nombre_tienda": "Alkosto 1 san Felipe", "cantidad": 60 },
+              { "codigo_tienda": "AK03", "nombre_tienda": "Alkosto 3 - C2", "cantidad": 60 },
+              { "codigo_tienda": "AK04", "nombre_tienda": "Alkosto 4 - Coromoto", "cantidad": 60 },
+              { "codigo_tienda": "AK05", "nombre_tienda": "Alkosto 5 - Cabimas", "cantidad": 60 },
+              { "codigo_tienda": "AK10", "nombre_tienda": "Alkosto 10 - Sambil", "cantidad": 60 }
+            ],
+            "costo_unitario": "62,00",
+            "porcentaje_descuento": 0,
+            "porcentaje_impuesto": 0,
+            "monto_total_renglon": "18.600,00",
+            "alerta_revision": false,
+            "nota_revision": null
+          },
+          {
+            "numero_renglon": 2,
+            "codigo_principal": "100881",
+            "codigo_ean": null,
+            "codigo_interno_alkosto": "100881",
+            "descripcion_producto": "PECHUGA DE PAVO ASTURIAS X KG / 6.88",
+            "unidad_medida": "KG",
+            "unidades_por_empaque": 1,
+            "cantidad_total": 100,
+            "distribucion_tiendas": [
+              { "codigo_tienda": "AK01", "nombre_tienda": "Alkosto 1 san Felipe", "cantidad": 100 }
+            ],
+            "costo_unitario": "5,50",
+            "porcentaje_descuento": 0,
+            "porcentaje_impuesto": 0,
+            "monto_total_renglon": "599,99", // Discrepancia intencional por lectura borrosa (100 * 5.50 = 550.00 != 599.99)
+            "alerta_revision": false,
+            "nota_revision": null
+          }
+        ],
+        "resumen_totales": {
+          "total_renglones_extraidos": 2,
+          "total_unidades_pedidas": 400,
+          "subtotal_neto": 19150,
+          "total_descuentos": 0,
+          "total_impuestos": 0,
+          "monto_total_orden": 19150,
+          "cuadre_aritmetico_correcto": false
+        }
+      }`;
+
+      const parsedJson = sanitizeAndParseOcJson(rawCanonicalWithComments);
+      const normalized = validateAndNormalizeAlkostoOC(parsedJson, { strictMath: false });
+      const canonical = toCanonicalAlkostoOcJson(normalized);
+
+      expect(canonical.cabecera_orden.cliente_emisor).toBe('ALKOSTO');
+      expect(canonical.cabecera_orden.receptor_destino).toBe('CODIZULCA');
+      expect(canonical.cabecera_orden.numero_orden_compra).toBe('0000054457');
+      expect(canonical.cabecera_orden.fecha_emision).toBe('2026-10-06');
+      expect(canonical.cabecera_orden.fecha_entrega_estimada).toBe('2026-10-12');
+      expect(canonical.cabecera_orden.condicion_pago).toBe('30 DIAS CREDITO');
+
+      expect(canonical.renglones).toHaveLength(2);
+      // Renglón 1: cuadre exacto (300 * 62 = 18600)
+      expect(canonical.renglones[0].codigo_principal).toBe('7590377000503');
+      expect(canonical.renglones[0].codigo_ean).toBe('7590377000503');
+      expect(canonical.renglones[0].descripcion_producto).toBe('LECHE EN POLVO COMPLETA VENCAMPO 400GR');
+      expect(canonical.renglones[0].unidad_medida).toBe('CJ');
+      expect(canonical.renglones[0].unidades_por_empaque).toBe(24);
+      expect(canonical.renglones[0].cantidad_total).toBe(300);
+      expect(canonical.renglones[0].costo_unitario).toBe(62);
+      expect(canonical.renglones[0].monto_total_renglon).toBe(18600);
+      expect(canonical.renglones[0].alerta_revision).toBe(false);
+      expect(canonical.renglones[0].distribucion_tiendas).toHaveLength(5);
+
+      // Renglón 2: homologación PLU 100881 -> SKU 1512 + preservación de codigo_interno_alkosto + alerta_revision: true por discrepancia aritmética
+      expect(canonical.renglones[1].codigo_principal).toBe('1512');
+      expect(canonical.renglones[1].codigo_interno_alkosto).toBe('100881');
+      expect(canonical.renglones[1].alerta_revision).toBe(true);
+      expect(canonical.renglones[1].nota_revision).toContain('Discrepancia aritmética');
+
+      expect(canonical.resumen_totales.total_renglones_extraidos).toBe(2);
+      expect(canonical.resumen_totales.total_unidades_pedidas).toBe(400);
+      expect(canonical.resumen_totales.subtotal_neto).toBe(19150);
+    });
+
+    it('should assign single general store in distribucion_tiendas when order is for a single store in header (Rule 3)', () => {
+      const singleStoreOrder = {
+        ordenNro: '0200609001',
+        clienteNombre: 'Alkosto 1 san Felipe',
+        idCliente: '7498',
+        items: [
+          {
+            renglon: 1,
+            codigo: '1496',
+            descripcion: 'MORTADELA ESPECIAL DE POLLO 900GR ASTURIAS',
+            unid: 'CJ',
+            emp: 10,
+            totalCantidad: 25,
+            costoUnitario: 20,
+            totalRenglon: 500
+          }
+        ]
+      };
+
+      const normalized = validateAndNormalizeAlkostoOC(singleStoreOrder);
+      const canonical = toCanonicalAlkostoOcJson(normalized);
+
+      expect(canonical.renglones[0].distribucion_tiendas).toEqual([
+        {
+          codigo_tienda: 'AK01',
+          nombre_tienda: 'Alkosto 1 san Felipe',
+          cantidad: 25
+        }
       ]);
     });
   });

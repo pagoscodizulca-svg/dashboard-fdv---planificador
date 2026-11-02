@@ -703,6 +703,30 @@ export const CATALOGO_ALKOSTO: CatalogoAlkostoItem[] = [
     unidadSugerida: 'CJ'
   },
   {
+    sku: '7590377000503',
+    producto: 'LECHE EN POLVO COMPLETA VENCAMPO 400GR',
+    categoria: 'LACTEOS',
+    presentacion: 'Bulto (10 und x 400g)',
+    kilosPorCaja: 4.0,
+    precioSugeridoUSD: 40.00,
+    codigoBarra: '7590377000503',
+    codigosCadena: ['7590377000503'],
+    sinonimos: ['LECHE EN POLVO COMPLETA VENCAMPO 400GR', 'LECHE VENCAMPO 400GR', '7590377000503'],
+    unidadSugerida: 'CJ'
+  },
+  {
+    sku: '7590377000510',
+    producto: 'LECHE EN POLVO COMPLETA VENCAMPO 900GR',
+    categoria: 'LACTEOS',
+    presentacion: 'Bulto (10 und x 900g)',
+    kilosPorCaja: 9.0,
+    precioSugeridoUSD: 90.00,
+    codigoBarra: '7590377000510',
+    codigosCadena: ['7590377000510'],
+    sinonimos: ['LECHE EN POLVO COMPLETA VENCAMPO 900GR', 'LECHE VENCAMPO 900GR', '7590377000510'],
+    unidadSugerida: 'CJ'
+  },
+  {
     sku: 'LPV',
     producto: 'LECHE EN POLVO VENCAMPO',
     categoria: 'LACTEOS',

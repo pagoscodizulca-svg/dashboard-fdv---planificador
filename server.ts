@@ -20,7 +20,9 @@ import {
   generarIdDeterministaPedidoAlkosto,
   sanitizeBase64Payload,
   detectAlkostoFileMimeType,
-  sanitizeAndParseOcJson
+  sanitizeAndParseOcJson,
+  ALKOSTO_OC_EXTRACTION_SYSTEM_PROMPT,
+  toCanonicalAlkostoOcJson
 } from "./src/services/alkostoOcParser";
 import {
   VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT,
@@ -2357,141 +2359,99 @@ async function startServer() {
         return res.json({
           success: true,
           parserMode: "DETERMINISTIC_PDF",
-          data: deterministicOrder
+          data: deterministicOrder,
+          canonical: toCanonicalAlkostoOcJson(deterministicOrder)
         });
       }
 
-      const systemInstruction = `Eres un Auditor Experto y Motor de Visión Multimodal especializado en la lectura y estructuración exacta de Órdenes de Compra (OC) y Notas de Pedido de CODIZULCA, C.A. para las cadenas ALKOSTO (columnas AK01 a AK10, AKOP, CI) y FAMILIA CENTER (columnas FC01 a FC07).
+      const systemInstruction = ALKOSTO_OC_EXTRACTION_SYSTEM_PROMPT;
 
-REGLAS DE NEGOCIO Y EXTRACCIÓN OBLIGATORIAS:
-1. METADATOS DE CABECERA:
-   - Extrae: numero_oc / ordenNro (ej. "0000055773"), fecha_emision / fechaEmision (DD/MM/YYYY), fecha_entrega / fechaEntrega (DD/MM/YYYY), clienteCadena ("ALKOSTO" o "FAMILIA_CENTER"), clienteNombre, moneda ("USD" o "BS"), tasa_cambio, subtotal_alkosto, subtotal_familia_center y subtotal_general.
-2. ARREGLO COMPLETO DE PRODUCTOS (items):
-   - Lee visualmente TODAS las filas de productos de todas las páginas sin saltar renglones ni desfasar columnas cuando la descripción ocupe dos líneas.
-   - Por cada producto extrae:
-     * codigo: Código del artículo (EAN, SKU o código interno completo sin truncar).
-     * skuCodizulca: SKU interno homologado de CODIZULCA.
-     * descripcion: Descripción exacta del producto (eliminando siempre el sufijo de PVP al final, ej. quitar "/ 3.78", "/ 5.84").
-     * unid: Unidad de medida o empaque normalizada estrictamente a "CJ", "KG", "UND" o "BLT".
-     * emp: Unidades por empaque (entero).
-     * costoBruto: Precio unitario bruto antes de descuento (flotante limpio).
-     * descuento: Porcentaje de bonificación/descuento si aplica (flotante limpio, 0 si no aplica).
-     * costoUnitario: Precio unitario neto (flotante limpio sin símbolos de moneda).
-     * totalCantidad / cantidadTotal: Cantidad total solicitada del renglón (flotante limpio).
-     * totalRenglon: Subtotal del renglón = totalCantidad * costoUnitario (flotante limpio).
-3. DESGLOSE DE CANTIDADES POR TIENDA (tiendas y distribucionPorTienda):
-   - Identifica las columnas de sucursales con cantidad > 0:
-     * Alkosto: AK01, AK02, AK03, AK04, AK05, AK06, AK07, AK08, AK09, AK10.
-     * Familia Center: FC01, FC02, FC03, FC04, FC05, FC06, FC07.
-   - Devuelve tanto el objeto \`tiendas\` (ej. {"AK01": 5, "AK04": 3}) como el sub-arreglo estructurado \`distribucionPorTienda\` con \`{ codigoTienda, nombreTienda, cantidad }\`.
-4. VALIDACIÓN MATEMÁTICA ESTRICTA POR FILA:
-   - Verifica que la suma de las cantidades de las tiendas del renglón coincida exactamente con \`totalCantidad\` (\`cantidadTotal\`) de la línea.
-   - Si una celda de tienda parece tener los decimales pegados (ej. "200" cuando el Total Cantidad es "3.00" y otra tienda tiene "1.00"), corrige automáticamente a "2.00".
-   - Todos los montos y cantidades deben ser números flotantes limpios estándar (ej. 1250.50), sin símbolos "$" ni "Bs" y sin separadores de miles.
-5. HOMOLOGACIÓN DE CATÁLOGO CODIZULCA:
-   - 7591289609129 -> SKU "21" | "CJ" | "MORTADELA DE POLLO DEL CORRAL 1KG"
-   - 7591289400023 -> SKU "047" | "UND" | "NUGGETS DE POLLO DEL CORRAL 460GR"
-   - 5412873178161 -> SKU "1360" | "CJ" | "PAPAS FRITAS CONGELADAS MARQUISE 2,5KG"
-   - 100281 -> SKU "100281" | "KG" | "QUESO MOZZARELLA CORLASA X KG"
-   - 7591210000513 -> SKU "7591210000513" | "CJ" | "CREMA DE LECHE PURISIMA 500GR"
-   - 7591210000544 -> SKU "7591210000544" | "CJ" | "CREMA DE LECHE PURISIMA 250GR"`;
-
-      const prompt = `Analiza visualmente la Orden de Compra adjunta (imagen o PDF) en todas sus páginas y devuelve ÚNICAMENTE el objeto JSON estructurado con cabeceras, renglones completos, distribución por tienda y validación matemática exacta.`;
+      const prompt = `Analiza minuciosamente la imagen, captura o documento PDF adjunto correspondiente a una Orden de Compra de ALKOSTO en todas sus páginas y devuelve ÚNICAMENTE el objeto JSON válido con cabecera_orden, renglones (incluyendo distribucion_tiendas, códigos separados y validación aritmética) y resumen_totales.`;
 
       const ocResponseSchema = {
         type: Type.OBJECT,
         properties: {
-          numero_oc: { type: Type.STRING, description: "Número de Orden de Compra (ej. 0000055773)" },
-          ordenNro: { type: Type.STRING, description: "Número de Orden de Compra (ej. 0000055773)" },
-          fecha_emision: { type: Type.STRING, description: "Fecha de emisión DD/MM/YYYY" },
-          fechaEmision: { type: Type.STRING },
-          fecha_entrega: { type: Type.STRING, description: "Fecha de entrega DD/MM/YYYY" },
-          fechaEntrega: { type: Type.STRING },
-          moneda: { type: Type.STRING, description: "Moneda de la orden (USD o BS)" },
-          tasa_cambio: { type: Type.NUMBER, description: "Tasa de cambio BCV" },
-          tasaCambio: { type: Type.NUMBER },
-          subtotal_alkosto: { type: Type.NUMBER },
-          subtotalAlkosto: { type: Type.NUMBER },
-          subtotal_familia_center: { type: Type.NUMBER },
-          subtotalFamiliaCenter: { type: Type.NUMBER },
-          subtotal_general: { type: Type.NUMBER },
-          subtotalGeneral: { type: Type.NUMBER },
-          subtotal: { type: Type.NUMBER },
-          clienteCadena: { type: Type.STRING, description: "ALKOSTO o FAMILIA_CENTER" },
-          clienteNombre: { type: Type.STRING },
-          idCliente: { type: Type.STRING },
-          ruta: { type: Type.STRING },
-          nroPedido: { type: Type.STRING },
-          sede: { type: Type.STRING },
-          diasCredito: { type: Type.NUMBER },
-          proveedorNombre: { type: Type.STRING },
-          proveedorRif: { type: Type.STRING },
-          observaciones: { type: Type.STRING },
-          supervisor: { type: Type.STRING },
-          chofer: { type: Type.STRING },
-          cantidadCestas: { type: Type.STRING },
-          items: {
+          cabecera_orden: {
+            type: Type.OBJECT,
+            properties: {
+              cliente_emisor: { type: Type.STRING, description: "ALKOSTO o FAMILIA_CENTER" },
+              receptor_destino: { type: Type.STRING, description: "CODIZULCA" },
+              numero_orden_compra: { type: Type.STRING, description: "Número de Orden de Compra (ej. 0000055773)" },
+              fecha_emision: { type: Type.STRING, description: "Fecha de emisión YYYY-MM-DD" },
+              fecha_entrega_estimada: { type: Type.STRING, nullable: true, description: "Fecha de entrega YYYY-MM-DD" },
+              moneda: { type: Type.STRING, nullable: true, description: "USD o BS" },
+              condicion_pago: { type: Type.STRING, nullable: true, description: "Condición de pago (ej. 30 DIAS CREDITO)" },
+              observaciones_generales: { type: Type.STRING, nullable: true }
+            },
+            required: ["cliente_emisor", "receptor_destino", "numero_orden_compra", "fecha_emision"]
+          },
+          renglones: {
             type: Type.ARRAY,
             items: {
               type: Type.OBJECT,
               properties: {
-                renglon: { type: Type.NUMBER },
-                unid: { type: Type.STRING, description: "CJ, UND, KG o BLT" },
-                totalCantidad: { type: Type.NUMBER, description: "Cantidad total solicitada de la línea" },
-                cantidadTotal: { type: Type.NUMBER },
-                cantDespachada: { type: Type.STRING },
-                codigo: { type: Type.STRING, description: "Código EAN, SKU o código interno" },
-                skuCodizulca: { type: Type.STRING },
-                codigoBarra: { type: Type.STRING },
-                descripcion: { type: Type.STRING, description: "Descripción limpia sin sufijo /PVP" },
-                emp: { type: Type.NUMBER },
-                costoBruto: { type: Type.NUMBER },
-                descuento: { type: Type.NUMBER, description: "Descuento o % bonificación" },
-                costoUnitario: { type: Type.NUMBER, description: "Precio unitario limpio" },
-                totalRenglon: { type: Type.NUMBER, description: "Total del renglón (totalCantidad * costoUnitario)" },
-                tiendas: {
-                  type: Type.OBJECT,
-                  properties: {
-                    AK01: { type: Type.NUMBER },
-                    AK02: { type: Type.NUMBER },
-                    AK03: { type: Type.NUMBER },
-                    AK04: { type: Type.NUMBER },
-                    AK05: { type: Type.NUMBER },
-                    AK06: { type: Type.NUMBER },
-                    AK07: { type: Type.NUMBER },
-                    AK08: { type: Type.NUMBER },
-                    AK09: { type: Type.NUMBER },
-                    AK10: { type: Type.NUMBER },
-                    AKOP: { type: Type.NUMBER },
-                    CI: { type: Type.NUMBER },
-                    FC01: { type: Type.NUMBER },
-                    FC02: { type: Type.NUMBER },
-                    FC03: { type: Type.NUMBER },
-                    FC04: { type: Type.NUMBER },
-                    FC05: { type: Type.NUMBER },
-                    FC06: { type: Type.NUMBER },
-                    FC07: { type: Type.NUMBER },
-                    FCOP: { type: Type.NUMBER }
-                  }
-                },
-                distribucionPorTienda: {
+                numero_renglon: { type: Type.NUMBER },
+                codigo_principal: { type: Type.STRING, description: "Código interno Codizulca o código principal" },
+                codigo_ean: { type: Type.STRING, nullable: true, description: "Código de barras EAN/UPC si está presente" },
+                codigo_interno_alkosto: { type: Type.STRING, nullable: true, description: "Código interno de Alkosto (SKU/PLU)" },
+                descripcion_producto: { type: Type.STRING, description: "Descripción limpia sin sufijo /PVP" },
+                unidad_medida: { type: Type.STRING, description: "CJ, UND, KG o BLT" },
+                unidades_por_empaque: { type: Type.NUMBER },
+                cantidad_total: { type: Type.NUMBER },
+                distribucion_tiendas: {
                   type: Type.ARRAY,
                   items: {
                     type: Type.OBJECT,
                     properties: {
-                      codigoTienda: { type: Type.STRING, description: "Código de sucursal (ej. AK01, FC01)" },
-                      nombreTienda: { type: Type.STRING, description: "Nombre de la sucursal" },
-                      cantidad: { type: Type.NUMBER, description: "Cantidad asignada a la tienda" }
+                      codigo_tienda: { type: Type.STRING, nullable: true, description: "AK01..AK10 o FC01..FC07" },
+                      nombre_tienda: { type: Type.STRING },
+                      cantidad: { type: Type.NUMBER }
                     },
-                    required: ["codigoTienda", "cantidad"]
+                    required: ["nombre_tienda", "cantidad"]
                   }
-                }
+                },
+                costo_unitario: { type: Type.NUMBER },
+                porcentaje_descuento: { type: Type.NUMBER },
+                porcentaje_impuesto: { type: Type.NUMBER },
+                monto_total_renglon: { type: Type.NUMBER },
+                alerta_revision: { type: Type.BOOLEAN },
+                nota_revision: { type: Type.STRING, nullable: true }
               },
-              required: ["codigo", "descripcion", "unid", "totalCantidad"]
+              required: [
+                "numero_renglon",
+                "codigo_principal",
+                "descripcion_producto",
+                "unidad_medida",
+                "unidades_por_empaque",
+                "cantidad_total",
+                "distribucion_tiendas",
+                "costo_unitario",
+                "monto_total_renglon",
+                "alerta_revision"
+              ]
             }
+          },
+          resumen_totales: {
+            type: Type.OBJECT,
+            properties: {
+              total_renglones_extraidos: { type: Type.NUMBER },
+              total_unidades_pedidas: { type: Type.NUMBER },
+              subtotal_neto: { type: Type.NUMBER },
+              total_descuentos: { type: Type.NUMBER },
+              total_impuestos: { type: Type.NUMBER },
+              monto_total_orden: { type: Type.NUMBER },
+              cuadre_aritmetico_correcto: { type: Type.BOOLEAN }
+            },
+            required: [
+              "total_renglones_extraidos",
+              "total_unidades_pedidas",
+              "subtotal_neto",
+              "monto_total_orden",
+              "cuadre_aritmetico_correcto"
+            ]
           }
         },
-        required: ["items"]
+        required: ["cabecera_orden", "renglones", "resumen_totales"]
       };
 
       const candidateModels = [
@@ -2630,7 +2590,8 @@ REGLAS DE NEGOCIO Y EXTRACCIÓN OBLIGATORIAS:
           return res.json({
             success: true,
             parserMode: usedModel ? `AI_HYBRID_${usedModel}` : "DETERMINISTIC_PDF",
-            data: deterministicOrder
+            data: deterministicOrder,
+            canonical: toCanonicalAlkostoOcJson(deterministicOrder)
           });
         }
       }
@@ -2713,7 +2674,8 @@ REGLAS DE NEGOCIO Y EXTRACCIÓN OBLIGATORIAS:
       return res.json({
         success: true,
         parserMode: `AI_VALIDATED_${usedModel}`,
-        data: validatedOrder
+        data: validatedOrder,
+        canonical: toCanonicalAlkostoOcJson(validatedOrder)
       });
     } catch (err: any) {
       const errStatus = err?.status || err?.statusCode || 500;

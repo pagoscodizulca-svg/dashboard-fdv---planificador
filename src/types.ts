@@ -214,6 +214,57 @@ export interface DistribucionPorTiendaItem {
   cantidad: number;
 }
 
+export interface AlkostoOcCabeceraOrden {
+  cliente_emisor: string;
+  receptor_destino: string;
+  numero_orden_compra: string;
+  fecha_emision: string;
+  fecha_entrega_estimada: string | null;
+  moneda: string | null;
+  condicion_pago: string | null;
+  observaciones_generales: string | null;
+}
+
+export interface AlkostoOcDistribucionTienda {
+  codigo_tienda: string | null;
+  nombre_tienda: string;
+  cantidad: number;
+}
+
+export interface AlkostoOcRenglonExtraido {
+  numero_renglon: number;
+  codigo_principal: string;
+  codigo_ean: string | null;
+  codigo_interno_alkosto: string | null;
+  descripcion_producto: string;
+  unidad_medida: string;
+  unidades_por_empaque: number;
+  cantidad_total: number;
+  distribucion_tiendas: AlkostoOcDistribucionTienda[];
+  costo_unitario: number;
+  porcentaje_descuento: number;
+  porcentaje_impuesto: number;
+  monto_total_renglon: number;
+  alerta_revision: boolean;
+  nota_revision: string | null;
+}
+
+export interface AlkostoOcResumenTotales {
+  total_renglones_extraidos: number;
+  total_unidades_pedidas: number;
+  subtotal_neto: number;
+  total_descuentos: number;
+  total_impuestos: number;
+  monto_total_orden: number;
+  cuadre_aritmetico_correcto: boolean;
+}
+
+export interface AlkostoOcCanonicalPayload {
+  cabecera_orden: AlkostoOcCabeceraOrden;
+  renglones: AlkostoOcRenglonExtraido[];
+  resumen_totales: AlkostoOcResumenTotales;
+}
+
 export interface CodizulcaNotaPedidoItem {
   renglon: number;
   unid: string; // 'CJ' | 'KG' | 'UND' | 'BLT'
@@ -222,8 +273,11 @@ export interface CodizulcaNotaPedidoItem {
   unidades?: number;
   cantDespachada?: number | string;
   codigo: string;
+  codigoPrincipal?: string;
   skuCodizulca?: string;
   codigoBarra?: string;
+  codigoEan?: string | null;
+  codigoInternoAlkosto?: string | null;
   descripcion: string;
   precio: number;
   precioBruto?: number;
@@ -231,6 +285,9 @@ export interface CodizulcaNotaPedidoItem {
   subtotal: number;
   tiendas?: Record<string, number>;
   distribucionPorTienda?: DistribucionPorTiendaItem[];
+  distribucion_tiendas?: AlkostoOcDistribucionTienda[];
+  alertaRevision?: boolean;
+  notaRevision?: string | null;
 }
 
 export interface ParsedOrdenCompraAlkosto {
@@ -250,6 +307,7 @@ export interface ParsedOrdenCompraAlkosto {
   fecha_emision?: string;
   fechaEntrega: string;
   moneda?: 'USD' | 'BS' | string;
+  condicionPago?: string;
   diasCredito: number;
   tasaCambio: number;
   proveedorNombre: string;
@@ -259,11 +317,17 @@ export interface ParsedOrdenCompraAlkosto {
   subtotalAlkosto?: number;
   subtotalFamiliaCenter?: number;
   subtotalGeneral?: number;
+  cabecera_orden?: AlkostoOcCabeceraOrden;
+  renglones?: AlkostoOcRenglonExtraido[];
+  resumen_totales?: AlkostoOcResumenTotales;
   items: Array<{
     renglon: number;
     codigo: string;
+    codigoPrincipal?: string;
     skuCodizulca?: string;
     codigoBarra?: string;
+    codigoEan?: string | null;
+    codigoInternoAlkosto?: string | null;
     descripcion: string;
     iva?: number;
     emp?: number;
@@ -277,6 +341,9 @@ export interface ParsedOrdenCompraAlkosto {
     totalRenglon: number;
     tiendas?: Record<string, number>;
     distribucionPorTienda?: DistribucionPorTiendaItem[];
+    distribucion_tiendas?: AlkostoOcDistribucionTienda[];
     cuadreTiendasValido?: boolean;
+    alertaRevision?: boolean;
+    notaRevision?: string | null;
   }>;
 }

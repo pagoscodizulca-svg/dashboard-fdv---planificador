@@ -128,6 +128,7 @@ function buildFilasFromData(
   for (let i = 0; i < totalItems; i++) {
     const it = itemsList[i];
     let cant = parseNumeroSeguro(it.totalCantidad) || 
+               parseNumeroSeguro((it as any).cantidad_total) || 
                parseNumeroSeguro((it as any).total_cantidad) || 
                parseNumeroSeguro((it as any).cantidad) || 
                parseNumeroSeguro((it as any).cant) || 
@@ -137,13 +138,22 @@ function buildFilasFromData(
                parseNumeroSeguro((it as any).bultos) || 0;
 
     const tiendasMap: Record<string, number> = { ...(it.tiendas || {}) };
-    if (Array.isArray((it as any).distribucionPorTienda)) {
-      for (const d of (it as any).distribucionPorTienda) {
-        const tag = String(d?.codigoTienda || '').trim().toUpperCase();
-        const qty = parseNumeroSeguro(d?.cantidad);
-        if (tag && qty > 0 && tiendasMap[tag] === undefined) {
-          tiendasMap[tag] = qty;
-        }
+    const distArray = Array.isArray((it as any).distribucion_tiendas)
+      ? (it as any).distribucion_tiendas
+      : Array.isArray((it as any).distribucionPorTienda)
+        ? (it as any).distribucionPorTienda
+        : [];
+    for (const d of distArray) {
+      let tag = String(d?.codigo_tienda ?? d?.codigoTienda ?? '').trim().toUpperCase();
+      if (!tag && d?.nombre_tienda) {
+        const sucMatch = [...SUCURSALES_ALKOSTO, ...SUCURSALES_FAMILIA_CENTER].find(
+          s => s.nombre.toUpperCase() === String(d.nombre_tienda).trim().toUpperCase()
+        );
+        if (sucMatch) tag = (sucMatch.tag || sucMatch.codigo).toUpperCase();
+      }
+      const qty = parseNumeroSeguro(d?.cantidad);
+      if (tag && qty > 0 && tiendasMap[tag] === undefined) {
+        tiendasMap[tag] = qty;
       }
     }
 
@@ -176,12 +186,16 @@ function buildFilasFromData(
 
     const rawCode = String(
       it.codigo || 
+      (it as any).codigoPrincipal || 
+      (it as any).codigo_principal || 
       it.skuCodizulca || 
       (it as any).sku || 
       (it as any).codigoArticulo || 
       (it as any).codigo_articulo || 
       (it as any).codigoBarra || 
+      (it as any).codigo_ean || 
       (it as any).ean || 
+      (it as any).codigo_interno_alkosto || 
       ''
     ).trim();
     const rawDesc = limpiarDescripcionAlkosto(
@@ -203,13 +217,14 @@ function buildFilasFromData(
       (match ? match.sku : '') ||
       (it.skuCodizulca ? String(it.skuCodizulca).trim() : '') ||
       rawCode;
-    const finalBarcode = it.codigoBarra || (it as any).barcode || match?.codigoBarra || '';
+    const finalBarcode = it.codigoBarra || (it as any).codigoEan || (it as any).codigo_ean || (it as any).barcode || match?.codigoBarra || '';
+    const finalCodigoInternoAlkosto = (it as any).codigoInternoAlkosto || (it as any).codigo_interno_alkosto || null;
     // Usar la descripción limpia homologada del catálogo o la limpia de la OC (sin sufijo /PVP)
     const finalDesc = (match ? match.producto : '') || rawDesc;
     const finalUnid = normalizarUnidadMedidaAlkosto(
-      it.unid || (it as any).unidad,
+      it.unid || (it as any).unidad_medida || (it as any).unidad,
       finalDesc,
-      parseNumeroSeguro(it.emp),
+      parseNumeroSeguro(it.emp ?? (it as any).unidades_por_empaque),
       match?.unidadSugerida
     );
     
@@ -220,6 +235,7 @@ function buildFilasFromData(
                       parseNumeroSeguro((it as any).precioUnitario) || 
                       (match ? match.precioSugeridoUSD : 0);
     let sub = parseNumeroSeguro((it as any).totalRenglon) || 
+              parseNumeroSeguro((it as any).monto_total_renglon) || 
               parseNumeroSeguro((it as any).total_renglon) || 
               parseNumeroSeguro((it as any).subtotal) || 
               parseNumeroSeguro((it as any).total);
@@ -232,7 +248,9 @@ function buildFilasFromData(
 
     const rawDespachada = (it as any).cantDespachada ?? (it as any).cantidadDespachada ?? '';
     const rawPrecioBruto = parseNumeroSeguro((it as any).costoBruto ?? (it as any).precioBruto);
-    const rawDescuento = parseNumeroSeguro((it as any).descuento ?? (it as any).porcentajeBonif);
+    const rawDescuento = parseNumeroSeguro((it as any).descuento ?? (it as any).porcentaje_descuento ?? (it as any).porcentajeBonif);
+    const rawAlertaRevision = Boolean((it as any).alertaRevision || (it as any).alerta_revision);
+    const rawNotaRevision = (it as any).notaRevision ?? (it as any).nota_revision ?? null;
 
     result.push({
       renglon: result.length + 1,
@@ -240,15 +258,21 @@ function buildFilasFromData(
       cantSolicitada: Number(cant.toFixed(2)),
       cantDespachada: rawDespachada !== '' && rawDespachada !== null && rawDespachada !== undefined ? String(rawDespachada) : '',
       codigo: finalSku,
+      codigoPrincipal: finalSku,
       skuCodizulca: finalSku,
       codigoBarra: finalBarcode,
+      codigoEan: finalBarcode || null,
+      codigoInternoAlkosto: finalCodigoInternoAlkosto,
       descripcion: finalDesc,
       precio: Number(finalPrecio.toFixed(4)),
       ...(rawPrecioBruto > 0 ? { precioBruto: Number(rawPrecioBruto.toFixed(4)) } : {}),
       ...(rawDescuento > 0 ? { descuento: Number(rawDescuento.toFixed(2)) } : {}),
       subtotal: Number(sub.toFixed(2)),
       tiendas: Object.keys(tiendasMap).length > 0 ? tiendasMap : it.tiendas,
-      ...(Array.isArray((it as any).distribucionPorTienda) ? { distribucionPorTienda: (it as any).distribucionPorTienda } : {})
+      ...(Array.isArray((it as any).distribucionPorTienda) ? { distribucionPorTienda: (it as any).distribucionPorTienda } : {}),
+      ...(Array.isArray((it as any).distribucion_tiendas) ? { distribucion_tiendas: (it as any).distribucion_tiendas } : {}),
+      alertaRevision: rawAlertaRevision,
+      notaRevision: rawNotaRevision
     });
   }
 
@@ -368,7 +392,8 @@ export function CodizulcaNotaPedido({
   // Al recibir o cambiar datos extraídos por OCR, poblar automáticamente el formato
   useEffect(() => {
     if (initialData) {
-      const ocNum = initialData.ordenNro || (initialData as any).numeroOrden || (initialData as any).nroOrden || (initialData as any).oc || '';
+      const cab = (initialData as any).cabecera_orden || {};
+      const ocNum = initialData.ordenNro || cab.numero_orden_compra || (initialData as any).numeroOrden || (initialData as any).nroOrden || (initialData as any).oc || '';
       if (ocNum && ocNum !== 'S/N') {
         setOrdenCompraRef(ocNum);
         setAlertaValidacionOC(null);
@@ -376,7 +401,7 @@ export function CodizulcaNotaPedido({
         setOrdenCompraRef('');
         setAlertaValidacionOC('⚠️ Esta Orden de Compra no tiene un número de OC detectado. Por favor ingrésalo en la casilla "ORDEN DE COMPRA" antes de transmitir.');
       }
-      const fechaVal = initialData.fechaEntrega || (initialData as any).fecha || (initialData as any).entrega || '';
+      const fechaVal = initialData.fechaEntrega || cab.fecha_entrega_estimada || cab.fecha_emision || (initialData as any).fecha || (initialData as any).entrega || '';
       if (fechaVal) {
         setFecha(fechaVal);
         if (/^\d{4}-\d{2}-\d{2}$/.test(fechaVal)) {
@@ -401,6 +426,17 @@ export function CodizulcaNotaPedido({
             }
           });
         }
+        const distArr = Array.isArray(it.distribucion_tiendas)
+          ? it.distribucion_tiendas
+          : Array.isArray(it.distribucionPorTienda)
+            ? it.distribucionPorTienda
+            : [];
+        distArr.forEach((d: any) => {
+          const uTag = String(d?.codigo_tienda ?? d?.codigoTienda ?? '').trim().toUpperCase();
+          if (uTag && uTag !== 'CI' && uTag !== 'AKOP' && uTag !== 'FCOP' && parseNumeroSeguro(d?.cantidad) > 0) {
+            allTagsWithQty.add(uTag);
+          }
+        });
       });
       const tagsList = Array.from(allTagsWithQty);
       const orderedAllTags = [
@@ -1238,11 +1274,15 @@ export function CodizulcaNotaPedido({
                 {filas.map((f, idx) => (
                   <tr 
                     key={f.renglon} 
-                    className="divide-x-2 divide-slate-900 hover:bg-amber-50/30 transition-colors h-7 leading-tight"
+                    title={f.alertaRevision ? (f.notaRevision || 'Alerta de revisión aritmética OCR en este renglón') : undefined}
+                    className={`divide-x-2 divide-slate-900 hover:bg-amber-50/30 transition-colors h-7 leading-tight ${f.alertaRevision ? 'bg-amber-50/70' : ''}`}
                   >
                     {/* NÚMERO DE RENGLÓN */}
                     <td className="p-1 text-center font-bold text-slate-600 font-mono text-[11px] bg-slate-50/20 select-none">
-                      {f.renglon}
+                      <span>{f.renglon}</span>
+                      {f.alertaRevision && (
+                        <span className="ml-0.5 text-amber-600 print:hidden" title={f.notaRevision || 'Revisar renglón'}>⚠️</span>
+                      )}
                     </td>
 
                     {/* UNIDAD */}
