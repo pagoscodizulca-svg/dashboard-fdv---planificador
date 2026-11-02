@@ -18,7 +18,10 @@ import {
   calcularResumenCuadreOC,
   sanitizeBase64Payload,
   detectAlkostoFileMimeType,
+  parseSafeJson,
   sanitizeAndParseOcJson,
+  ALKOSTO_OCR_MODEL_CASCADE,
+  buildAlkostoOcSystemPrompt,
   construirDistribucionPorTienda,
   construirDistribucionTiendasCanonico,
   normalizarFechaISOAlkosto,
@@ -756,6 +759,46 @@ describe('Unit & Regression: alkostoOcParser', () => {
           cantidad: 25
         }
       ]);
+    });
+
+    it('should enforce the 5 mandatory OCR resilience rules (model cascade, parseSafeJson, dynamic abbreviations, and null store defense)', () => {
+      // 1. Cascada de modelos en orden exacto de precisión documental
+      expect(ALKOSTO_OCR_MODEL_CASCADE).toEqual([
+        'gemini-2.5-pro',
+        'gemini-2.5-flash',
+        'gemini-2.0-flash'
+      ]);
+
+      // 2. Inyección dinámica de abreviaturas sincronizadas AK01-AK10 y FC01-FC07 en el prompt del sistema
+      const dynamicPrompt = buildAlkostoOcSystemPrompt();
+      expect(dynamicPrompt).toContain('AK01');
+      expect(dynamicPrompt).toContain('AK10');
+      expect(dynamicPrompt).toContain('FC01');
+      expect(dynamicPrompt).toContain('FC07');
+
+      // 3. parseSafeJson limpia bloques markdown, extrae entre primera {/[ y última }/] y no lanza excepciones no controladas
+      const noisyText = 'Aquí tienes la extracción:\n```json\n{"cabecera_orden":{"numero_orden_compra":"0000055999"},"renglones":[{"numero_renglon":1,"codigo_principal":"1496","descripcion_producto":"MORTADELA ASTURIAS","unidad_medida":"CJ","unidades_por_empaque":10,"cantidad_total":12,"distribucion_tiendas":[{"codigo_tienda":"AK01","nombre_tienda":"Alkosto 1","cantidad":12}],"costo_unitario":20,"monto_total_renglon":240,"alerta_revision":false}]}\n```\nFin del reporte.';
+      const safeParsed = parseSafeJson(noisyText);
+      expect(safeParsed).toBeTruthy();
+      expect(safeParsed.cabecera_orden.numero_orden_compra).toBe('0000055999');
+      expect(parseSafeJson('texto sin json válido')).toBeNull();
+
+      // 4. Defensa contra tiendas con null o "-" en strictMath: false
+      const normalized = validateAndNormalizeAlkostoOC(
+        {
+          ...safeParsed,
+          renglones: [
+            {
+              ...safeParsed.renglones[0],
+              tiendas: { AK01: 12, AK02: null, AK03: '-', AK04: '' }
+            }
+          ]
+        },
+        { strictMath: false }
+      );
+      expect(normalized.ordenNro).toBe('0000055999');
+      expect(normalized.items).toHaveLength(1);
+      expect(normalized.items[0].tiendas).toEqual({ AK01: 12 });
     });
   });
 });

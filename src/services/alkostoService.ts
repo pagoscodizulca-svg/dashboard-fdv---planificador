@@ -1732,17 +1732,36 @@ export async function parseAlkostoOrderImage(
   mimeType: string = 'image/jpeg',
   fileName?: string
 ): Promise<ParsedOrdenCompraAlkosto> {
-  const cleanBase64 = String(imageBase64 || '')
-    .trim()
+  const readerResult = String(imageBase64 || '').trim();
+  const base64Data = (readerResult.includes(',') ? readerResult.split(',')[1] : readerResult)
     .replace(/^data:[^;]+;base64,/i, '')
     .replace(/\s+/g, '');
 
-  if (!cleanBase64) {
+  if (!base64Data) {
     throw new Error('El archivo seleccionado está vacío o no pudo convertirse a Base64.');
+  }
+
+  // Inferir mimeType de forma segura si viene vacío o genérico
+  let safeMimeType = String(mimeType || '').trim().toLowerCase();
+  const lowerName = String(fileName || '').trim().toLowerCase();
+  if (!safeMimeType || safeMimeType === 'application/octet-stream') {
+    if (lowerName.endsWith('.pdf') || base64Data.startsWith('JVBERi0')) {
+      safeMimeType = 'application/pdf';
+    } else if (lowerName.endsWith('.png') || base64Data.startsWith('iVBORw0KGgo')) {
+      safeMimeType = 'image/png';
+    } else if (lowerName.endsWith('.webp') || base64Data.startsWith('UklGR')) {
+      safeMimeType = 'image/webp';
+    } else if (lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg') || base64Data.startsWith('/9j/')) {
+      safeMimeType = 'image/jpeg';
+    } else {
+      safeMimeType = 'image/jpeg';
+    }
   }
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 90000); // 90s de tolerancia para análisis exhaustivo de órdenes completas
+
+  let backendError: any = null;
 
   try {
     const response = await fetch('/api/alkosto/ocr-orden', {
@@ -1751,7 +1770,11 @@ export async function parseAlkostoOrderImage(
         'Content-Type': 'application/json',
         ...getAuthHeaders()
       },
-      body: JSON.stringify({ imageBase64: cleanBase64, mimeType, fileName }),
+      body: JSON.stringify({
+        imageBase64: base64Data,
+        mimeType: safeMimeType,
+        fileName
+      }),
       signal: controller.signal
     });
 
@@ -1793,12 +1816,82 @@ export async function parseAlkostoOrderImage(
     return result.data;
   } catch (err: any) {
     if (err.name === 'AbortError') {
-      throw new Error('El lector OCR excedió el tiempo límite (90s). Por favor reintenta con una imagen más nítida o liviana.');
+      backendError = new Error('El lector OCR excedió el tiempo límite (90s). Por favor reintenta con una imagen más nítida o liviana.');
+    } else {
+      backendError = err;
     }
-    throw err;
   } finally {
     clearTimeout(timeoutId);
   }
+
+  // Respaldo directo en cascada con Gemini si existe API Key en entorno cliente
+  const clientApiKey = String(
+    (import.meta as any).env?.VITE_GEMINI_API_KEY ||
+    (typeof process !== 'undefined' && (process.env?.GEMINI_API_KEY || process.env?.API_KEY)) ||
+    ''
+  ).trim();
+
+  if (clientApiKey && clientApiKey !== 'undefined' && clientApiKey !== 'null' && clientApiKey.length >= 20) {
+    try {
+      const [{ GoogleGenAI }, parserMod] = await Promise.all([
+        import('@google/genai'),
+        import('./alkostoOcParser')
+      ]);
+      const ai = new GoogleGenAI({ apiKey: clientApiKey });
+      const systemInstruction = parserMod.buildAlkostoOcSystemPrompt(
+        CADENAS_ABREVIATURAS.ALKOSTO,
+        CADENAS_ABREVIATURAS.FAMILIA_CENTER
+      );
+      const prompt = `Analiza minuciosamente la imagen, captura o documento PDF adjunto correspondiente a una Orden de Compra de ALKOSTO en todas sus páginas y devuelve ÚNICAMENTE el objeto JSON válido con cabecera_orden, renglones (incluyendo distribucion_tiendas con códigos ${CADENAS_ABREVIATURAS.ALKOSTO.join(', ')} o ${CADENAS_ABREVIATURAS.FAMILIA_CENTER.join(', ')}, códigos separados y validación aritmética) y resumen_totales.`;
+
+      const modelsCascade = [...parserMod.ALKOSTO_OCR_MODEL_CASCADE];
+      let lastClientErr: any = null;
+
+      for (const modelName of modelsCascade) {
+        try {
+          const genRes = await ai.models.generateContent({
+            model: modelName,
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  { inlineData: { data: base64Data, mimeType: safeMimeType } },
+                  { text: prompt }
+                ]
+              }
+            ],
+            config: {
+              systemInstruction,
+              responseMimeType: 'application/json',
+              temperature: 0.1
+            }
+          });
+          const rawText = genRes?.text || '';
+          const parsedJson = parserMod.parseSafeJson(rawText);
+          if (!parsedJson) {
+            throw new Error(`El modelo ${modelName} devolvió una respuesta no JSON.`);
+          }
+          return parserMod.validateAndNormalizeAlkostoOC(parsedJson, {
+            strictMath: false,
+            requireOrdenNro: false
+          });
+        } catch (mErr: any) {
+          lastClientErr = mErr;
+          console.warn(`[alkostoService] Reintentando siguiente modelo tras fallo en ${modelName}:`, mErr?.message);
+        }
+      }
+
+      if (lastClientErr) {
+        throw lastClientErr;
+      }
+    } catch (fallbackErr: any) {
+      if (!backendError) {
+        throw fallbackErr;
+      }
+    }
+  }
+
+  throw backendError || new Error('Error desconocido al procesar la Orden de Compra.');
 }
 
 export const SAMPLE_ALKOSTO_OC: ParsedOrdenCompraAlkosto | null = null;

@@ -20,7 +20,10 @@ import {
   generarIdDeterministaPedidoAlkosto,
   sanitizeBase64Payload,
   detectAlkostoFileMimeType,
+  parseSafeJson,
   sanitizeAndParseOcJson,
+  ALKOSTO_OCR_MODEL_CASCADE,
+  buildAlkostoOcSystemPrompt,
   ALKOSTO_OC_EXTRACTION_SYSTEM_PROMPT,
   toCanonicalAlkostoOcJson
 } from "./src/services/alkostoOcParser";
@@ -2364,102 +2367,11 @@ async function startServer() {
         });
       }
 
-      const systemInstruction = ALKOSTO_OC_EXTRACTION_SYSTEM_PROMPT;
+      const systemInstruction = buildAlkostoOcSystemPrompt();
 
-      const prompt = `Analiza minuciosamente la imagen, captura o documento PDF adjunto correspondiente a una Orden de Compra de ALKOSTO en todas sus páginas y devuelve ÚNICAMENTE el objeto JSON válido con cabecera_orden, renglones (incluyendo distribucion_tiendas, códigos separados y validación aritmética) y resumen_totales.`;
+      const prompt = `Analiza minuciosamente la imagen, captura o documento PDF adjunto correspondiente a una Orden de Compra de ALKOSTO en todas sus páginas y devuelve ÚNICAMENTE el objeto JSON válido con cabecera_orden, renglones (incluyendo distribucion_tiendas con códigos AK01-AK10 o FC01-FC07, códigos separados y validación aritmética) y resumen_totales.`;
 
-      const ocResponseSchema = {
-        type: Type.OBJECT,
-        properties: {
-          cabecera_orden: {
-            type: Type.OBJECT,
-            properties: {
-              cliente_emisor: { type: Type.STRING, description: "ALKOSTO o FAMILIA_CENTER" },
-              receptor_destino: { type: Type.STRING, description: "CODIZULCA" },
-              numero_orden_compra: { type: Type.STRING, description: "Número de Orden de Compra (ej. 0000055773)" },
-              fecha_emision: { type: Type.STRING, description: "Fecha de emisión YYYY-MM-DD" },
-              fecha_entrega_estimada: { type: Type.STRING, nullable: true, description: "Fecha de entrega YYYY-MM-DD" },
-              moneda: { type: Type.STRING, nullable: true, description: "USD o BS" },
-              condicion_pago: { type: Type.STRING, nullable: true, description: "Condición de pago (ej. 30 DIAS CREDITO)" },
-              observaciones_generales: { type: Type.STRING, nullable: true }
-            },
-            required: ["cliente_emisor", "receptor_destino", "numero_orden_compra", "fecha_emision"]
-          },
-          renglones: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                numero_renglon: { type: Type.NUMBER },
-                codigo_principal: { type: Type.STRING, description: "Código interno Codizulca o código principal" },
-                codigo_ean: { type: Type.STRING, nullable: true, description: "Código de barras EAN/UPC si está presente" },
-                codigo_interno_alkosto: { type: Type.STRING, nullable: true, description: "Código interno de Alkosto (SKU/PLU)" },
-                descripcion_producto: { type: Type.STRING, description: "Descripción limpia sin sufijo /PVP" },
-                unidad_medida: { type: Type.STRING, description: "CJ, UND, KG o BLT" },
-                unidades_por_empaque: { type: Type.NUMBER },
-                cantidad_total: { type: Type.NUMBER },
-                distribucion_tiendas: {
-                  type: Type.ARRAY,
-                  items: {
-                    type: Type.OBJECT,
-                    properties: {
-                      codigo_tienda: { type: Type.STRING, nullable: true, description: "AK01..AK10 o FC01..FC07" },
-                      nombre_tienda: { type: Type.STRING },
-                      cantidad: { type: Type.NUMBER }
-                    },
-                    required: ["nombre_tienda", "cantidad"]
-                  }
-                },
-                costo_unitario: { type: Type.NUMBER },
-                porcentaje_descuento: { type: Type.NUMBER },
-                porcentaje_impuesto: { type: Type.NUMBER },
-                monto_total_renglon: { type: Type.NUMBER },
-                alerta_revision: { type: Type.BOOLEAN },
-                nota_revision: { type: Type.STRING, nullable: true }
-              },
-              required: [
-                "numero_renglon",
-                "codigo_principal",
-                "descripcion_producto",
-                "unidad_medida",
-                "unidades_por_empaque",
-                "cantidad_total",
-                "distribucion_tiendas",
-                "costo_unitario",
-                "monto_total_renglon",
-                "alerta_revision"
-              ]
-            }
-          },
-          resumen_totales: {
-            type: Type.OBJECT,
-            properties: {
-              total_renglones_extraidos: { type: Type.NUMBER },
-              total_unidades_pedidas: { type: Type.NUMBER },
-              subtotal_neto: { type: Type.NUMBER },
-              total_descuentos: { type: Type.NUMBER },
-              total_impuestos: { type: Type.NUMBER },
-              monto_total_orden: { type: Type.NUMBER },
-              cuadre_aritmetico_correcto: { type: Type.BOOLEAN }
-            },
-            required: [
-              "total_renglones_extraidos",
-              "total_unidades_pedidas",
-              "subtotal_neto",
-              "monto_total_orden",
-              "cuadre_aritmetico_correcto"
-            ]
-          }
-        },
-        required: ["cabecera_orden", "renglones", "resumen_totales"]
-      };
-
-      const candidateModels = [
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
-        "gemini-2.0-flash",
-        "gemini-2.5-pro"
-      ];
+      const candidateModels = [...ALKOSTO_OCR_MODEL_CASCADE];
       let lastModelError: any = null;
       let validatedOrder: any = null;
       let usedModel = "";
@@ -2478,67 +2390,37 @@ async function startServer() {
 
           for (const modelName of candidateModels) {
             try {
-              let rawResponseText = "";
-              try {
-                const response = await ai.models.generateContent({
-                  model: modelName,
-                  contents: [
-                    {
-                      role: "user",
-                      parts: [
-                        { inlineData: { data: cleanBase64, mimeType: actualMime } },
-                        { text: prompt }
-                      ]
-                    }
-                  ],
-                  config: {
-                    systemInstruction,
-                    responseMimeType: "application/json",
-                    responseSchema: ocResponseSchema,
-                    temperature: 0.0
+              const response = await ai.models.generateContent({
+                model: modelName,
+                contents: [
+                  {
+                    role: "user",
+                    parts: [
+                      { inlineData: { data: cleanBase64, mimeType: actualMime } },
+                      { text: prompt }
+                    ]
                   }
-                });
-                rawResponseText = response?.text || "";
-              } catch (schemaErr: any) {
-                const sMsg = String(schemaErr?.message || "");
-                const sStatus = schemaErr?.status || schemaErr?.statusCode || "N/A";
-                // Si el modelo rechaza responseSchema por complejidad OpenAPI, reintentar con responseMimeType: "application/json"
-                if (/schema|INVALID_ARGUMENT|400/i.test(sMsg) && !/API_KEY_INVALID|API key not valid/i.test(sMsg)) {
-                  console.warn(
-                    `[ALKOSTO OCR] Modelo ${modelName} rechazó responseSchema (status=${sStatus}), reintentando con JSON puro...`
-                  );
-                  const fallbackRes = await ai.models.generateContent({
-                    model: modelName,
-                    contents: [
-                      {
-                        role: "user",
-                        parts: [
-                          { inlineData: { data: cleanBase64, mimeType: actualMime } },
-                          { text: prompt }
-                        ]
-                      }
-                    ],
-                    config: {
-                      systemInstruction,
-                      responseMimeType: "application/json",
-                      temperature: 0.0
-                    }
-                  });
-                  rawResponseText = fallbackRes?.text || "";
-                } else {
-                  throw schemaErr;
+                ],
+                config: {
+                  systemInstruction,
+                  responseMimeType: "application/json",
+                  temperature: 0.1
                 }
-              }
+              });
+              const rawResponseText = response?.text || "";
 
               if (rawResponseText) {
-                const parsed = sanitizeAndParseOcJson(rawResponseText);
+                const parsed = parseSafeJson(rawResponseText);
+                if (!parsed) {
+                  throw new Error(`El modelo ${modelName} no devolvió un JSON interpretable.`);
+                }
                 const candidateValidated = validateAndNormalizeAlkostoOC(parsed, {
                   strictMath: false,
                   requireOrdenNro: false
                 });
                 const resumenCuadre = calcularResumenCuadreOC(candidateValidated);
 
-                const hasRowMismatch = candidateValidated.items.some((it: any) => {
+                const hasRowMismatch = (candidateValidated.items || []).some((it: any) => {
                   const storeVals = Object.entries(it.tiendas || {})
                     .filter(([tk]) => tk !== "AKOP" && tk !== "FCOP" && tk !== "CI")
                     .map(([, v]) => Number(v) || 0);

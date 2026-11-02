@@ -289,19 +289,30 @@ export function CodizulcaNotaPedido({
   const getInitialCadena = (): 'ALKOSTO' | 'FAMILIA_CENTER' => {
     if (initialSucursal?.cadena) return initialSucursal.cadena;
     if (!initialData) return 'ALKOSTO';
-    const rawItems = extractItemsList(initialData);
+    const rawItems = extractItemsList(initialData) || [];
     const tagsList: string[] = [];
     rawItems.forEach((it: any) => {
-      if (it.tiendas) Object.keys(it.tiendas).forEach(tk => tagsList.push(tk.toUpperCase()));
+      if (it?.tiendas && typeof it.tiendas === 'object') {
+        Object.keys(it.tiendas).forEach(tk => tagsList.push(tk.toUpperCase()));
+      }
+      const distArr = Array.isArray(it?.distribucion_tiendas)
+        ? it.distribucion_tiendas
+        : Array.isArray(it?.distribucionPorTienda)
+          ? it.distribucionPorTienda
+          : [];
+      distArr.forEach((d: any) => {
+        const uTag = String(d?.codigo_tienda ?? d?.codigoTienda ?? '').trim().toUpperCase();
+        if (uTag) tagsList.push(uTag);
+      });
     });
     const hasAk = tagsList.some(t => t.startsWith('AK'));
     const hasFc = tagsList.some(t => t.startsWith('FC'));
     if (hasAk) return 'ALKOSTO';
     if (hasFc) return 'FAMILIA_CENTER';
-    const esFamilia = (initialData as any).clienteCadena === 'FAMILIA_CENTER' || 
-                      /familia/i.test(initialData.proveedorNombre || '') || 
-                      /familia/i.test(initialData.sede || '') || 
-                      initialData.sede === 'FCOP';
+    const esFamilia = (initialData as any)?.clienteCadena === 'FAMILIA_CENTER' || 
+                      /familia/i.test(initialData?.proveedorNombre || '') || 
+                      /familia/i.test(initialData?.sede || '') || 
+                      initialData?.sede === 'FCOP';
     return esFamilia ? 'FAMILIA_CENTER' : 'ALKOSTO';
   };
 
@@ -413,12 +424,12 @@ export function CodizulcaNotaPedido({
       setObservaciones('');
       setPedidosFallidosLote([]);
 
-      const rawItems = extractItemsList(initialData);
+      const rawItems = extractItemsList(initialData) || [];
 
       // Extraer el 100% de las tiendas con cantidad > 0 en todas las páginas/cadenas del documento (AK y FC), excluyendo AKOP, FCOP y CI
       const allTagsWithQty = new Set<string>();
-      rawItems.forEach((it: any) => {
-        if (it.tiendas && typeof it.tiendas === 'object') {
+      (rawItems || []).forEach((it: any) => {
+        if (it?.tiendas && typeof it.tiendas === 'object') {
           Object.entries(it.tiendas).forEach(([tk, val]) => {
             const uTag = tk.trim().toUpperCase();
             if (uTag !== 'CI' && uTag !== 'AKOP' && uTag !== 'FCOP' && parseNumeroSeguro(val) > 0) {
@@ -426,12 +437,12 @@ export function CodizulcaNotaPedido({
             }
           });
         }
-        const distArr = Array.isArray(it.distribucion_tiendas)
+        const distArr = Array.isArray(it?.distribucion_tiendas)
           ? it.distribucion_tiendas
-          : Array.isArray(it.distribucionPorTienda)
+          : Array.isArray(it?.distribucionPorTienda)
             ? it.distribucionPorTienda
             : [];
-        distArr.forEach((d: any) => {
+        (distArr || []).forEach((d: any) => {
           const uTag = String(d?.codigo_tienda ?? d?.codigoTienda ?? '').trim().toUpperCase();
           if (uTag && uTag !== 'CI' && uTag !== 'AKOP' && uTag !== 'FCOP' && parseNumeroSeguro(d?.cantidad) > 0) {
             allTagsWithQty.add(uTag);
@@ -440,8 +451,8 @@ export function CodizulcaNotaPedido({
       });
       const tagsList = Array.from(allTagsWithQty);
       const orderedAllTags = [
-        ...CADENAS_ABREVIATURAS.ALKOSTO,
-        ...CADENAS_ABREVIATURAS.FAMILIA_CENTER
+        ...(CADENAS_ABREVIATURAS?.ALKOSTO || []),
+        ...(CADENAS_ABREVIATURAS?.FAMILIA_CENTER || [])
       ].filter(t => allTagsWithQty.has(t));
       setTodasTiendasOC(orderedAllTags);
 
@@ -707,8 +718,8 @@ export function CodizulcaNotaPedido({
   };
 
   // Cálculo del total general
-  const totalGeneral = filas.reduce((acc, f) => acc + (Number(f.subtotal) || 0), 0);
-  const totalBultosCajas = filas.reduce((acc, f) => acc + (Number(f.cantSolicitada) || 0), 0);
+  const totalGeneral = (filas || []).reduce((acc, f) => acc + (Number(f?.subtotal) || 0), 0);
+  const totalBultosCajas = (filas || []).reduce((acc, f) => acc + (Number(f?.cantSolicitada) || 0), 0);
 
   // Imprimir formato oficial
   const handleImprimir = () => {
@@ -1271,7 +1282,7 @@ export function CodizulcaNotaPedido({
 
               {/* CUERPO DE LA TABLA (FILAS 1 A 15) */}
               <tbody className="divide-y divide-slate-900">
-                {filas.map((f, idx) => (
+                {(filas || []).map((f, idx) => (
                   <tr 
                     key={f.renglon} 
                     title={f.alertaRevision ? (f.notaRevision || 'Alerta de revisión aritmética OCR en este renglón') : undefined}

@@ -103,38 +103,53 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
 
   // Separación clara: Pendientes por enviar vs Ya transmitidos a Sala de Espera de Pedidos Manuales
   const pedidosPendientes = useMemo(() => {
-    return orders.filter(o => o.estado === 'BORRADOR' || (!o.transmitido_a_pedidos_manuales && o.estado !== 'ENVIADO'));
+    return (orders || []).filter(o => o?.estado === 'BORRADOR' || (!o?.transmitido_a_pedidos_manuales && o?.estado !== 'ENVIADO'));
   }, [orders]);
 
   const pedidosTransmitidos = useMemo(() => {
-    return orders.filter(o => o.estado === 'ENVIADO' || o.transmitido_a_pedidos_manuales);
+    return (orders || []).filter(o => o?.estado === 'ENVIADO' || o?.transmitido_a_pedidos_manuales);
   }, [orders]);
 
   // Métricas generales de Alkosto
   const kpisAlkosto = useMemo(() => {
-    const totalPedidos = orders.length;
-    const kilosTotales = orders.reduce((acc, o) => acc + (o.totalKilos || 0), 0);
-    const montoTotalUSD = orders.reduce((acc, o) => acc + (o.totalUSD || 0), 0);
+    const safeOrders = orders || [];
+    const totalPedidos = safeOrders.length;
+    const kilosTotales = safeOrders.reduce((acc, o) => acc + (o?.totalKilos || 0), 0);
+    const montoTotalUSD = safeOrders.reduce((acc, o) => acc + (o?.totalUSD || 0), 0);
     return {
       totalPedidos,
       kilosTotales: kilosTotales.toLocaleString('es-VE', { maximumFractionDigits: 1 }),
       montoTotalUSD: montoTotalUSD.toLocaleString('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
-      pedidosPendientes: pedidosPendientes.length,
-      pedidosTransmitidos: pedidosTransmitidos.length
+      pedidosPendientes: (pedidosPendientes || []).length,
+      pedidosTransmitidos: (pedidosTransmitidos || []).length
     };
   }, [orders, pedidosPendientes, pedidosTransmitidos]);
+
+  const inferirMimeTypeSeguro = (file: File): string => {
+    const rawType = String(file?.type || '').trim().toLowerCase();
+    if (rawType && rawType !== 'application/octet-stream') {
+      return rawType;
+    }
+    const lowerName = String(file?.name || '').trim().toLowerCase();
+    if (lowerName.endsWith('.pdf')) return 'application/pdf';
+    if (lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg')) return 'image/jpeg';
+    if (lowerName.endsWith('.png')) return 'image/png';
+    if (lowerName.endsWith('.webp')) return 'image/webp';
+    return detectAlkostoFileMimeType(null, file?.type, file?.name);
+  };
 
   // Optimización y compresión client-side de imágenes (JPG, PNG, WEBP) y PDFs para OCR rápido, nítido y liviano
   const optimizarImagenParaOCR = (file: File): Promise<{ base64: string; mimeType: string }> => {
     return new Promise((resolve, reject) => {
-      const initialMime = detectAlkostoFileMimeType(null, file.type, file.name);
-      const isPdf = initialMime === 'application/pdf';
+      const initialMime = inferirMimeTypeSeguro(file);
+      const isPdf = initialMime === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
 
       if (isPdf) {
         const reader = new FileReader();
         reader.onload = (e) => {
-          const res = String(e.target?.result || '');
-          const cleanB64 = sanitizeBase64Payload(res);
+          const readerResult = String(e.target?.result || '');
+          const base64Data = (readerResult.includes(',') ? readerResult.split(',')[1] : readerResult).replace(/\s+/g, '');
+          const cleanB64 = sanitizeBase64Payload(base64Data);
           const detectedMime = detectAlkostoFileMimeType(cleanB64, 'application/pdf', file.name);
           resolve({ base64: cleanB64, mimeType: detectedMime });
         };
@@ -145,12 +160,13 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
 
       // Si es una imagen liviana (< 2.5 MB) en formato nativo soportado (JPG, PNG, WEBP),
       // enviarla sin recodificar para preservar nitidez absoluta en dígitos pequeños y códigos EAN/SKU
-      const isDirectFormat = ['image/jpeg', 'image/png', 'image/webp'].includes(initialMime) && !/heic|bmp|tiff/i.test(file.type);
+      const isDirectFormat = ['image/jpeg', 'image/png', 'image/webp'].includes(initialMime) && !/heic|bmp|tiff/i.test(file.type || '');
       if (file.size < 2.5 * 1024 * 1024 && isDirectFormat) {
         const reader = new FileReader();
         reader.onload = (e) => {
-          const res = String(e.target?.result || '');
-          const cleanB64 = sanitizeBase64Payload(res);
+          const readerResult = String(e.target?.result || '');
+          const base64Data = (readerResult.includes(',') ? readerResult.split(',')[1] : readerResult).replace(/\s+/g, '');
+          const cleanB64 = sanitizeBase64Payload(base64Data);
           const detectedMime = detectAlkostoFileMimeType(cleanB64, initialMime, file.name);
           resolve({ base64: cleanB64, mimeType: detectedMime });
         };
@@ -181,7 +197,8 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
           canvas.height = height;
           const ctx = canvas.getContext('2d');
           if (!ctx) {
-            const cleanFallback = sanitizeBase64Payload(rawDataUrl);
+            const base64Fallback = (rawDataUrl.includes(',') ? rawDataUrl.split(',')[1] : rawDataUrl).replace(/\s+/g, '');
+            const cleanFallback = sanitizeBase64Payload(base64Fallback);
             const fallbackMime = detectAlkostoFileMimeType(cleanFallback, initialMime, file.name);
             return resolve({ base64: cleanFallback, mimeType: fallbackMime });
           }
@@ -191,11 +208,13 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
           ctx.fillRect(0, 0, width, height);
           ctx.drawImage(img, 0, 0, width, height);
           const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.88);
-          const cleanCompressed = sanitizeBase64Payload(compressedDataUrl);
+          const base64Compressed = (compressedDataUrl.includes(',') ? compressedDataUrl.split(',')[1] : compressedDataUrl).replace(/\s+/g, '');
+          const cleanCompressed = sanitizeBase64Payload(base64Compressed);
           resolve({ base64: cleanCompressed, mimeType: 'image/jpeg' });
         };
         img.onerror = () => {
-          const cleanFallback = sanitizeBase64Payload(rawDataUrl);
+          const base64Fallback = (rawDataUrl.includes(',') ? rawDataUrl.split(',')[1] : rawDataUrl).replace(/\s+/g, '');
+          const cleanFallback = sanitizeBase64Payload(base64Fallback);
           const fallbackMime = detectAlkostoFileMimeType(cleanFallback, initialMime, file.name);
           resolve({ base64: cleanFallback, mimeType: fallbackMime });
         };
@@ -210,45 +229,56 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
   const procesarArchivoOCR = async (file: File) => {
     if (!file) return;
 
-    const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
-    const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|heic|tiff?)$/i.test(file.name);
+    const inferredMime = inferirMimeTypeSeguro(file);
+    const isPdf = inferredMime === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+    const isImage = inferredMime.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|heic|tiff?)$/i.test(file.name);
 
     if (!isPdf && !isImage && file.type && !file.type.includes('octet-stream')) {
-      setOcrError('Formato no soportado. Por favor sube una imagen (JPG, PNG, WEBP) o un archivo PDF de la Orden de Compra.');
+      const msg = 'Error procesando orden de compra: Formato no soportado. Por favor sube una imagen (JPG, PNG, WEBP) o un archivo PDF.';
+      setOcrError(msg);
+      setAlertaError(msg);
       return;
     }
 
     if (file.size > 25 * 1024 * 1024) {
-      setOcrError('El archivo supera el límite máximo permitido (25 MB). Por favor sube un PDF o imagen más liviana.');
+      const msg = 'Error procesando orden de compra: El archivo supera el límite máximo permitido (25 MB).';
+      setOcrError(msg);
+      setAlertaError(msg);
       return;
     }
 
     setOcrLoading(true);
     setOcrError(null);
+    setAlertaError(null);
 
     try {
       const { base64, mimeType } = await optimizarImagenParaOCR(file);
-      const data = await parseAlkostoOrderImage(base64, mimeType, file.name);
+      const data = await parseAlkostoOrderImage(base64, mimeType || inferredMime, file.name);
       setParsedOCData(data);
       setOcLoadKey(k => k + 1);
       
-      const ocIdent = data.ordenNro ? `N° ${data.ordenNro}` : '';
-      const totalRenglones = data.items?.length || 0;
-      setAlertaExito(`¡Orden de Compra ${data.clienteCadena === 'FAMILIA_CENTER' ? 'Familia Center' : 'Alkosto'} ${ocIdent} (${totalRenglones} renglones) cargada y montada en el formato con éxito!`);
+      const ocIdent = data?.ordenNro ? `N° ${data.ordenNro}` : '';
+      const totalRenglones = (data?.items || []).length;
+      setAlertaExito(`¡Orden de Compra ${data?.clienteCadena === 'FAMILIA_CENTER' ? 'Familia Center' : 'Alkosto'} ${ocIdent} (${totalRenglones} renglones) cargada y montada en el formato con éxito!`);
       setTimeout(() => setAlertaExito(null), 6000);
       
       // Cambiar automáticamente a la vista del Formato Codizulca
       setActiveView('formato');
-    } catch (err: any) {
+    } catch (error: any) {
+      const rawReason = error?.message || 'Error desconocido';
+      const diagnosticMessage = rawReason.startsWith('Error procesando orden de compra:')
+        ? rawReason
+        : `Error procesando orden de compra: ${rawReason}`;
       console.error('[AlkostoTab] Error procesando Orden de Compra:', {
         fileName: file.name,
         fileType: file.type,
         fileSizeKB: Math.round(file.size / 1024),
-        errorMessage: err?.message,
-        statusCode: err?.statusCode,
-        details: err?.details
+        errorMessage: error?.message,
+        statusCode: error?.statusCode,
+        details: error?.details
       });
-      setOcrError(err.message || 'No se pudo procesar la Orden de Compra. Verifica que el archivo sea legible e intenta nuevamente.');
+      setOcrError(diagnosticMessage);
+      setAlertaError(diagnosticMessage);
     } finally {
       setOcrLoading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -266,7 +296,7 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
 👤 *Vendedora:* ${pedido.vendedora} (Cuentas Clave 2)
 
 📦 *DETALLE DE PRODUCTOS:*
-${pedido.items.map((it, idx) => `${idx + 1}. ${it.producto}\n   ▸ Cantidad: ${it.cantidadCajas} cjs/bultos (${it.totalKilos} kg)\n   ▸ Subtotal: $${it.subtotalUSD.toFixed(2)}`).join('\n\n')}
+${(pedido?.items || []).map((it, idx) => `${idx + 1}. ${it?.producto || ''}\n   ▸ Cantidad: ${it?.cantidadCajas || 0} cjs/bultos (${it?.totalKilos || 0} kg)\n   ▸ Subtotal: $${(it?.subtotalUSD || 0).toFixed(2)}`).join('\n\n')}
 
 ---------------------------
 📊 *TOTAL BULTOS:* ${pedido.totalBultos}
@@ -716,7 +746,7 @@ ${pedido.observaciones ? `💬 *Observaciones:* ${pedido.observaciones}` : ''}
                       <div className="flex items-center gap-1">
                         <strong className="text-red-400 font-mono text-[10px]">Alkosto:</strong>
                         <div className="flex flex-wrap gap-1 font-mono text-[10px] text-neutral-300">
-                          {CADENAS_ABREVIATURAS.ALKOSTO.map(t => (
+                          {(CADENAS_ABREVIATURAS?.ALKOSTO || []).map(t => (
                             <span key={t} className="bg-neutral-950 border border-neutral-800 px-1.5 py-0.2 rounded text-red-300">
                               {t}
                             </span>
@@ -727,7 +757,7 @@ ${pedido.observaciones ? `💬 *Observaciones:* ${pedido.observaciones}` : ''}
                       <div className="flex items-center gap-1">
                         <strong className="text-amber-400 font-mono text-[10px]">Familia Center:</strong>
                         <div className="flex flex-wrap gap-1 font-mono text-[10px] text-neutral-300">
-                          {CADENAS_ABREVIATURAS.FAMILIA_CENTER.map(t => (
+                          {(CADENAS_ABREVIATURAS?.FAMILIA_CENTER || []).map(t => (
                             <span key={t} className="bg-neutral-950 border border-neutral-800 px-1.5 py-0.2 rounded text-amber-300">
                               {t}
                             </span>
@@ -956,20 +986,20 @@ ${pedido.observaciones ? `💬 *Observaciones:* ${pedido.observaciones}` : ''}
                       {/* MUESTRA DE ARTÍCULOS */}
                       <div className="mt-3">
                         <span className="text-[9px] uppercase font-bold text-neutral-400 block mb-1">
-                          Productos y SKU ({ped.items.length}):
+                          Productos y SKU ({(ped?.items || []).length}):
                         </span>
                         <div className="space-y-1">
-                          {ped.items.slice(0, 3).map((it, idx) => (
+                          {(ped?.items || []).slice(0, 3).map((it, idx) => (
                             <div key={idx} className="text-[11px] text-neutral-300 flex items-center justify-between">
                               <span className="truncate pr-2">
-                                • {it.sku && <strong className="text-amber-400 font-mono text-[10px] mr-1">SKU {it.sku}:</strong>}{it.producto}
+                                • {it?.sku && <strong className="text-amber-400 font-mono text-[10px] mr-1">SKU {it.sku}:</strong>}{it?.producto}
                               </span>
-                              <span className="font-mono text-neutral-400 shrink-0">{it.cantidadCajas} cjs</span>
+                              <span className="font-mono text-neutral-400 shrink-0">{it?.cantidadCajas} cjs</span>
                             </div>
                           ))}
-                          {ped.items.length > 3 && (
+                          {(ped?.items || []).length > 3 && (
                             <span className="text-[10px] text-red-400 font-bold block pt-0.5">
-                              + {ped.items.length - 3} productos más...
+                              + {(ped?.items || []).length - 3} productos más...
                             </span>
                           )}
                         </div>
@@ -1236,14 +1266,14 @@ ${pedido.observaciones ? `💬 *Observaciones:* ${pedido.observaciones}` : ''}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-neutral-800">
-                    {pedidoDetalle.items.map((it, idx) => (
+                    {(pedidoDetalle?.items || []).map((it, idx) => (
                       <tr key={idx} className="hover:bg-neutral-900/40">
-                        <td className="p-2.5 font-mono font-bold text-amber-400">{it.sku || '-'}</td>
-                        <td className="p-2.5 font-bold text-white">{it.producto}</td>
-                        <td className="p-2.5 text-center font-mono">{it.cantidadCajas}</td>
-                        <td className="p-2.5 text-center font-mono text-neutral-300">{it.totalKilos} kg</td>
-                        <td className="p-2.5 text-right font-mono">${it.precioUnitarioUSD.toFixed(2)}</td>
-                        <td className="p-2.5 text-right font-mono font-bold text-emerald-400">${it.subtotalUSD.toFixed(2)}</td>
+                        <td className="p-2.5 font-mono font-bold text-amber-400">{it?.sku || '-'}</td>
+                        <td className="p-2.5 font-bold text-white">{it?.producto}</td>
+                        <td className="p-2.5 text-center font-mono">{it?.cantidadCajas}</td>
+                        <td className="p-2.5 text-center font-mono text-neutral-300">{it?.totalKilos} kg</td>
+                        <td className="p-2.5 text-right font-mono">${(it?.precioUnitarioUSD || 0).toFixed(2)}</td>
+                        <td className="p-2.5 text-right font-mono font-bold text-emerald-400">${(it?.subtotalUSD || 0).toFixed(2)}</td>
                       </tr>
                     ))}
                   </tbody>

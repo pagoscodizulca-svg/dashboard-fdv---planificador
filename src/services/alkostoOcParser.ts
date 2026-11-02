@@ -65,18 +65,48 @@ import {
   normalizarCodigoProducto,
   getSucursalByTag,
   SUCURSALES_ALKOSTO,
-  SUCURSALES_FAMILIA_CENTER
+  SUCURSALES_FAMILIA_CENTER,
+  CADENAS_ABREVIATURAS
 } from './alkostoService';
 
 /**
- * PROMPT MAESTRO DEL MOTOR DE EXTRACCIÓN DE ÓRDENES DE COMPRA ALKOSTO -> CODIZULCA
- * (OCR + Comprensión Documental con validación aritmética y normalización estricta)
+ * Lista oficial de modelos Gemini en cascada automática por orden de precisión documental:
+ * 1º `gemini-2.5-pro` (máxima exactitud para tablas densas, códigos y matrices de tiendas AK01-AK10)
+ * 2º `gemini-2.5-flash` (rápido y multimodal de alta precisión para PDFs e imágenes)
+ * 3º `gemini-2.0-flash` (respaldo de alta compatibilidad)
  */
-export const ALKOSTO_OC_EXTRACTION_SYSTEM_PROMPT = `ROL Y OBJETIVO:
+export const ALKOSTO_OCR_MODEL_CASCADE = [
+  'gemini-2.5-pro',
+  'gemini-2.5-flash',
+  'gemini-2.0-flash'
+] as const;
+
+/**
+ * Construye dinámicamente el System Prompt del motor OCR inyectando las abreviaturas sincronizadas
+ * en base de datos (`AK01` a `AK10` para Alkosto y `FC01` a `FC07` para Familia Center).
+ */
+export function buildAlkostoOcSystemPrompt(
+  abrevAlkosto: string[] = CADENAS_ABREVIATURAS?.ALKOSTO || ['AK01', 'AK02', 'AK03', 'AK04', 'AK05', 'AK06', 'AK07', 'AK08', 'AK09', 'AK10'],
+  abrevFamilia: string[] = CADENAS_ABREVIATURAS?.FAMILIA_CENTER || ['FC01', 'FC02', 'FC03', 'FC04', 'FC05', 'FC06', 'FC07']
+): string {
+  const akTagsStr = (abrevAlkosto || []).join(', ');
+  const fcTagsStr = (abrevFamilia || []).join(', ');
+  const sucursalesAkDetalle = (SUCURSALES_ALKOSTO || [])
+    .map(s => `${s.tag || s.codigo}: "${s.nombre}" (ID ${s.codigo})`)
+    .join(' | ');
+  const sucursalesFcDetalle = (SUCURSALES_FAMILIA_CENTER || [])
+    .map(s => `${s.tag || s.codigo}: "${s.nombre}" (ID ${s.codigo})`)
+    .join(' | ');
+
+  return `ROL Y OBJETIVO:
 Eres un motor experto en extracción de datos contables y comerciales (OCR + Comprensión Documental) especializado en procesar Órdenes de Compra emitidas por ALKOSTO (y FAMILIA CENTER) para ser integradas automáticamente en la Nota de Pedido de Codizulca.
 
 TAREA PRINCIPAL:
 Analiza minuciosamente la imagen, captura o documento PDF adjunto correspondiente a una Orden de Compra de ALKOSTO. Extrae la totalidad de los datos de cabecera, todos los renglones de productos, códigos, el desglose de cantidades por tienda/sucursal y los montos financieros, sin omitir ni resumir ningún ítem.
+
+ABREVIATURAS DE SUCURSALES SINCRONIZADAS EN BASE DE DATOS (OBLIGATORIAS):
+- Alkosto (${akTagsStr}): ${sucursalesAkDetalle}
+- Familia Center (${fcTagsStr}): ${sucursalesFcDetalle}
 
 REGLAS ESTRICTAS DE EXTRACCIÓN Y NORMALIZACIÓN:
 1. INTEGRIDAD DE RENGLONES: Extrae absolutamente TODOS los renglones de la orden (si el documento tiene múltiples páginas o tablas extensas, procésalas de principio a fin). Nunca utilices comentarios como "// resto de los ítems".
@@ -97,7 +127,7 @@ REGLAS ESTRICTAS DE EXTRACCIÓN Y NORMALIZACIÓN:
      * 7590377000510 -> codigo_principal: "7590377000510", codigo_ean: "7590377000510", unidad_medida: "CJ", descripcion_producto: "LECHE EN POLVO COMPLETA VENCAMPO 900GR"
    - Elimina siempre el sufijo de PVP sugerido tras la barra en la descripción (ej. quitar "/ 2.40", "/ 6.88").
 3. CANTIDADES POR TIENDA:
-   - Si la orden de compra desglosa las unidades pedidas por tienda/sucursal (columnas AK01..AK10 para Alkosto, FC01..FC07 para Familia Center, o sub-filas), extrae cada tienda con cantidad > 0 y su cantidad exacta dentro del arreglo \`distribucion_tiendas\`.
+   - Si la orden de compra desglosa las unidades pedidas por tienda/sucursal (columnas ${akTagsStr} para Alkosto, ${fcTagsStr} para Familia Center, o sub-filas), extrae cada tienda con cantidad > 0 y su cantidad exacta dentro del arreglo \`distribucion_tiendas\` usando exactamente los códigos oficiales (${akTagsStr} o ${fcTagsStr}) en \`codigo_tienda\`.
    - Calcula o extrae la \`cantidad_total\` del renglón. Verifica que la suma de las cantidades por tienda coincida con la \`cantidad_total\`. Si una celda tiene decimales pegados (ej. "200" cuando la suma debe ser "3.00" y otra tienda tiene "1.00"), corrígela a "2.00".
    - Si la orden es para una única tienda general indicada en la cabecera, asigna esa tienda en \`distribucion_tiendas\` con el total de unidades del renglón.
 4. FORMATO NUMÉRICO ESTÁNDAR (CRÍTICO):
@@ -131,7 +161,7 @@ ESQUEMA JSON DE SALIDA REQUERIDO:
       "cantidad_total": 0.0,
       "distribucion_tiendas": [
         {
-          "codigo_tienda": "string | null",
+          "codigo_tienda": "string | null (ej. AK01, AK02... AK10, FC01... FC07)",
           "nombre_tienda": "string",
           "cantidad": 0.0
         }
@@ -154,26 +184,27 @@ ESQUEMA JSON DE SALIDA REQUERIDO:
     "cuadre_aritmetico_correcto": true
   }
 }`;
+}
+
+export const ALKOSTO_OC_EXTRACTION_SYSTEM_PROMPT = buildAlkostoOcSystemPrompt();
 
 /**
- * Limpia cualquier prefijo `data:<mime>;base64,` y elimina espacios/saltos de línea
- * de una cadena Base64 para evitar rechazos del SDK de IA o corrupción del Buffer.
+ * Extrae el Base64 limpio desde el resultado de un `FileReader` (`readerResult.includes(',') ? readerResult.split(',')[1] : readerResult`)
+ * eliminando cualquier prefijo `data:<mime>;base64,` y espacios en blanco.
  */
 export function sanitizeBase64Payload(rawBase64: string): string {
   if (!rawBase64 || typeof rawBase64 !== 'string') return '';
-  const trimmed = rawBase64.trim();
-  const withoutPrefix = trimmed.includes(',')
-    ? trimmed.replace(/^data:[^;]+;base64,/i, '')
-    : trimmed;
-  return withoutPrefix.replace(/\s+/g, '');
+  const readerResult = rawBase64.trim();
+  const base64Data = readerResult.includes(',')
+    ? readerResult.split(',')[1] || ''
+    : readerResult.replace(/^data:[^;]+;base64,/i, '');
+  return base64Data.replace(/\s+/g, '');
 }
 
 /**
- * Detecta dinámicamente el `mimeType` real (`image/jpeg`, `image/png`, `image/webp`, `application/pdf`)
- * evaluando en orden de prioridad:
- * 1. Magic bytes del archivo (Buffer / Uint8Array / primeros bytes del Base64).
- * 2. MIME declarado por el navegador (si es uno de los formatos soportados).
- * 3. Extensión del nombre de archivo (`.pdf`, `.png`, `.webp`, `.jpg`, `.jpeg`).
+ * Determina el `mimeType` de forma segura para archivos de Orden de Compra (`application/pdf`, `image/jpeg`, `image/png`, `image/webp`).
+ * Si `file.type` (`declaredMimeType`) está vacío o es genérico, lo infiere por la extensión (`.pdf`, `.jpg/.jpeg`, `.png`, `.webp`)
+ * y por los magic bytes del contenido Base64/Buffer.
  */
 export function detectAlkostoFileMimeType(
   bytesOrBase64?: Uint8Array | Buffer | string | null,
@@ -234,34 +265,76 @@ export function detectAlkostoFileMimeType(
 }
 
 /**
- * Sanitiza la salida de texto del modelo de IA eliminando bloques de código Markdown
- * (` ```json ... ``` `), comentarios tipo JS (`// ...`) o texto conversacional residual antes de ejecutar `JSON.parse()`.
+ * Parsea un texto JSON de respuesta de IA de forma blindada sin lanzar excepciones no controladas:
+ * a) Limpia bloques markdown (` ```json ` y ` ``` `).
+ * b) Extrae el contenido entre la primera llave `{` (o corchete `[`) y la última `}` (o `]`).
+ * c) Parsea el JSON limpiando comentarios o comas residuales y devuelve `null` si no es válido.
  */
-export function sanitizeAndParseOcJson(rawText: string): any {
-  if (!rawText || typeof rawText !== 'string') {
-    throw new Error('La respuesta del modelo de IA está vacía.');
-  }
+export function parseSafeJson(rawText: string): any {
+  if (!rawText || typeof rawText !== 'string') return null;
+
   const stripped = rawText
     .replace(/```json\s*/gi, '')
     .replace(/```\s*/g, '')
     .trim();
 
+  if (!stripped) return null;
+
   try {
     return JSON.parse(stripped);
   } catch {
+    // Extraer entre la primera llave '{' (o '[') y la última '}' (o ']')
     const firstBrace = stripped.indexOf('{');
     const lastBrace = stripped.lastIndexOf('}');
-    if (firstBrace !== -1 && lastBrace > firstBrace) {
-      const candidate = stripped
-        .slice(firstBrace, lastBrace + 1)
-        .replace(/^\s*\/\/.*$/gm, '')
-        .replace(/,\s*\/\/[^\r\n]*/g, ',')
-        .replace(/([0-9"truefalsenull\]}])\s*\/\/[^\r\n]*/g, '$1')
-        .replace(/,\s*([}\]])/g, '$1');
-      return JSON.parse(candidate);
+    const firstBracket = stripped.indexOf('[');
+    const lastBracket = stripped.lastIndexOf(']');
+
+    let startIdx = -1;
+    let endIdx = -1;
+
+    if (firstBrace !== -1 && lastBrace > firstBrace && (firstBracket === -1 || firstBrace < firstBracket)) {
+      startIdx = firstBrace;
+      endIdx = lastBrace;
+    } else if (firstBracket !== -1 && lastBracket > firstBracket) {
+      startIdx = firstBracket;
+      endIdx = lastBracket;
+    } else if (firstBrace !== -1 && lastBrace > firstBrace) {
+      startIdx = firstBrace;
+      endIdx = lastBrace;
     }
+
+    if (startIdx === -1 || endIdx <= startIdx) {
+      return null;
+    }
+
+    const candidate = stripped
+      .slice(startIdx, endIdx + 1)
+      .replace(/^\s*\/\/.*$/gm, '')
+      .replace(/,\s*\/\/[^\r\n]*/g, ',')
+      .replace(/([0-9"truefalsenull\]}])\s*\/\/[^\r\n]*/g, '$1')
+      .replace(/,\s*([}\]])/g, '$1');
+
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * Sanitiza la salida de texto del modelo de IA usando `parseSafeJson` y lanza error descriptivo
+ * únicamente si el texto no contiene ningún JSON interpretable.
+ */
+export function sanitizeAndParseOcJson(rawText: string): any {
+  if (!rawText || typeof rawText !== 'string') {
+    throw new Error('La respuesta del modelo de IA está vacía.');
+  }
+  const parsed = parseSafeJson(rawText);
+  if (parsed === null || parsed === undefined) {
     throw new Error('No se encontró un bloque JSON válido en la respuesta del modelo.');
   }
+  return parsed;
 }
 
 /**
@@ -1631,14 +1704,19 @@ export function validateAndNormalizeAlkostoOC(
     if (it.tiendas && typeof it.tiendas === 'object') {
       for (const [tag, val] of Object.entries(it.tiendas)) {
         const uTag = tag.trim().toUpperCase();
+        if (val === null || val === undefined || val === '' || val === '-') {
+          continue;
+        }
         const numVal = parseNumeroEstricto(val, NaN);
         if (Number.isNaN(numVal) || numVal < 0) {
-          issues.push({
-            field: `items[${idx}].tiendas.${uTag}`,
-            renglon: renglonNum,
-            message: `Valor inválido en tienda ${uTag} del renglón ${renglonNum}: "${val}"`,
-            severity: 'ERROR'
-          });
+          if (strictMath) {
+            issues.push({
+              field: `items[${idx}].tiendas.${uTag}`,
+              renglon: renglonNum,
+              message: `Valor inválido en tienda ${uTag} del renglón ${renglonNum}: "${val}"`,
+              severity: 'ERROR'
+            });
+          }
           continue;
         }
         if (numVal > 0 && ALL_VALID_STORE_TAGS.has(uTag) && uTag !== 'CI' && uTag !== 'AKOP' && uTag !== 'FCOP') {
@@ -1931,12 +2009,22 @@ export function validateAndNormalizeAlkostoOC(
     }
 
     if (totalCant <= 0 && sumAllTiendas <= 0) {
-      issues.push({
-        field: `items[${idx}].totalCantidad`,
-        renglon: renglonNum,
-        message: `El renglón ${renglonNum} (${finalCodigo}) tiene cantidad solicitada 0.`,
-        severity: 'ERROR'
-      });
+      if (strictMath || rawItems.length <= 1) {
+        issues.push({
+          field: `items[${idx}].totalCantidad`,
+          renglon: renglonNum,
+          message: `El renglón ${renglonNum} (${finalCodigo}) tiene cantidad solicitada 0.`,
+          severity: 'ERROR'
+        });
+      } else {
+        issues.push({
+          field: `items[${idx}].totalCantidad`,
+          renglon: renglonNum,
+          message: `Renglón ${renglonNum} (${finalCodigo}) con cantidad 0 omitido.`,
+          severity: 'WARNING'
+        });
+        return;
+      }
     }
 
     const distribucionPorTienda = construirDistribucionPorTienda(cleanTiendas);
@@ -1978,6 +2066,14 @@ export function validateAndNormalizeAlkostoOC(
       notaRevision: notaRevisionFinal
     });
   });
+
+  if (rawNormalizedItems.length === 0 && issues.filter(i => i.severity === 'ERROR').length === 0) {
+    issues.push({
+      field: 'items',
+      message: 'Todos los renglones extraídos tienen cantidad solicitada 0.',
+      severity: 'ERROR'
+    });
+  }
 
   const errorIssues = issues.filter(i => i.severity === 'ERROR');
   if (errorIssues.length > 0) {
