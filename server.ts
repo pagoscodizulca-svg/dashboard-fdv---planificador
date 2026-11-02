@@ -2660,27 +2660,39 @@ REGLAS ESTRICTAS OBLIGATORIAS:
       const auditedReceiptSchema = {
         type: Type.OBJECT,
         properties: {
-          legible: { type: Type.BOOLEAN },
-          confianza: { type: Type.NUMBER },
           metodo_pago: { type: Type.STRING },
           banco: { type: Type.STRING, nullable: true },
+          monto_bs: { type: Type.NUMBER, nullable: true },
+          referencia: { type: Type.STRING, nullable: true },
+          codigo_autorizacion: { type: Type.STRING, nullable: true },
+          fecha_pago: { type: Type.STRING, nullable: true },
+          confianza_lectura: { type: Type.STRING },
+          observacion_auditoria: { type: Type.STRING },
+          legible: { type: Type.BOOLEAN },
+          confianza: { type: Type.NUMBER },
           banco_origen: { type: Type.STRING, nullable: true },
           banco_destino: { type: Type.STRING, nullable: true },
-          monto_bs: { type: Type.NUMBER, nullable: true },
           monto_texto_original: { type: Type.STRING, nullable: true },
           nro_referencia: { type: Type.STRING, nullable: true },
-          fecha_pago: { type: Type.STRING, nullable: true },
           fecha_iso: { type: Type.STRING, nullable: true },
           titular_remitente: { type: Type.STRING, nullable: true },
           rif_ci_titular: { type: Type.STRING, nullable: true },
           beneficiario_detectado: { type: Type.STRING, nullable: true },
           observacion_ia: { type: Type.STRING }
         },
-        required: ["legible", "metodo_pago"]
+        required: [
+          "metodo_pago",
+          "banco",
+          "monto_bs",
+          "referencia",
+          "fecha_pago",
+          "confianza_lectura",
+          "observacion_auditoria"
+        ]
       };
 
       const userInstruction =
-        "Analiza este comprobante de pago venezolano (imagen o PDF) y extrae los datos exactos cumpliendo estrictamente las 7 reglas críticas de auditoría bancaria. Responde únicamente con el objeto JSON válido del esquema obligatorio.";
+        "Analiza este comprobante de pago venezolano (imagen o PDF) y extrae con precisión quirúrgica los datos exactos cumpliendo estrictamente las 6 reglas de extracción visual (anti-alucinación). Responde únicamente con el objeto JSON válido del formato de salida.";
 
       let aiResult: AuditedReceiptResult | null = null;
       let lastAiError: any = null;
@@ -2834,48 +2846,59 @@ REGLAS ESTRICTAS OBLIGATORIAS:
           rawAiErrMsg
         );
 
+      const fallbackMessage = isQuotaOrKeyIssue
+        ? "No se pudo completar la lectura automática en este soporte. Por favor ingresa o verifica los datos manualmente."
+        : "Comprobante ilegible o con baja resolución. Toma la captura nítida sin recortes o ingresa los datos manualmente.";
+
       const unreadablePayload: AuditedReceiptResult = {
         legible: false,
         confianza: 0.0,
+        confianza_lectura: "baja",
         metodo_pago: "Pago Móvil",
         banco: null,
         banco_origen: null,
         banco_destino: null,
         monto_bs: null,
         monto_texto_original: null,
+        referencia: null,
         nro_referencia: null,
+        codigo_autorizacion: null,
         fecha_pago: null,
         fecha_iso: null,
         titular_remitente: null,
         rif_ci_titular: null,
         beneficiario_detectado: null,
-        observacion_ia: isQuotaOrKeyIssue
-          ? "No se pudo completar la lectura automática en este soporte. Por favor ingresa o verifica los datos manualmente."
-          : "Comprobante ilegible o con baja resolución. Toma la captura nítida sin recortes o ingresa los datos manualmente."
+        observacion_auditoria: fallbackMessage,
+        observacion_ia: fallbackMessage
       };
 
       return res.status(isQuotaOrKeyIssue ? 503 : 422).json({
         ...unreadablePayload,
-        error: unreadablePayload.observacion_ia
+        error: unreadablePayload.observacion_auditoria
       });
     } catch (err: any) {
       console.error("[OCR COBROS] Error inesperado procesando comprobante:", err);
+      const internalErrObs = "Error interno al procesar el comprobante. Puedes ingresar los datos manualmente.";
       return res.status(500).json({
         legible: false,
         confianza: 0.0,
+        confianza_lectura: "baja",
         metodo_pago: "Pago Móvil",
         banco: null,
         banco_origen: null,
         banco_destino: null,
         monto_bs: null,
         monto_texto_original: null,
+        referencia: null,
         nro_referencia: null,
+        codigo_autorizacion: null,
         fecha_pago: null,
         fecha_iso: null,
         titular_remitente: null,
         rif_ci_titular: null,
         beneficiario_detectado: null,
-        observacion_ia: "Error interno al procesar el comprobante. Puedes ingresar los datos manualmente.",
+        observacion_auditoria: internalErrObs,
+        observacion_ia: internalErrObs,
         error: "No se pudo interpretar el comprobante. Puedes ingresar los datos manualmente."
       });
     }

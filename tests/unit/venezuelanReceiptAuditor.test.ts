@@ -34,20 +34,67 @@ describe('Agente Experto en Auditoría Bancaria Venezolana (venezuelanReceiptAud
     expect(audited).toEqual({
       legible: true,
       confianza: 0.98,
+      confianza_lectura: 'alta',
       metodo_pago: 'Pago Móvil',
       banco: 'Banesco',
       banco_origen: null,
       banco_destino: 'Banesco',
       monto_bs: 203242.47,
       monto_texto_original: 'Bs. 203.242,47',
+      referencia: '460284758160',
       nro_referencia: '460284758160',
+      codigo_autorizacion: null,
       fecha_pago: '29/10/2026',
       fecha_iso: '2026-10-29',
       titular_remitente: null,
       rif_ci_titular: null,
       beneficiario_detectado: 'COMERCIALIZADORA ZULIANA CODIZULCA C.A.',
+      observacion_auditoria: 'Comprobante de operación exitosa leído correctamente.',
       observacion_ia: 'Comprobante de operación exitosa leído correctamente.'
     });
+  });
+
+  it('Caso BNC Pago Móvil (Reglas 1–6): ignora ícono de copiado en referencia, separa código autorización y devuelve fecha_pago=null', () => {
+    const bncPayload = auditAndNormalizeReceiptPayload({
+      metodo_pago: 'Su pago móvil ha sido Ejecutado exitosamente',
+      banco: '0191 - BNC',
+      monto_bs: 'Bs. 22.000,00',
+      referencia: '947474757 [ícono]',
+      codigo_autorizacion: '236792',
+      fecha_pago: null,
+      confianza_lectura: 'alta',
+      observacion_auditoria:
+        'Comprobante BNC Pago Móvil por Bs. 22.000,00. Ícono de copiado ignorado en referencia.'
+    });
+
+    expect(bncPayload.metodo_pago).toBe('Pago Móvil');
+    expect(bncPayload.banco).toBe('BNC (Banco Nacional de Crédito)');
+    expect(bncPayload.monto_bs).toBe(22000.0);
+    expect(bncPayload.referencia).toBe('947474757');
+    expect(bncPayload.nro_referencia).toBe('947474757');
+    expect(bncPayload.codigo_autorizacion).toBe('236792');
+    expect(bncPayload.fecha_pago).toBeNull();
+    expect(bncPayload.fecha_iso).toBeNull();
+    expect(bncPayload.confianza_lectura).toBe('alta');
+    expect(bncPayload.observacion_auditoria).toBe(
+      'Comprobante BNC Pago Móvil por Bs. 22.000,00. Ícono de copiado ignorado en referencia.'
+    );
+  });
+
+  it('Regla 6 (Validación de Coherencia): rechaza montos > 5.000.000.000,00 Bs o con más de 10 dígitos enteros, teléfonos o RIF', () => {
+    expect(parseVenezuelanMonto(5000000000.01)).toBeNull();
+    expect(parseVenezuelanMonto('Bs. 99.999.999.999,00')).toBeNull();
+    expect(parseVenezuelanMonto('04146123456')).toBeNull();
+    expect(parseVenezuelanMonto('J-409876136')).toBeNull();
+    expect(parseVenezuelanMonto('01340031880311234567')).toBeNull();
+    expect(parseVenezuelanMonto('Bs. 22.000,00')).toBe(22000.0);
+  });
+
+  it('Regla 2 (Anti-Alucinación en Referencias): elimina ícono de copiado al final sin agregar 0, O u 8 extra', () => {
+    expect(normalizeReferenciaBancaria('947474757 [ícono]')).toBe('947474757');
+    expect(normalizeReferenciaBancaria('947474757 0')).toBe('947474757');
+    expect(normalizeReferenciaBancaria('947474757 O')).toBe('947474757');
+    expect(normalizeReferenciaBancaria('947474757 8')).toBe('947474757');
   });
 
   it('Regla 1 y 7: Preserva datos del Emisor real y normaliza RIF/CI con letra mayúscula y guion', () => {
