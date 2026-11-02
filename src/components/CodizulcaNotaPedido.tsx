@@ -136,21 +136,32 @@ function buildFilasFromData(
                parseNumeroSeguro((it as any).cajas) || 
                parseNumeroSeguro((it as any).bultos) || 0;
 
+    const tiendasMap: Record<string, number> = { ...(it.tiendas || {}) };
+    if (Array.isArray((it as any).distribucionPorTienda)) {
+      for (const d of (it as any).distribucionPorTienda) {
+        const tag = String(d?.codigoTienda || '').trim().toUpperCase();
+        const qty = parseNumeroSeguro(d?.cantidad);
+        if (tag && qty > 0 && tiendasMap[tag] === undefined) {
+          tiendasMap[tag] = qty;
+        }
+      }
+    }
+
     // Si se selecciona una tienda individual (ej. AK01, FC01...), usar la cantidad de esa tienda
     if (tienda !== 'CONSOLIDADO') {
-      if (it.tiendas && it.tiendas[tienda] !== undefined) {
-        cant = parseNumeroSeguro(it.tiendas[tienda]);
+      if (tiendasMap[tienda] !== undefined) {
+        cant = parseNumeroSeguro(tiendasMap[tienda]);
       } else if ((it as any)[tienda] !== undefined) {
         cant = parseNumeroSeguro((it as any)[tienda]);
       } else {
         cant = 0;
       }
-    } else if (it.tiendas && typeof it.tiendas === 'object' && Object.keys(it.tiendas).length > 0) {
+    } else if (Object.keys(tiendasMap).length > 0) {
       // En CONSOLIDADO: sumar estrictamente las tiendas activas de la cadena seleccionada (AK para Alkosto, FC para Familia Center)
-      const chainEntries = Object.entries(it.tiendas).filter(
+      const chainEntries = Object.entries(tiendasMap).filter(
         ([tk]) => tk.toUpperCase().startsWith(chainPrefix) && tk.toUpperCase() !== 'AKOP' && tk.toUpperCase() !== 'FCOP' && tk.toUpperCase() !== 'CI'
       );
-      const hasOtherChainEntries = Object.keys(it.tiendas).some(tk => !tk.toUpperCase().startsWith(chainPrefix));
+      const hasOtherChainEntries = Object.keys(tiendasMap).some(tk => !tk.toUpperCase().startsWith(chainPrefix));
       if (chainEntries.length > 0) {
         cant = chainEntries.reduce((sum: number, [, v]: [string, any]) => sum + parseNumeroSeguro(v), 0);
       } else if (hasOtherChainEntries) {
@@ -236,7 +247,8 @@ function buildFilasFromData(
       ...(rawPrecioBruto > 0 ? { precioBruto: Number(rawPrecioBruto.toFixed(4)) } : {}),
       ...(rawDescuento > 0 ? { descuento: Number(rawDescuento.toFixed(2)) } : {}),
       subtotal: Number(sub.toFixed(2)),
-      tiendas: it.tiendas
+      tiendas: Object.keys(tiendasMap).length > 0 ? tiendasMap : it.tiendas,
+      ...(Array.isArray((it as any).distribucionPorTienda) ? { distribucionPorTienda: (it as any).distribucionPorTienda } : {})
     });
   }
 

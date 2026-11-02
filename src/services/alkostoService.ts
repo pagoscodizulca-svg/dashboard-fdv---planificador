@@ -1703,7 +1703,20 @@ export async function deleteAlkostoOrder(id: string): Promise<void> {
   }
 }
 
-export async function parseAlkostoOrderImage(imageBase64: string, mimeType: string = 'image/jpeg'): Promise<ParsedOrdenCompraAlkosto> {
+export async function parseAlkostoOrderImage(
+  imageBase64: string,
+  mimeType: string = 'image/jpeg',
+  fileName?: string
+): Promise<ParsedOrdenCompraAlkosto> {
+  const cleanBase64 = String(imageBase64 || '')
+    .trim()
+    .replace(/^data:[^;]+;base64,/i, '')
+    .replace(/\s+/g, '');
+
+  if (!cleanBase64) {
+    throw new Error('El archivo seleccionado está vacío o no pudo convertirse a Base64.');
+  }
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 90000); // 90s de tolerancia para análisis exhaustivo de órdenes completas
 
@@ -1714,7 +1727,7 @@ export async function parseAlkostoOrderImage(imageBase64: string, mimeType: stri
         'Content-Type': 'application/json',
         ...getAuthHeaders()
       },
-      body: JSON.stringify({ imageBase64, mimeType }),
+      body: JSON.stringify({ imageBase64: cleanBase64, mimeType, fileName }),
       signal: controller.signal
     });
 
@@ -1723,6 +1736,14 @@ export async function parseAlkostoOrderImage(imageBase64: string, mimeType: stri
     try {
       result = JSON.parse(responseText);
     } catch {
+      console.error('[alkostoService] Respuesta no-JSON en /api/alkosto/ocr-orden:', {
+        status: response.status,
+        statusText: response.statusText,
+        preview: responseText.slice(0, 300)
+      });
+      if (response.status === 413) {
+        throw new Error('El archivo es demasiado grande para ser procesado (413 Payload Too Large). Por favor sube una imagen o PDF más liviano.');
+      }
       if (!response.ok) {
         throw new Error(`Error en servidor (${response.status}): El servidor no devolvió una respuesta JSON válida.`);
       }
@@ -1730,11 +1751,19 @@ export async function parseAlkostoOrderImage(imageBase64: string, mimeType: stri
     }
 
     if (!response.ok) {
-      throw new Error(result?.error || result?.details || `Error al procesar la orden de compra (${response.status})`);
+      const descriptiveError =
+        result?.error ||
+        result?.details ||
+        `Error al procesar la Orden de Compra (HTTP ${response.status})`;
+      const enrichedErr: any = new Error(descriptiveError);
+      enrichedErr.statusCode = response.status;
+      enrichedErr.details = result?.details;
+      enrichedErr.code = result?.code;
+      throw enrichedErr;
     }
 
     if (!result?.success || !result?.data) {
-      throw new Error(result?.error || 'Respuesta incompleta del servidor OCR');
+      throw new Error(result?.error || 'Respuesta incompleta del servidor OCR al analizar la Orden de Compra.');
     }
 
     return result.data;

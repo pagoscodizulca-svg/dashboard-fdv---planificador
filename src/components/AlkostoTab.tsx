@@ -49,6 +49,10 @@ import {
   AlkostoSucursal,
   CatalogoAlkostoItem
 } from '../services/alkostoService';
+import {
+  detectAlkostoFileMimeType,
+  sanitizeBase64Payload
+} from '../services/alkostoOcParser';
 import { CodizulcaNotaPedido } from './CodizulcaNotaPedido';
 
 interface AlkostoTabProps {
@@ -120,38 +124,48 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
     };
   }, [orders, pedidosPendientes, pedidosTransmitidos]);
 
-  // Optimización y compresión client-side de imágenes para OCR rápido, nítido y liviano
+  // Optimización y compresión client-side de imágenes (JPG, PNG, WEBP) y PDFs para OCR rápido, nítido y liviano
   const optimizarImagenParaOCR = (file: File): Promise<{ base64: string; mimeType: string }> => {
     return new Promise((resolve, reject) => {
-      const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+      const initialMime = detectAlkostoFileMimeType(null, file.type, file.name);
+      const isPdf = initialMime === 'application/pdf';
+
       if (isPdf) {
         const reader = new FileReader();
         reader.onload = (e) => {
-          const res = e.target?.result as string;
-          resolve({ base64: res.split(',')[1], mimeType: 'application/pdf' });
+          const res = String(e.target?.result || '');
+          const cleanB64 = sanitizeBase64Payload(res);
+          const detectedMime = detectAlkostoFileMimeType(cleanB64, 'application/pdf', file.name);
+          resolve({ base64: cleanB64, mimeType: detectedMime });
         };
         reader.onerror = () => reject(new Error('Error al leer el archivo PDF'));
         reader.readAsDataURL(file);
         return;
       }
 
-      // Si es una imagen pequeña (< 3MB), enviarla directamente preservando nitidez de números pequeños
-      if (file.size < 3 * 1024 * 1024 && !file.type.includes('heic')) {
+      // Si es una imagen liviana (< 2.5 MB) en formato nativo soportado (JPG, PNG, WEBP),
+      // enviarla sin recodificar para preservar nitidez absoluta en dígitos pequeños y códigos EAN/SKU
+      const isDirectFormat = ['image/jpeg', 'image/png', 'image/webp'].includes(initialMime) && !/heic|bmp|tiff/i.test(file.type);
+      if (file.size < 2.5 * 1024 * 1024 && isDirectFormat) {
         const reader = new FileReader();
         reader.onload = (e) => {
-          const res = e.target?.result as string;
-          resolve({ base64: res.split(',')[1], mimeType: file.type || 'image/jpeg' });
+          const res = String(e.target?.result || '');
+          const cleanB64 = sanitizeBase64Payload(res);
+          const detectedMime = detectAlkostoFileMimeType(cleanB64, initialMime, file.name);
+          resolve({ base64: cleanB64, mimeType: detectedMime });
         };
         reader.onerror = () => reject(new Error('Error al leer la imagen'));
         reader.readAsDataURL(file);
         return;
       }
 
+      // Para imágenes de cámara o alta resolución (> 2.5 MB), comprimir en cliente para evitar 413 Payload Too Large
       const reader = new FileReader();
       reader.onload = (e) => {
+        const rawDataUrl = String(e.target?.result || '');
         const img = new Image();
         img.onload = () => {
-          const MAX_DIM = 2800; // Alta resolución para leer tablas de pedidos con SKU y tiendas
+          const MAX_DIM = 2400; // Equilibrio óptimo entre nitidez de tablas y tamaño de payload Base64
           let { width, height } = img;
           if (width > MAX_DIM || height > MAX_DIM) {
             if (width > height) {
@@ -167,27 +181,32 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
           canvas.height = height;
           const ctx = canvas.getContext('2d');
           if (!ctx) {
-            const raw = e.target?.result as string;
-            return resolve({ base64: raw.split(',')[1], mimeType: file.type || 'image/jpeg' });
+            const cleanFallback = sanitizeBase64Payload(rawDataUrl);
+            const fallbackMime = detectAlkostoFileMimeType(cleanFallback, initialMime, file.name);
+            return resolve({ base64: cleanFallback, mimeType: fallbackMime });
           }
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'high';
           ctx.fillStyle = '#FFFFFF';
           ctx.fillRect(0, 0, width, height);
           ctx.drawImage(img, 0, 0, width, height);
-          const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.92);
-          resolve({ base64: compressedDataUrl.split(',')[1], mimeType: 'image/jpeg' });
+          const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.88);
+          const cleanCompressed = sanitizeBase64Payload(compressedDataUrl);
+          resolve({ base64: cleanCompressed, mimeType: 'image/jpeg' });
         };
         img.onerror = () => {
-          const raw = e.target?.result as string;
-          resolve({ base64: raw.split(',')[1], mimeType: file.type || 'image/jpeg' });
+          const cleanFallback = sanitizeBase64Payload(rawDataUrl);
+          const fallbackMime = detectAlkostoFileMimeType(cleanFallback, initialMime, file.name);
+          resolve({ base64: cleanFallback, mimeType: fallbackMime });
         };
-        img.src = e.target?.result as string;
+        img.src = rawDataUrl;
       };
       reader.onerror = () => reject(new Error('Error al leer el archivo'));
       reader.readAsDataURL(file);
     });
   };
 
-  // Procesar archivo seleccionado (Imagen o PDF) con el Lector OCR
+  // Procesar archivo seleccionado (Imagen JPG, PNG, WEBP o PDF) con el Lector OCR
   const procesarArchivoOCR = async (file: File) => {
     if (!file) return;
 
@@ -195,7 +214,12 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
     const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|heic|tiff?)$/i.test(file.name);
 
     if (!isPdf && !isImage && file.type && !file.type.includes('octet-stream')) {
-      setOcrError('Por favor sube una imagen (PNG, JPG, JPEG) o PDF de la orden de compra.');
+      setOcrError('Formato no soportado. Por favor sube una imagen (JPG, PNG, WEBP) o un archivo PDF de la Orden de Compra.');
+      return;
+    }
+
+    if (file.size > 25 * 1024 * 1024) {
+      setOcrError('El archivo supera el límite máximo permitido (25 MB). Por favor sube un PDF o imagen más liviana.');
       return;
     }
 
@@ -204,7 +228,7 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
 
     try {
       const { base64, mimeType } = await optimizarImagenParaOCR(file);
-      const data = await parseAlkostoOrderImage(base64, mimeType);
+      const data = await parseAlkostoOrderImage(base64, mimeType, file.name);
       setParsedOCData(data);
       setOcLoadKey(k => k + 1);
       
@@ -216,8 +240,15 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
       // Cambiar automáticamente a la vista del Formato Codizulca
       setActiveView('formato');
     } catch (err: any) {
-      console.error("Error OCR:", err);
-      setOcrError(err.message || 'No se pudo leer la orden de compra. Intenta con una imagen más nítida.');
+      console.error('[AlkostoTab] Error procesando Orden de Compra:', {
+        fileName: file.name,
+        fileType: file.type,
+        fileSizeKB: Math.round(file.size / 1024),
+        errorMessage: err?.message,
+        statusCode: err?.statusCode,
+        details: err?.details
+      });
+      setOcrError(err.message || 'No se pudo procesar la Orden de Compra. Verifica que el archivo sea legible e intenta nuevamente.');
     } finally {
       setOcrLoading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';

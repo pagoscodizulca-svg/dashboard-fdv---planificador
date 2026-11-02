@@ -9,12 +9,17 @@ import {
   assertValidInputPayload,
   mapNumericCellsToRow,
   parseAlkostoRawText,
+  parseAlkostoFlexibleOcrText,
   extractPositionedTextFromAlkostoPdfBuffer,
   validateAndNormalizeAlkostoOC,
   normalizarUnidadMedidaAlkosto,
   autocorregirTiendasPorFila,
   extraerPedidosNormalizadosDeOC,
   calcularResumenCuadreOC,
+  sanitizeBase64Payload,
+  detectAlkostoFileMimeType,
+  sanitizeAndParseOcJson,
+  construirDistribucionPorTienda,
   AlkostoParseValidationError
 } from '../../src/services/alkostoOcParser';
 import { resolverProductoPorCodigoODescripcion } from '../../src/services/alkostoService';
@@ -522,6 +527,84 @@ describe('Unit & Regression: alkostoOcParser', () => {
         lote.pedidos.reduce((acc, p) => acc + (p.monto_pedido || 0), 0).toFixed(2)
       );
       expect(sumAll16).toBeCloseTo(15470.87, 2);
+    });
+
+    it('should detect dynamic MIME types (JPG, PNG, WEBP, PDF) from magic bytes, Base64 prefixes, and file names', () => {
+      // Base64 con prefijo data:...;base64, y espacios
+      const rawDataUrl = 'data:image/webp;base64, UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoBAAEAAwA0JaQAA3AA/vuUAAA= \n';
+      const clean = sanitizeBase64Payload(rawDataUrl);
+      expect(clean).toBe('UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoBAAEAAwA0JaQAA3AA/vuUAAA=');
+      expect(detectAlkostoFileMimeType(clean, 'image/jpeg', 'foto.jpg')).toBe('image/webp');
+
+      // PDF magic bytes (%PDF-)
+      const pdfBuf = Buffer.from('%PDF-1.5\n...', 'ascii');
+      expect(detectAlkostoFileMimeType(pdfBuf, 'application/octet-stream', 'orden.bin')).toBe('application/pdf');
+
+      // PNG magic bytes (\x89PNG\r\n\x1a\n)
+      const pngBuf = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      expect(detectAlkostoFileMimeType(pngBuf, '', 'captura.png')).toBe('image/png');
+
+      // JPEG magic bytes (\xFF\xD8\xFF)
+      const jpgBuf = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+      expect(detectAlkostoFileMimeType(jpgBuf, '', 'camara.jpg')).toBe('image/jpeg');
+    });
+
+    it('should sanitize markdown code blocks before JSON.parse and map distribucionPorTienda bidirectionally', () => {
+      const markdownAiResponse = `\`\`\`json
+{
+  "numero_oc": "0000056001",
+  "fecha_emision": "02/11/2026",
+  "fecha_entrega": "05/11/2026",
+  "clienteCadena": "ALKOSTO",
+  "clienteNombre": "ALKOSTO DONDE COMPRAR ES GANAR, C.A.",
+  "moneda": "USD",
+  "items": [
+    {
+      "renglon": 1,
+      "codigo": "7591289609129",
+      "descripcion": "MORTADELA DE POLLO DEL CORRAL 1KG / 3.78",
+      "unid": "CAJAS",
+      "emp": 12,
+      "costoBruto": "38,00",
+      "descuento": "5,26",
+      "costoUnitario": "$ 36,00",
+      "cantidadTotal": 30,
+      "totalRenglon": "1.080,00",
+      "distribucionPorTienda": [
+        { "codigoTienda": "AK01", "nombreTienda": "Alkosto 1 san Felipe", "cantidad": 10 },
+        { "codigoTienda": "AK04", "nombreTienda": "Alkosto 4 - Coromoto", "cantidad": 20 }
+      ]
+    }
+  ]
+}
+\`\`\``;
+
+      const parsedJson = sanitizeAndParseOcJson(markdownAiResponse);
+      const normalized = validateAndNormalizeAlkostoOC(parsedJson);
+
+      expect(normalized.ordenNro).toBe('0000056001');
+      expect(normalized.numero_oc).toBe('0000056001');
+      expect(normalized.fechaEmision).toBe('02/11/2026');
+      expect(normalized.moneda).toBe('USD');
+      expect(normalized.items).toHaveLength(1);
+
+      const item = normalized.items[0];
+      expect(item.codigo).toBe('21');
+      expect(item.skuCodizulca).toBe('21');
+      expect(item.descripcion).toBe('MORTADELA DE POLLO DEL CORRAL 1KG');
+      expect(item.unid).toBe('CJ');
+      expect(item.costoBruto).toBe(38);
+      expect(item.descuento).toBe(5.26);
+      expect(item.costoUnitario).toBe(36);
+      expect(item.totalCantidad).toBe(30);
+      expect(item.cantidadTotal).toBe(30);
+      expect(item.totalRenglon).toBe(1080);
+      expect(item.cuadreTiendasValido).toBe(true);
+      expect(item.tiendas).toEqual({ AK01: 10, AK04: 20 });
+      expect(item.distribucionPorTienda).toEqual([
+        { codigoTienda: 'AK01', nombreTienda: 'Alkosto 1 san Felipe', cantidad: 10 },
+        { codigoTienda: 'AK04', nombreTienda: 'Alkosto 4 - Coromoto', cantidad: 20 }
+      ]);
     });
   });
 });

@@ -8,6 +8,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import {
   extractPositionedTextFromAlkostoPdfBuffer,
   parseAlkostoRawText,
+  parseAlkostoFlexibleOcrText,
   validateAndNormalizeAlkostoOC,
   AlkostoParseValidationError,
   normalizarCadenaEstricta,
@@ -16,7 +17,10 @@ import {
   limpiarDescripcionAlkosto,
   calcularResumenCuadreOC,
   normalizarNombreVendedorSairu,
-  generarIdDeterministaPedidoAlkosto
+  generarIdDeterministaPedidoAlkosto,
+  sanitizeBase64Payload,
+  detectAlkostoFileMimeType,
+  sanitizeAndParseOcJson
 } from "./src/services/alkostoOcParser";
 import {
   VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT,
@@ -2259,47 +2263,97 @@ async function startServer() {
   }
 
   // LECTOR OCR INTELIGENTE Y DETERMINISTA DE ÓRDENES DE COMPRA ALKOSTO Y FAMILIA CENTER
-  app.post("/api/alkosto/ocr-orden", authenticateToken, rateLimiter(10 * 60000, 20, 'OCR Orden Alkosto'), async (req: any, res: any) => {
+  app.post("/api/alkosto/ocr-orden", authenticateToken, rateLimiter(10 * 60000, 30, 'OCR Orden Alkosto'), async (req: any, res: any) => {
     try {
-      const { imageBase64, mimeType = "image/jpeg" } = req.body;
+      const { imageBase64, mimeType = "image/jpeg", fileName = "" } = req.body || {};
       if (!imageBase64) {
-        return res.status(400).json({ error: "Falta la imagen o PDF de la orden de compra" });
+        return res.status(400).json({
+          error: "Falta la imagen (JPG, PNG, WEBP) o el archivo PDF de la Orden de Compra.",
+          code: "MISSING_FILE_PAYLOAD"
+        });
       }
 
-      let cleanBase64 = String(imageBase64).trim();
-      let actualMime = String(mimeType || "image/jpeg").trim();
-      if (cleanBase64.startsWith("data:")) {
-        const m = cleanBase64.match(/^data:([^;]+);base64,(.+)$/);
-        if (m) {
-          actualMime = m[1];
-          cleanBase64 = m[2];
-        }
+      const cleanBase64 = sanitizeBase64Payload(String(imageBase64));
+      if (!cleanBase64) {
+        return res.status(400).json({
+          error: "El contenido Base64 del archivo está vacío o tiene un formato inválido.",
+          code: "EMPTY_BASE64_PAYLOAD"
+        });
       }
 
-      const isPdfPayload = actualMime === "application/pdf" || cleanBase64.startsWith("JVBERi0");
-      if (isPdfPayload) {
-        actualMime = "application/pdf";
+      const binaryBuffer = Buffer.from(cleanBase64, "base64");
+      if (!binaryBuffer || binaryBuffer.length < 32) {
+        return res.status(400).json({
+          error: "El archivo de la Orden de Compra está vacío o corrupto.",
+          code: "CORRUPTED_FILE_BUFFER"
+        });
       }
 
-      // Respaldo / Verificación determinista por coordenadas X,Y para PDFs digitales del ERP
+      // Detección dinámica real de mimeType por magic bytes + MIME declarado + extensión
+      const actualMime = detectAlkostoFileMimeType(binaryBuffer, mimeType, fileName);
+      const isPdfPayload = actualMime === "application/pdf";
+
+      console.log(
+        `[ALKOSTO OCR] Iniciando procesamiento: fileName="${fileName || "N/A"}", declaredMime="${mimeType}", detectedMime="${actualMime}", sizeKB=${Math.round(binaryBuffer.length / 1024)}`
+      );
+
+      // 1. Extracción determinista de alta velocidad para PDFs digitales del ERP de Alkosto / Familia Center
       let deterministicOrder: any = null;
       if (isPdfPayload) {
         try {
-          const pdfBuffer = Buffer.from(cleanBase64, "base64");
-          const positionedText = extractPositionedTextFromAlkostoPdfBuffer(pdfBuffer, zlib.inflateSync);
+          const positionedText = extractPositionedTextFromAlkostoPdfBuffer(binaryBuffer, zlib.inflateSync);
           if (positionedText) {
             const parsedDet = parseAlkostoRawText(positionedText);
             if (parsedDet && parsedDet.items.length > 0) {
               deterministicOrder = parsedDet;
+              console.log(
+                `[ALKOSTO OCR] Extracción PDF determinista exitosa (coordenadas X,Y): OC=${parsedDet.ordenNro}, renglones=${parsedDet.items.length}`
+              );
             }
           }
         } catch (pdfParseErr: any) {
           console.warn("[ALKOSTO OCR] Advertencia en lectura de coordenadas PDF:", pdfParseErr?.message);
         }
+
+        // Si el PDF fue re-guardado por otro visor sin matrices BT..ET estándar, intentar extracción con pdf-parse
+        if (!deterministicOrder) {
+          try {
+            const { PDFParse } = await import("pdf-parse");
+            const pdfParser = new PDFParse({ data: binaryBuffer });
+            try {
+              const textRes = await pdfParser.getText();
+              const rawPdfText = String(textRes?.text || "").trim();
+              if (rawPdfText.length >= 30) {
+                const parsedFlexible = parseAlkostoFlexibleOcrText(rawPdfText);
+                if (parsedFlexible && parsedFlexible.items.length > 0) {
+                  deterministicOrder = parsedFlexible;
+                  console.log(
+                    `[ALKOSTO OCR] Extracción PDF vía pdf-parse exitosa: OC=${parsedFlexible.ordenNro}, renglones=${parsedFlexible.items.length}`
+                  );
+                }
+              }
+            } finally {
+              await pdfParser.destroy().catch(() => {});
+            }
+          } catch (pdfFallbackErr: any) {
+            console.warn("[ALKOSTO OCR] Advertencia en pdf-parse secundario:", pdfFallbackErr?.message);
+          }
+        }
       }
 
-      // Si no hay GEMINI_API_KEY configurada en entorno y el PDF digital cuadró determinísticamente, devolver de inmediato
-      if (!process.env.GEMINI_API_KEY && deterministicOrder) {
+      // Si el PDF digital ya cuadró matemáticamente al 100%, podemos devolverlo como referencia verificada si no hay API keys activas
+      const rawKeyCandidates = [
+        process.env.GEMINI_API_KEY,
+        process.env.GOOGLE_API_KEY,
+        process.env.VITE_GEMINI_API_KEY
+      ]
+        .filter(Boolean)
+        .flatMap((k) => String(k).split(","))
+        .map((k) => k.trim().replace(/^["']+|["']+$/g, "").trim())
+        .filter((k) => k.length > 10);
+      const apiKeys = Array.from(new Set(rawKeyCandidates));
+
+      if (apiKeys.length === 0 && deterministicOrder) {
         return res.json({
           success: true,
           parserMode: "DETERMINISTIC_PDF",
@@ -2307,50 +2361,60 @@ async function startServer() {
         });
       }
 
-      const ai = new GoogleGenAI({
-        apiKey: process.env.GEMINI_API_KEY,
-        httpOptions: {
-          headers: {
-            'User-Agent': 'aistudio-build',
-          }
-        }
-      });
+      const systemInstruction = `Eres un Auditor Experto y Motor de Visión Multimodal especializado en la lectura y estructuración exacta de Órdenes de Compra (OC) y Notas de Pedido de CODIZULCA, C.A. para las cadenas ALKOSTO (columnas AK01 a AK10, AKOP, CI) y FAMILIA CENTER (columnas FC01 a FC07).
 
-      const systemInstruction = `Eres un motor de visión multimodal bancaria especializado en lectura visual nativa de Órdenes de Compra (OC) en PDF e imagen de CODIZULCA, C.A. para las cadenas ALKOSTO (Página 1: columnas AK01 a AK10, AKOP, CI) y FAMILIA CENTER (Página 2: columnas FC01 a FC07).
-REGLAS ESTRICTAS OBLIGATORIAS:
-1. Lee visualmente las líneas de la cuadrícula de TODAS las páginas del PDF sin desfasar columnas cuando la descripción salta de línea.
-2. Extrae obligatoriamente: numero_oc (ej. "0000055773"), fecha_emision (ej. "26/10/2026"), fecha_entrega (ej. "31/10/2026"), tasa_cambio (ej. 887.3020), subtotal_alkosto, subtotal_familia_center y subtotal_general.
-3. Recorre todas las páginas del PDF identificando la matriz de cada cadena:
-   - Página Alkosto: AK01, AK02, AK03, AK04, AK05, AK06, AK07, AK08, AK09, AK10, AKOP, CI.
-   - Página Familia Center: FC01, FC02, FC03, FC04, FC05, FC06, FC07.
-4. REGLA DE AUTOCORRECTOR MATEMÁTICO POR FILA: Para cada producto, la suma de las cantidades de todas las tiendas de esa página DEBE ser exactamente igual a la columna Total Cantidad de esa fila, y Total Cantidad * Costo Unitario debe cuadrar con Total Renglon. Si en una celda el texto parece decir "200" pero el Total Cantidad de la fila es "3.00" y otra tienda tiene "1.00" (ej. en AK10 para el código 7591210000513), corrige automáticamente el valor a "2.00".
-5. Homologación de Código EAN a SKU Interno y limpieza de descripción:
+REGLAS DE NEGOCIO Y EXTRACCIÓN OBLIGATORIAS:
+1. METADATOS DE CABECERA:
+   - Extrae: numero_oc / ordenNro (ej. "0000055773"), fecha_emision / fechaEmision (DD/MM/YYYY), fecha_entrega / fechaEntrega (DD/MM/YYYY), clienteCadena ("ALKOSTO" o "FAMILIA_CENTER"), clienteNombre, moneda ("USD" o "BS"), tasa_cambio, subtotal_alkosto, subtotal_familia_center y subtotal_general.
+2. ARREGLO COMPLETO DE PRODUCTOS (items):
+   - Lee visualmente TODAS las filas de productos de todas las páginas sin saltar renglones ni desfasar columnas cuando la descripción ocupe dos líneas.
+   - Por cada producto extrae:
+     * codigo: Código del artículo (EAN, SKU o código interno completo sin truncar).
+     * skuCodizulca: SKU interno homologado de CODIZULCA.
+     * descripcion: Descripción exacta del producto (eliminando siempre el sufijo de PVP al final, ej. quitar "/ 3.78", "/ 5.84").
+     * unid: Unidad de medida o empaque normalizada estrictamente a "CJ", "KG", "UND" o "BLT".
+     * emp: Unidades por empaque (entero).
+     * costoBruto: Precio unitario bruto antes de descuento (flotante limpio).
+     * descuento: Porcentaje de bonificación/descuento si aplica (flotante limpio, 0 si no aplica).
+     * costoUnitario: Precio unitario neto (flotante limpio sin símbolos de moneda).
+     * totalCantidad / cantidadTotal: Cantidad total solicitada del renglón (flotante limpio).
+     * totalRenglon: Subtotal del renglón = totalCantidad * costoUnitario (flotante limpio).
+3. DESGLOSE DE CANTIDADES POR TIENDA (tiendas y distribucionPorTienda):
+   - Identifica las columnas de sucursales con cantidad > 0:
+     * Alkosto: AK01, AK02, AK03, AK04, AK05, AK06, AK07, AK08, AK09, AK10.
+     * Familia Center: FC01, FC02, FC03, FC04, FC05, FC06, FC07.
+   - Devuelve tanto el objeto \`tiendas\` (ej. {"AK01": 5, "AK04": 3}) como el sub-arreglo estructurado \`distribucionPorTienda\` con \`{ codigoTienda, nombreTienda, cantidad }\`.
+4. VALIDACIÓN MATEMÁTICA ESTRICTA POR FILA:
+   - Verifica que la suma de las cantidades de las tiendas del renglón coincida exactamente con \`totalCantidad\` (\`cantidadTotal\`) de la línea.
+   - Si una celda de tienda parece tener los decimales pegados (ej. "200" cuando el Total Cantidad es "3.00" y otra tienda tiene "1.00"), corrige automáticamente a "2.00".
+   - Todos los montos y cantidades deben ser números flotantes limpios estándar (ej. 1250.50), sin símbolos "$" ni "Bs" y sin separadores de miles.
+5. HOMOLOGACIÓN DE CATÁLOGO CODIZULCA:
    - 7591289609129 -> SKU "21" | "CJ" | "MORTADELA DE POLLO DEL CORRAL 1KG"
    - 7591289400023 -> SKU "047" | "UND" | "NUGGETS DE POLLO DEL CORRAL 460GR"
    - 5412873178161 -> SKU "1360" | "CJ" | "PAPAS FRITAS CONGELADAS MARQUISE 2,5KG"
    - 100281 -> SKU "100281" | "KG" | "QUESO MOZZARELLA CORLASA X KG"
    - 7591210000513 -> SKU "7591210000513" | "CJ" | "CREMA DE LECHE PURISIMA 500GR"
-   - 7591210000544 -> SKU "7591210000544" | "CJ" | "CREMA DE LECHE PURISIMA 250GR"
-   Elimina siempre de la descripción el sufijo del PVP (ej. quitar "/3.78", "/5.84", "/6.99", "/12.00", "/5.89", "/3.70").`;
+   - 7591210000544 -> SKU "7591210000544" | "CJ" | "CREMA DE LECHE PURISIMA 250GR"`;
 
-      const prompt = `Analiza visualmente el documento PDF/imagen adjunto en todas sus páginas y devuelve ÚNICAMENTE un objeto JSON estructurado que cumpla estrictamente el responseSchema y el cuadre matemático por fila y por cadena.`;
+      const prompt = `Analiza visualmente la Orden de Compra adjunta (imagen o PDF) en todas sus páginas y devuelve ÚNICAMENTE el objeto JSON estructurado con cabeceras, renglones completos, distribución por tienda y validación matemática exacta.`;
 
       const ocResponseSchema = {
         type: Type.OBJECT,
         properties: {
           numero_oc: { type: Type.STRING, description: "Número de Orden de Compra (ej. 0000055773)" },
           ordenNro: { type: Type.STRING, description: "Número de Orden de Compra (ej. 0000055773)" },
-          fecha_emision: { type: Type.STRING, description: "Fecha de emisión (ej. 26/10/2026)" },
+          fecha_emision: { type: Type.STRING, description: "Fecha de emisión DD/MM/YYYY" },
           fechaEmision: { type: Type.STRING },
-          fecha_entrega: { type: Type.STRING, description: "Fecha de entrega (ej. 31/10/2026)" },
+          fecha_entrega: { type: Type.STRING, description: "Fecha de entrega DD/MM/YYYY" },
           fechaEntrega: { type: Type.STRING },
-          tasa_cambio: { type: Type.NUMBER, description: "Tasa de cambio BCV (ej. 887.3020)" },
+          moneda: { type: Type.STRING, description: "Moneda de la orden (USD o BS)" },
+          tasa_cambio: { type: Type.NUMBER, description: "Tasa de cambio BCV" },
           tasaCambio: { type: Type.NUMBER },
-          subtotal_alkosto: { type: Type.NUMBER, description: "SubTotal página Alkosto (ej. 11321.85)" },
+          subtotal_alkosto: { type: Type.NUMBER },
           subtotalAlkosto: { type: Type.NUMBER },
-          subtotal_familia_center: { type: Type.NUMBER, description: "SubTotal página Familia Center (ej. 4149.02)" },
+          subtotal_familia_center: { type: Type.NUMBER },
           subtotalFamiliaCenter: { type: Type.NUMBER },
-          subtotal_general: { type: Type.NUMBER, description: "Sub Total general de la OC (ej. 15470.87)" },
+          subtotal_general: { type: Type.NUMBER },
           subtotalGeneral: { type: Type.NUMBER },
           subtotal: { type: Type.NUMBER },
           clienteCadena: { type: Type.STRING, description: "ALKOSTO o FAMILIA_CENTER" },
@@ -2371,18 +2435,20 @@ REGLAS ESTRICTAS OBLIGATORIAS:
             items: {
               type: Type.OBJECT,
               properties: {
-                renglon: { type: Type.NUMBER, description: "Columna N° (número de fila)" },
-                unid: { type: Type.STRING, description: "Columna UNID normalizada estrictamente a CJ, UND, KG o BLT" },
-                totalCantidad: { type: Type.NUMBER, description: "Columna Total Cantidad solicitada" },
+                renglon: { type: Type.NUMBER },
+                unid: { type: Type.STRING, description: "CJ, UND, KG o BLT" },
+                totalCantidad: { type: Type.NUMBER, description: "Cantidad total solicitada de la línea" },
+                cantidadTotal: { type: Type.NUMBER },
                 cantDespachada: { type: Type.STRING },
-                codigo: { type: Type.STRING, description: "Código EAN o SKU del artículo" },
-                skuCodizulca: { type: Type.STRING, description: "SKU interno CODIZULCA homologado" },
+                codigo: { type: Type.STRING, description: "Código EAN, SKU o código interno" },
+                skuCodizulca: { type: Type.STRING },
                 codigoBarra: { type: Type.STRING },
-                descripcion: { type: Type.STRING, description: "Descripción limpia sin el sufijo /PVP" },
+                descripcion: { type: Type.STRING, description: "Descripción limpia sin sufijo /PVP" },
                 emp: { type: Type.NUMBER },
                 costoBruto: { type: Type.NUMBER },
-                costoUnitario: { type: Type.NUMBER, description: "Costo Unitario" },
-                totalRenglon: { type: Type.NUMBER, description: "Total Renglon (Total Cantidad * Costo Unitario)" },
+                descuento: { type: Type.NUMBER, description: "Descuento o % bonificación" },
+                costoUnitario: { type: Type.NUMBER, description: "Precio unitario limpio" },
+                totalRenglon: { type: Type.NUMBER, description: "Total del renglón (totalCantidad * costoUnitario)" },
                 tiendas: {
                   type: Type.OBJECT,
                   properties: {
@@ -2407,6 +2473,18 @@ REGLAS ESTRICTAS OBLIGATORIAS:
                     FC07: { type: Type.NUMBER },
                     FCOP: { type: Type.NUMBER }
                   }
+                },
+                distribucionPorTienda: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      codigoTienda: { type: Type.STRING, description: "Código de sucursal (ej. AK01, FC01)" },
+                      nombreTienda: { type: Type.STRING, description: "Nombre de la sucursal" },
+                      cantidad: { type: Type.NUMBER, description: "Cantidad asignada a la tienda" }
+                    },
+                    required: ["codigoTienda", "cantidad"]
+                  }
                 }
               },
               required: ["codigo", "descripcion", "unid", "totalCantidad"]
@@ -2416,105 +2494,139 @@ REGLAS ESTRICTAS OBLIGATORIAS:
         required: ["items"]
       };
 
-      // Función robusta para extracción y parseo seguro de JSON con tolerancia a markdown y caracteres extra
-      function safeExtractJson(raw: string): any {
-        if (!raw || typeof raw !== "string") {
-          throw new Error("Respuesta vacía del motor OCR");
-        }
-        let text = raw.trim();
-        const mdCodeBlock = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-        if (mdCodeBlock && mdCodeBlock[1]) {
-          text = mdCodeBlock[1].trim();
-        } else if (text.startsWith("```")) {
-          text = text.replace(/^```[a-z]*\s*/i, "").replace(/```$/s, "").trim();
-        }
-        try {
-          return JSON.parse(text);
-        } catch (err: any) {
-          const posMatch = err.message && err.message.match(/at position (\d+)/);
-          if (posMatch) {
-            const pos = parseInt(posMatch[1], 10);
-            try {
-              return JSON.parse(text.substring(0, pos).trim());
-            } catch {}
-          }
-        }
-        const firstBrace = text.indexOf("{");
-        if (firstBrace !== -1) {
-          const lastBrace = text.lastIndexOf("}");
-          if (lastBrace > firstBrace) {
-            const candidate = text.substring(firstBrace, lastBrace + 1).trim().replace(/,\s*([}\]])/g, '$1');
-            return JSON.parse(candidate);
-          }
-        }
-        throw new Error("No se pudo interpretar el JSON devuelto por el lector OCR");
-      }
-
-      // FASE 1.1: Modelo principal gemini-2.5-flash y fallback automático gemini-2.5-pro en caso de error o descuadre matemático
-      const candidateModels = ["gemini-2.5-flash", "gemini-2.5-pro"];
+      const candidateModels = [
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash",
+        "gemini-2.5-pro"
+      ];
       let lastModelError: any = null;
       let validatedOrder: any = null;
       let usedModel = "";
 
-      for (const modelName of candidateModels) {
-        try {
-          const response = await ai.models.generateContent({
-            model: modelName,
-            contents: [
-              {
-                role: "user",
-                parts: [
-                  { inlineData: { data: cleanBase64, mimeType: actualMime } },
-                  { text: prompt }
-                ]
+      if (apiKeys.length > 0) {
+        outerKeyLoop: for (let keyIdx = 0; keyIdx < apiKeys.length; keyIdx++) {
+          const apiKey = apiKeys[keyIdx];
+          const ai = new GoogleGenAI({
+            apiKey,
+            httpOptions: {
+              headers: {
+                "User-Agent": "aistudio-build"
               }
-            ],
-            config: {
-              systemInstruction,
-              responseMimeType: "application/json",
-              responseSchema: ocResponseSchema,
-              temperature: 0.0
             }
           });
 
-          if (response && response.text) {
-            const parsed = safeExtractJson(response.text);
-            const candidateValidated = validateAndNormalizeAlkostoOC(parsed, {
-              strictMath: false,
-              requireOrdenNro: false
-            });
-            const resumenCuadre = calcularResumenCuadreOC(candidateValidated);
+          for (const modelName of candidateModels) {
+            try {
+              let rawResponseText = "";
+              try {
+                const response = await ai.models.generateContent({
+                  model: modelName,
+                  contents: [
+                    {
+                      role: "user",
+                      parts: [
+                        { inlineData: { data: cleanBase64, mimeType: actualMime } },
+                        { text: prompt }
+                      ]
+                    }
+                  ],
+                  config: {
+                    systemInstruction,
+                    responseMimeType: "application/json",
+                    responseSchema: ocResponseSchema,
+                    temperature: 0.0
+                  }
+                });
+                rawResponseText = response?.text || "";
+              } catch (schemaErr: any) {
+                const sMsg = String(schemaErr?.message || "");
+                const sStatus = schemaErr?.status || schemaErr?.statusCode || "N/A";
+                // Si el modelo rechaza responseSchema por complejidad OpenAPI, reintentar con responseMimeType: "application/json"
+                if (/schema|INVALID_ARGUMENT|400/i.test(sMsg) && !/API_KEY_INVALID|API key not valid/i.test(sMsg)) {
+                  console.warn(
+                    `[ALKOSTO OCR] Modelo ${modelName} rechazó responseSchema (status=${sStatus}), reintentando con JSON puro...`
+                  );
+                  const fallbackRes = await ai.models.generateContent({
+                    model: modelName,
+                    contents: [
+                      {
+                        role: "user",
+                        parts: [
+                          { inlineData: { data: cleanBase64, mimeType: actualMime } },
+                          { text: prompt }
+                        ]
+                      }
+                    ],
+                    config: {
+                      systemInstruction,
+                      responseMimeType: "application/json",
+                      temperature: 0.0
+                    }
+                  });
+                  rawResponseText = fallbackRes?.text || "";
+                } else {
+                  throw schemaErr;
+                }
+              }
 
-            // Verificar si hay descuadre matemático por fila o en el total de la OC
-            const hasRowMismatch = candidateValidated.items.some((it: any) => {
-              const storeVals = Object.entries(it.tiendas || {})
-                .filter(([tk]) => tk !== 'AKOP' && tk !== 'FCOP' && tk !== 'CI')
-                .map(([, v]) => Number(v) || 0);
-              if (storeVals.length === 0) return false;
-              const sumStores = Number(storeVals.reduce((a, b) => a + b, 0).toFixed(2));
-              return Math.abs(sumStores - Number(it.totalCantidad || 0)) > 0.05;
-            });
+              if (rawResponseText) {
+                const parsed = sanitizeAndParseOcJson(rawResponseText);
+                const candidateValidated = validateAndNormalizeAlkostoOC(parsed, {
+                  strictMath: false,
+                  requireOrdenNro: false
+                });
+                const resumenCuadre = calcularResumenCuadreOC(candidateValidated);
 
-            validatedOrder = candidateValidated;
-            usedModel = modelName;
+                const hasRowMismatch = candidateValidated.items.some((it: any) => {
+                  const storeVals = Object.entries(it.tiendas || {})
+                    .filter(([tk]) => tk !== "AKOP" && tk !== "FCOP" && tk !== "CI")
+                    .map(([, v]) => Number(v) || 0);
+                  if (storeVals.length === 0) return false;
+                  const sumStores = Number(storeVals.reduce((a, b) => a + b, 0).toFixed(2));
+                  return Math.abs(sumStores - Number(it.totalCantidad || 0)) > 0.05;
+                });
 
-            if (!resumenCuadre.cuadreExacto || hasRowMismatch) {
-              console.warn(`[ALKOSTO OCR] Descuadre matemático detectado en ${modelName}, activando fallback...`);
-              continue;
+                validatedOrder = candidateValidated;
+                usedModel = modelName;
+
+                if (!resumenCuadre?.cuadreExacto || hasRowMismatch) {
+                  console.warn(
+                    `[ALKOSTO OCR] Descuadre matemático parcial en ${modelName} (calculado=${resumenCuadre?.totalCalculado ?? 0} vs esperado=${resumenCuadre?.totalEsperadoPDF ?? 0}), verificando siguiente modelo...`
+                  );
+                  continue;
+                }
+
+                console.log(
+                  `[ALKOSTO OCR] Extracción IA exitosa con ${modelName}: OC=${candidateValidated.ordenNro}, renglones=${candidateValidated.items.length}`
+                );
+                break outerKeyLoop;
+              }
+            } catch (mErr: any) {
+              lastModelError = mErr;
+              const errStatus = mErr?.status || mErr?.statusCode || mErr?.code || "UNKNOWN";
+              const errMsg = String(mErr?.message || mErr).slice(0, 300);
+              console.warn(
+                `[ALKOSTO OCR] Fallo en key#${keyIdx + 1} / modelo ${modelName} (status=${errStatus}): ${errMsg}`
+              );
+              // Si la clave de API es inválida o revocada, pasar de inmediato a la siguiente clave
+              if (/API_KEY_INVALID|API key not valid|reported as leaked|PERMISSION_DENIED/i.test(errMsg)) {
+                break;
+              }
             }
-            break;
           }
-        } catch (mErr: any) {
-          lastModelError = mErr;
-          console.warn(`[ALKOSTO OCR] Modelo ${modelName} falló, activando fallback:`, mErr?.message);
         }
       }
 
-      // Si el documento es un PDF digital y el motor determinista obtuvo cuadre exacto mientras Gemini falló o tuvo descuadre, usar el resultado verificado
+      // 2. Si el documento es un PDF digital y el motor determinista obtuvo cuadre exacto mientras Gemini falló o tuvo menos renglones, usar el determinista
       if (deterministicOrder) {
         const detCuadre = calcularResumenCuadreOC(deterministicOrder);
         const aiCuadre = validatedOrder ? calcularResumenCuadreOC(validatedOrder) : null;
-        if (!validatedOrder || (!aiCuadre?.cuadreExacto && detCuadre.cuadreExacto) || validatedOrder.items.length < deterministicOrder.items.length) {
+        if (
+          !validatedOrder ||
+          (!aiCuadre?.cuadreExacto && detCuadre?.cuadreExacto) ||
+          validatedOrder.items.length < deterministicOrder.items.length
+        ) {
           return res.json({
             success: true,
             parserMode: usedModel ? `AI_HYBRID_${usedModel}` : "DETERMINISTIC_PDF",
@@ -2523,13 +2635,96 @@ REGLAS ESTRICTAS OBLIGATORIAS:
         }
       }
 
+      // 3. Fallback OCR Local (Tesseract.js en Español) para imágenes o PDFs escaneados si la IA externa no estuvo disponible
       if (!validatedOrder) {
-        throw new Error(lastModelError?.message || "No se obtuvo respuesta del motor de IA para el OCR");
+        try {
+          if (actualMime.startsWith("image/")) {
+            const TesseractMod: any = await import("tesseract.js");
+            const recognizeFn = TesseractMod.recognize || TesseractMod.default?.recognize;
+            if (typeof recognizeFn === "function") {
+              const ocrOut = await recognizeFn(binaryBuffer, "spa");
+              const ocrText = String(ocrOut?.data?.text || "").trim();
+              if (ocrText) {
+                const localParsed = parseAlkostoFlexibleOcrText(ocrText);
+                if (localParsed && localParsed.items.length > 0) {
+                  validatedOrder = localParsed;
+                  usedModel = "LOCAL_TESSERACT_OCR";
+                }
+              }
+            }
+          } else if (isPdfPayload) {
+            const { PDFParse } = await import("pdf-parse");
+            const pdfParser = new PDFParse({ data: binaryBuffer });
+            try {
+              const imgRes = await pdfParser.getImage({ imageBuffer: true, first: 1 });
+              const firstPageImgs = imgRes?.pages?.[0]?.images || [];
+              if (firstPageImgs.length > 0 && firstPageImgs[0]?.data) {
+                const TesseractMod: any = await import("tesseract.js");
+                const recognizeFn = TesseractMod.recognize || TesseractMod.default?.recognize;
+                if (typeof recognizeFn === "function") {
+                  const ocrOut = await recognizeFn(Buffer.from(firstPageImgs[0].data), "spa");
+                  const ocrText = String(ocrOut?.data?.text || "").trim();
+                  if (ocrText) {
+                    const localParsed = parseAlkostoFlexibleOcrText(ocrText);
+                    if (localParsed && localParsed.items.length > 0) {
+                      validatedOrder = localParsed;
+                      usedModel = "LOCAL_PDF_TESSERACT_OCR";
+                    }
+                  }
+                }
+              }
+            } finally {
+              await pdfParser.destroy().catch(() => {});
+            }
+          }
+        } catch (localErr: any) {
+          console.warn("[ALKOSTO OCR] Advertencia en fallback OCR local:", localErr?.message);
+        }
       }
 
-      return res.json({ success: true, parserMode: `AI_VALIDATED_${usedModel}`, data: validatedOrder });
+      if (!validatedOrder) {
+        const lastMsg = String(lastModelError?.message || "");
+        const isAuthOrKeyError =
+          apiKeys.length === 0 ||
+          /API_KEY_INVALID|API key not valid|reported as leaked|PERMISSION_DENIED/i.test(lastMsg);
+        const isQuotaError =
+          /RESOURCE_EXHAUSTED|prepayment credits|quota|billing|429/i.test(lastMsg);
+
+        if (isAuthOrKeyError) {
+          console.error("[ALKOSTO OCR] Error de configuración de clave Gemini API:", lastMsg.slice(0, 200));
+          return res.status(503).json({
+            error: "El servicio de IA no tiene una clave GEMINI_API_KEY activa para analizar imágenes. Sube el archivo en formato PDF digital original de Alkosto o verifica la configuración del servidor.",
+            code: "AI_API_KEY_UNAVAILABLE"
+          });
+        }
+        if (isQuotaError) {
+          console.error("[ALKOSTO OCR] Cuota agotada en Gemini API:", lastMsg.slice(0, 200));
+          return res.status(503).json({
+            error: "El servicio de lectura con IA alcanzó su límite temporal de solicitudes. Intenta nuevamente en unos segundos o sube el PDF digital de la Orden de Compra.",
+            code: "AI_QUOTA_EXCEEDED"
+          });
+        }
+
+        throw new Error(
+          lastMsg || "No fue posible extraer renglones válidos de la Orden de Compra. Asegúrate de que la imagen o PDF sea legible."
+        );
+      }
+
+      return res.json({
+        success: true,
+        parserMode: `AI_VALIDATED_${usedModel}`,
+        data: validatedOrder
+      });
     } catch (err: any) {
-      console.error("Error en OCR Alkosto:", err);
+      const errStatus = err?.status || err?.statusCode || 500;
+      const errMessage = String(err?.message || "Error desconocido");
+      console.error("[ALKOSTO OCR] Error detallado procesando Orden de Compra:", {
+        statusCode: errStatus,
+        name: err?.name,
+        code: err?.code,
+        message: errMessage.slice(0, 500)
+      });
+
       if (err instanceof AlkostoParseValidationError) {
         return res.status(422).json({
           error: err.message,
@@ -2537,8 +2732,31 @@ REGLAS ESTRICTAS OBLIGATORIAS:
           issues: err.issues
         });
       }
-      const quota = /RESOURCE_EXHAUSTED|prepayment credits|quota|billing/i.test(String(err?.message || ''));
-      return res.status(quota ? 503 : 500).json({ error: quota ? "El lector automático (IA) no está disponible temporalmente. Ingresa la orden manualmente." : "Error procesando orden de compra" });
+
+      const isQuota = /RESOURCE_EXHAUSTED|prepayment credits|quota|billing|429/i.test(errMessage);
+      const isKey = /API_KEY_INVALID|API key not valid|reported as leaked|PERMISSION_DENIED/i.test(errMessage);
+      const isParse = /JSON|renglones|interpretar|legible/i.test(errMessage);
+
+      if (isQuota || isKey) {
+        return res.status(503).json({
+          error: isKey
+            ? "El motor de IA requiere actualizar la credencial GEMINI_API_KEY en el servidor. Puedes subir el PDF digital original de Alkosto o ingresar los datos manualmente."
+            : "El lector automático (IA) está temporalmente saturado. Por favor reintenta en unos segundos o sube el PDF digital.",
+          code: isKey ? "AI_KEY_INVALID" : "AI_QUOTA_EXCEEDED"
+        });
+      }
+
+      if (isParse) {
+        return res.status(422).json({
+          error: `No se pudo estructurar la Orden de Compra: ${errMessage}`,
+          code: "OC_PARSE_ERROR"
+        });
+      }
+
+      return res.status(500).json({
+        error: `No se pudo procesar la Orden de Compra (${errMessage.slice(0, 140)}). Verifica que el archivo sea un JPG, PNG, WEBP o PDF válido.`,
+        code: "OC_PROCESSING_ERROR"
+      });
     }
   });
 
