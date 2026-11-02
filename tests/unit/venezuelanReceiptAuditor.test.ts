@@ -226,4 +226,40 @@ describe('Agente Experto en Auditoría Bancaria Venezolana (venezuelanReceiptAud
     expect(partial.nro_referencia).toBeNull();
     expect(partial.titular_remitente).toBeNull();
   });
+
+  it('Inferencia por patrón y posición (Provinet / tabla recortada sin etiquetas): extrae fecha, referencia con ceros iniciales, monto sin Bs. y banco por cuenta 0108*****', () => {
+    const croppedProvinetText = `
+      0108*****40*****7396
+      02/11/2026
+      000019111
+      576.599,07
+    `;
+
+    const parsed = parseVenezuelanReceiptText(croppedProvinetText);
+    expect(parsed.legible).toBe(true);
+    expect(parsed.fecha_pago).toBe('02/11/2026');
+    expect(parsed.fecha_iso).toBe('2026-11-02');
+    expect(parsed.referencia).toBe('000019111');
+    expect(parsed.nro_referencia).toBe('000019111');
+    expect(parsed.monto_bs).toBe(576599.07);
+    expect(parsed.banco).toBe('BBVA Provincial');
+    expect(parsed.titular_remitente).toBeNull();
+    expect(parsed.rif_ci_titular).toBeNull();
+
+    const auditedDirect = auditAndNormalizeReceiptPayload({
+      fecha_pago: '02/11/2026',
+      referencia: '000019111',
+      monto_bs: 576599.07,
+      monto_bs_formateado: '576.599,07',
+      banco: null,
+      metodo_pago: 'Pago Móvil',
+      cuenta_enmascarada: '0108*****40*****7396',
+      titular: '',
+      rif_ci: ''
+    });
+    expect(auditedDirect.banco).toBe('BBVA Provincial');
+    expect(auditedDirect.referencia).toBe('000019111');
+    expect(auditedDirect.monto_bs).toBe(576599.07);
+    expect(auditedDirect.fecha_pago).toBe('02/11/2026');
+  });
 });
