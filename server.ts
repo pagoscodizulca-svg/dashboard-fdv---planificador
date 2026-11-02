@@ -34,6 +34,9 @@ import {
 } from "./src/services/alkostoOcParser";
 import {
   VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT,
+  VENEZUELAN_RECEIPT_RESPONSE_SCHEMA,
+  detectReceiptMimeType,
+  extractSupportWithGemini,
   safeExtractReceiptJson,
   auditAndNormalizeReceiptPayload,
   parseVenezuelanReceiptText,
@@ -2273,7 +2276,9 @@ async function startServer() {
   }
 
   // LECTOR OCR INTELIGENTE Y DETERMINISTA DE ÓRDENES DE COMPRA ALKOSTO Y FAMILIA CENTER
-  app.post("/api/alkosto/ocr-orden", authenticateToken, rateLimiter(10 * 60000, 30, 'OCR Orden Alkosto'), async (req: any, res: any) => {
+  // Nota: Se utiliza rateLimiter sin bloqueo por JWT expirado (igual que /api/cadenas/sucursales)
+  // para evitar que una sesión antigua en caché impida procesar la Orden de Compra en campo.
+  app.post("/api/alkosto/ocr-orden", rateLimiter(10 * 60000, 30, 'OCR Orden Alkosto'), async (req: any, res: any) => {
     req.setTimeout?.(120000);
     res.setTimeout?.(120000);
     let currentStage: AlkostoOcrStage = "1-Archivo";
@@ -2644,121 +2649,55 @@ async function startServer() {
   let cachedBcvRate = 875.65;
 
   // AGENTE EXPERTO EN AUDITORÍA BANCARIA Y EXTRACCIÓN DE DATOS FINANCIEROS EN VENEZUELA
-  app.post("/api/ocr", authenticateToken, rateLimiter(10 * 60000, 30, 'OCR Bancario'), async (req: any, res: any) => {
+  // Nota: Se emplea rateLimiter sin bloqueo por JWT expirado para evitar fallos 401/403 en campo.
+  app.post("/api/ocr", rateLimiter(10 * 60000, 30, 'OCR Bancario'), async (req: any, res: any) => {
     try {
-      const { imageBase64, mimeType = "image/jpeg" } = req.body || {};
+      const { imageBase64, mimeType = "image/jpeg", fileName = "" } = req.body || {};
       if (!imageBase64) {
         return res.status(400).json({ error: "Falta la imagen o PDF del comprobante de pago." });
       }
 
-      let cleanBase64 = String(imageBase64).trim();
-      let actualMime = String(mimeType || "image/jpeg").trim().toLowerCase();
-      if (cleanBase64.startsWith("data:")) {
-        const matches = cleanBase64.match(/^data:([^;]+);base64,([\s\S]+)$/);
-        if (matches) {
-          actualMime = matches[1].trim().toLowerCase();
-          cleanBase64 = matches[2].trim();
-        }
-      }
-      cleanBase64 = cleanBase64.replace(/\s+/g, "");
+      const rawBase64Str = String(imageBase64).trim();
+      const cleanBase64 = (rawBase64Str.includes(",") ? rawBase64Str.split(",")[1] : rawBase64Str).replace(/\s+/g, "");
 
       const binaryBuffer = Buffer.from(cleanBase64, "base64");
       if (!binaryBuffer || binaryBuffer.length < 32) {
         return res.status(400).json({ error: "El archivo del comprobante está vacío o corrupto." });
       }
 
-      // Detección real por magic bytes para tolerar MIME erróneos provenientes de WhatsApp / WebView
-      if (binaryBuffer.subarray(0, 4).toString("ascii") === "%PDF") {
-        actualMime = "application/pdf";
-      } else if (
-        binaryBuffer[0] === 0x89 &&
-        binaryBuffer[1] === 0x50 &&
-        binaryBuffer[2] === 0x4e &&
-        binaryBuffer[3] === 0x47
-      ) {
-        actualMime = "image/png";
-      } else if (
-        binaryBuffer[0] === 0xff &&
-        binaryBuffer[1] === 0xd8 &&
-        binaryBuffer[2] === 0xff
-      ) {
-        actualMime = "image/jpeg";
-      } else if (
-        binaryBuffer.subarray(0, 4).toString("ascii") === "RIFF" &&
-        binaryBuffer.subarray(8, 12).toString("ascii") === "WEBP"
-      ) {
-        actualMime = "image/webp";
-      }
+      // Detección dinámica real de mimeType por magic bytes + DataURL + extensión
+      const actualMime = detectReceiptMimeType(binaryBuffer, mimeType, fileName);
 
       // Descubrir y limpiar claves de API de Gemini configuradas en el entorno
       const rawKeyCandidates = [
         process.env.GEMINI_API_KEY,
         process.env.GOOGLE_API_KEY,
-        process.env.VITE_GEMINI_API_KEY
+        process.env.VITE_GEMINI_API_KEY,
+        process.env.API_KEY
       ]
         .filter(Boolean)
         .flatMap((k) => String(k).split(","))
         .map((k) => k.trim().replace(/^["']+|["']+$/g, "").trim())
-        .filter((k) => k.length > 10);
+        .filter((k) => k.length > 10 && k !== "undefined" && k !== "null");
       const apiKeys = Array.from(new Set(rawKeyCandidates));
-
-      const userInstruction =
-        "Analiza este comprobante o soporte de pago venezolano (imagen o PDF), incluyendo soportes recortados sin etiquetas visibles o fotos a monitores. Cumple estrictamente las reglas anti-alucinación y devuelve únicamente el objeto JSON válido con lectura_exitosa, nivel_confianza, requiere_revision_manual, motivo_revision, datos_extraidos y evidencia_visual.";
 
       let aiResult: AuditedReceiptResult | null = null;
       let lastAiError: any = null;
 
       if (apiKeys.length > 0) {
-        const candidateModels = [
-          "gemini-2.5-flash",
-          "gemini-2.5-pro",
-          "gemini-2.0-flash",
-          "gemini-2.5-flash-lite"
-        ];
+        const geminiExtraction = await extractSupportWithGemini({
+          apiKeys,
+          base64Data: cleanBase64,
+          mimeType: actualMime,
+          fileName
+        });
 
-        outerLoop: for (const apiKey of apiKeys) {
-          const ai = new GoogleGenAI({ apiKey });
-
-          for (const modelName of candidateModels) {
-            try {
-              const response = await ai.models.generateContent({
-                model: modelName,
-                contents: [
-                  {
-                    role: "user",
-                    parts: [
-                      { inlineData: { mimeType: actualMime, data: cleanBase64 } },
-                      { text: userInstruction }
-                    ]
-                  }
-                ],
-                config: {
-                  systemInstruction: VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT,
-                  responseMimeType: "application/json",
-                  temperature: 0.0
-                }
-              });
-              const rawText = response.text || "";
-
-              if (rawText) {
-                const parsedJson = safeExtractReceiptJson(rawText);
-                const audited = auditAndNormalizeReceiptPayload(parsedJson);
-                if (audited.legible || audited.lectura_exitosa) {
-                  return res.json(audited);
-                }
-                aiResult = audited;
-                break outerLoop;
-              }
-            } catch (err: any) {
-              lastAiError = err;
-              const msg = String(err?.message || "");
-              console.warn(`[OCR COBROS IA] Falló modelo ${modelName}:`, msg.slice(0, 220));
-              // Si la API Key específica es inválida o revocada, saltar de inmediato a la siguiente clave o al motor local
-              if (/API_KEY_INVALID|API key not valid|reported as leaked|PERMISSION_DENIED/i.test(msg)) {
-                break;
-              }
-            }
-          }
+        if (geminiExtraction.audited && (geminiExtraction.audited.legible || geminiExtraction.audited.lectura_exitosa)) {
+          return res.json(geminiExtraction.audited);
+        }
+        aiResult = geminiExtraction.audited;
+        if (geminiExtraction.errorMessage) {
+          lastAiError = new Error(geminiExtraction.errorMessage);
         }
       }
 

@@ -232,15 +232,159 @@ ESQUEMA JSON DE SALIDA REQUERIDO:
 export const ALKOSTO_OC_EXTRACTION_SYSTEM_PROMPT = buildAlkostoOcSystemPrompt();
 
 /**
- * Extrae el Base64 limpio desde el resultado de un `FileReader` (`readerResult.includes(',') ? readerResult.split(',')[1] : readerResult`)
+ * Esquema estructurado de salida (`responseSchema`) para Gemini Structured Outputs (Paso 2):
+ * Garantiza que el modelo devuelva JSON válido con los campos requeridos por la Nota de Pedido de Codizulca.
+ */
+export const ALKOSTO_OC_RESPONSE_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    numeroOrden: {
+      type: 'STRING',
+      description: 'Número de la Orden de Compra emitida por Alkosto / Familia Center (ej. "0000054457").'
+    },
+    fechaOrden: {
+      type: 'STRING',
+      description: 'Fecha de emisión de la orden de compra (YYYY-MM-DD o DD/MM/YYYY).'
+    },
+    fechaEntrega: {
+      type: 'STRING',
+      nullable: true,
+      description: 'Fecha estimada de entrega de la orden (YYYY-MM-DD o DD/MM/YYYY).'
+    },
+    diasCredito: {
+      type: 'NUMBER',
+      nullable: true,
+      description: 'Días de crédito de la condición de pago (ej. 10, 15, 30).'
+    },
+    tasaCambio: {
+      type: 'NUMBER',
+      nullable: true,
+      description: 'Tasa de cambio BCV impresa en la cabecera (ej. 872.3927).'
+    },
+    observaciones: {
+      type: 'STRING',
+      nullable: true,
+      description: 'Observaciones generales impresas en la cabecera de la orden.'
+    },
+    tiendasDetectadas: {
+      type: 'ARRAY',
+      description: 'Lista de códigos de las sucursales de Alkosto (AK01..AK10) y Familia Center (FC01..FC07) presentes en la orden, excluyendo AKOP y CI.',
+      items: {
+        type: 'STRING'
+      }
+    },
+    renglones: {
+      type: 'ARRAY',
+      description: 'Totalidad de los renglones de productos de la Orden de Compra unificando todas sus páginas.',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          codigoProducto: {
+            type: 'STRING',
+            description: 'Código principal o SKU del producto (homologado a Codizulca o código impreso).'
+          },
+          ean: {
+            type: 'STRING',
+            nullable: true,
+            description: 'Código de barras EAN-13 si está presente (ej. "7590377000503").'
+          },
+          codigoInternoAlkosto: {
+            type: 'STRING',
+            nullable: true,
+            description: 'Código interno PLU de Alkosto si está presente (ej. "100881").'
+          },
+          descripcion: {
+            type: 'STRING',
+            description: 'Descripción limpia del producto sin el sufijo de PVP tras la barra.'
+          },
+          unidadMedida: {
+            type: 'STRING',
+            nullable: true,
+            description: 'Unidad de medida oficial: "CJ", "KG", "UND" o "BLT".'
+          },
+          unidadesPorEmpaque: {
+            type: 'NUMBER',
+            nullable: true,
+            description: 'Unidades por empaque (columna EMP).'
+          },
+          cantidadTotal: {
+            type: 'NUMBER',
+            description: 'Cantidad total solicitada del producto sumando las sucursales válidas.'
+          },
+          desglosePorTienda: {
+            type: 'ARRAY',
+            description: 'Desglose de cantidades pedidas por cada tienda válida (AK01..AK10, FC01..FC07), ignorando AKOP y CI.',
+            items: {
+              type: 'OBJECT',
+              properties: {
+                tienda: {
+                  type: 'STRING',
+                  description: 'Código de tienda (ej. "AK01", "FC01").'
+                },
+                cantidad: {
+                  type: 'NUMBER',
+                  description: 'Cantidad numérica asignada a esa tienda.'
+                }
+              },
+              required: ['tienda', 'cantidad']
+            }
+          },
+          precioUnitario: {
+            type: 'NUMBER',
+            description: 'Costo o precio unitario neto en USD (sin comas de miles).'
+          },
+          porcentajeDescuento: {
+            type: 'NUMBER',
+            nullable: true,
+            description: 'Porcentaje de descuento o bonificación comercial si aplica.'
+          },
+          subtotal: {
+            type: 'NUMBER',
+            description: 'Subtotal o monto total del renglón en USD (cantidadTotal * precioUnitario).'
+          }
+        },
+        required: [
+          'codigoProducto',
+          'descripcion',
+          'cantidadTotal',
+          'desglosePorTienda',
+          'precioUnitario',
+          'subtotal'
+        ]
+      }
+    },
+    subtotalAlkosto: {
+      type: 'NUMBER',
+      nullable: true,
+      description: 'Subtotal de la página de Alkosto en USD.'
+    },
+    subtotalFamiliaCenter: {
+      type: 'NUMBER',
+      nullable: true,
+      description: 'Subtotal de la página de Familia Center en USD.'
+    },
+    montoTotal: {
+      type: 'NUMBER',
+      description: 'Monto total general de la Orden de Compra en USD.'
+    }
+  },
+  required: ['numeroOrden', 'fechaOrden', 'tiendasDetectadas', 'renglones', 'montoTotal']
+} as const;
+
+/**
+ * Extrae el Base64 limpio desde el resultado de un `FileReader` o cadena Data URL
+ * (`base64String.replace(/^data:(image\/\w+|application\/pdf);base64,/, '')`)
  * eliminando cualquier prefijo `data:<mime>;base64,` y espacios en blanco.
  */
 export function sanitizeBase64Payload(rawBase64: string): string {
   if (!rawBase64 || typeof rawBase64 !== 'string') return '';
-  const readerResult = rawBase64.trim();
+  const readerResult = rawBase64
+    .trim()
+    .replace(/^data:(image\/[\w.+-]+|application\/pdf);base64,/i, '')
+    .replace(/^data:[^;]+;base64,/i, '');
   const base64Data = readerResult.includes(',')
     ? readerResult.split(',')[1] || ''
-    : readerResult.replace(/^data:[^;]+;base64,/i, '');
+    : readerResult;
   return base64Data.replace(/\s+/g, '');
 }
 
@@ -400,6 +544,7 @@ export async function callGeminiWithFallback(params: {
   apiKeys: string | string[];
   prompt?: string;
   systemInstruction?: string;
+  responseSchema?: any;
 }): Promise<{ rawText: string; parsedJson: any; modelUsed: string; usedModel: string }> {
   const cleanBase64 = sanitizeBase64Payload(params.base64Data);
   if (!cleanBase64) {
@@ -432,6 +577,8 @@ export async function callGeminiWithFallback(params: {
     params.prompt ||
     `Analiza minuciosamente todas las páginas de la Orden de Compra de ALKOSTO y FAMILIA CENTER adjunta. Unifica las cantidades por tienda únicamente para las 17 tiendas válidas (${(CADENAS_ABREVIATURAS?.ALKOSTO || []).join(', ')} y ${(CADENAS_ABREVIATURAS?.FAMILIA_CENTER || []).join(', ')}), ignorando por completo AKOP y CI. Normaliza todos los montos sin comas de miles y devuelve ÚNICAMENTE el objeto JSON válido.`;
 
+  const activeSchema = params.responseSchema !== undefined ? params.responseSchema : ALKOSTO_OC_RESPONSE_SCHEMA;
+
   let lastError: any = null;
   let lastStage: AlkostoOcrStage = '2-Conexión Gemini-Render';
 
@@ -447,53 +594,77 @@ export async function callGeminiWithFallback(params: {
     });
 
     for (const modelName of ALKOSTO_OCR_MODEL_CASCADE) {
-      try {
-        lastStage = '2-Conexión Gemini-Render';
-        const response = await ai.models.generateContent({
-          model: modelName,
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                { inlineData: { data: cleanBase64, mimeType: detectedMime } },
-                { text: prompt }
-              ]
+      let useSchemaForModel = Boolean(activeSchema);
+
+      for (let retryAttempt = 1; retryAttempt <= 2; retryAttempt++) {
+        try {
+          lastStage = '2-Conexión Gemini-Render';
+          const response = await ai.models.generateContent({
+            model: modelName,
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  { inlineData: { data: cleanBase64, mimeType: detectedMime } },
+                  { text: prompt }
+                ]
+              }
+            ],
+            config: {
+              systemInstruction,
+              responseMimeType: 'application/json',
+              ...(useSchemaForModel && activeSchema ? { responseSchema: activeSchema } : {}),
+              temperature: 0.1
             }
-          ],
-          config: {
-            systemInstruction,
-            responseMimeType: 'application/json',
-            temperature: 0.1
+          });
+
+          const rawText = String(response?.text || '').trim();
+          if (!rawText) {
+            throw new AlkostoOcrStageError('3-Parseo JSON', `El modelo ${modelName} devolvió una respuesta vacía.`);
           }
-        });
 
-        const rawText = String(response?.text || '').trim();
-        if (!rawText) {
-          throw new AlkostoOcrStageError('3-Parseo JSON', `El modelo ${modelName} devolvió una respuesta vacía.`);
-        }
+          lastStage = '3-Parseo JSON';
+          const parsedJson = extractCleanJson(rawText);
+          if (!parsedJson || typeof parsedJson !== 'object') {
+            throw new AlkostoOcrStageError(
+              '3-Parseo JSON',
+              `El modelo ${modelName} devolvió texto que no pudo convertirse en JSON válido.`
+            );
+          }
 
-        lastStage = '3-Parseo JSON';
-        const parsedJson = extractCleanJson(rawText);
-        if (!parsedJson || typeof parsedJson !== 'object') {
-          throw new AlkostoOcrStageError(
-            '3-Parseo JSON',
-            `El modelo ${modelName} devolvió texto que no pudo convertirse en JSON válido.`
+          return {
+            rawText,
+            parsedJson,
+            modelUsed: modelName,
+            usedModel: modelName
+          };
+        } catch (err: any) {
+          lastError = err;
+          const errMsg = String(err?.message || err);
+          console.warn(
+            `[callGeminiWithFallback] Intento ${retryAttempt}/2 en key#${keyIdx + 1} / modelo ${modelName}: ${errMsg.slice(0, 220)}`
           );
-        }
 
-        return {
-          rawText,
-          parsedJson,
-          modelUsed: modelName,
-          usedModel: modelName
-        };
-      } catch (err: any) {
-        lastError = err;
-        const errMsg = String(err?.message || err);
-        console.warn(`[callGeminiWithFallback] Reintento tras fallo en key#${keyIdx + 1} / modelo ${modelName}: ${errMsg.slice(0, 220)}`);
-        if (/API_KEY_INVALID|API key not valid|reported as leaked|PERMISSION_DENIED/i.test(errMsg)) {
-          break; // Probar siguiente clave si hay otra disponible
+          // Si un modelo específico reporta 400 INVALID_ARGUMENT por responseSchema, reintentar sin schema en ese mismo modelo
+          if (useSchemaForModel && /INVALID_ARGUMENT|response_schema|responseSchema|400/i.test(errMsg)) {
+            useSchemaForModel = false;
+            continue;
+          }
+
+          // Si hay error transitorio de red o 503 Service Unavailable, hacer retry con backoff corto antes de pasar al siguiente modelo
+          const isTransientNetworkOr503 = /503|UNAVAILABLE|overloaded|ETIMEDOUT|ECONNRESET|fetch failed|network/i.test(errMsg);
+          if (isTransientNetworkOr503 && retryAttempt < 2) {
+            await new Promise(resolve => setTimeout(resolve, 450 * retryAttempt));
+            continue;
+          }
+
+          break;
         }
+      }
+
+      const lastErrMsg = String(lastError?.message || '');
+      if (/API_KEY_INVALID|API key not valid|reported as leaked|PERMISSION_DENIED/i.test(lastErrMsg)) {
+        break; // Probar siguiente clave si hay otra disponible
       }
     }
   }
@@ -1836,6 +2007,8 @@ export function validateAndNormalizeAlkostoOC(
         pickProp(it, [
           'codigo_principal',
           'codigoPrincipal',
+          'codigoProducto',
+          'codigo_producto',
           'codigo',
           'sku',
           'SKU',
@@ -1879,6 +2052,7 @@ export function validateAndNormalizeAlkostoOC(
       ) > 0;
     const hasStores =
       (it.tiendas && typeof it.tiendas === 'object' && Object.values(it.tiendas).some(v => parseNumeroEstricto(v, 0) > 0)) ||
+      (Array.isArray(it.desglosePorTienda) && it.desglosePorTienda.some((d: any) => parseNumeroEstricto(d?.cantidad, 0) > 0)) ||
       (Array.isArray(it.distribucionPorTienda) && it.distribucionPorTienda.some((d: any) => parseNumeroEstricto(d?.cantidad, 0) > 0)) ||
       (Array.isArray(it.distribucion_tiendas) && it.distribucion_tiendas.some((d: any) => parseNumeroEstricto(d?.cantidad, 0) > 0));
     return hasCod || hasDesc || hasCant || hasStores;
@@ -1946,12 +2120,13 @@ export function validateAndNormalizeAlkostoOC(
       pickProp(it, [
         'codigo_principal',
         'codigoPrincipal',
+        'codigoProducto',
+        'codigo_producto',
         'codigo',
         'sku',
         'SKU',
         'skuCodizulca',
         'codigo_articulo',
-        'codigo_producto',
         'referencia'
       ])
     );
@@ -2079,8 +2254,10 @@ export function validateAndNormalizeAlkostoOC(
       }
     }
 
-    // Soportar sub-arreglo estructurado `distribucion_tiendas` / `distribucionPorTienda` devuelto por el modelo de IA
+    // Soportar sub-arreglo estructurado `desglosePorTienda` / `distribucion_tiendas` / `distribucionPorTienda` devuelto por el modelo de IA
     const rawDistList = pickProp(it, [
+      'desglosePorTienda',
+      'desglose_por_tienda',
       'distribucion_tiendas',
       'distribucionTiendas',
       'distribucionPorTienda',
@@ -2397,9 +2574,11 @@ export function validateAndNormalizeAlkostoOC(
       renglon: rawNormalizedItems.length + 1,
       codigo: finalCodigo,
       codigoPrincipal: finalCodigo,
+      codigoProducto: finalCodigo,
       skuCodizulca: finalSku,
       codigoBarra: finalBarcode,
       codigoEan: resolvedEan,
+      ean: resolvedEan,
       codigoInternoAlkosto: resolvedCodigoAlkosto,
       descripcion: finalDesc,
       iva: ivaNum,
@@ -2411,8 +2590,14 @@ export function validateAndNormalizeAlkostoOC(
       costoBruto: parseNumeroEstricto(it.costoBruto, precio),
       ...(descuentoNum > 0 ? { descuento: Number(descuentoNum.toFixed(2)) } : {}),
       costoUnitario: precio,
+      precioUnitario: precio,
       totalRenglon: Number(totalRenglon.toFixed(2)),
+      subtotal: Number(totalRenglon.toFixed(2)),
       tiendas: cleanTiendas,
+      desglosePorTienda: Object.entries(cleanTiendas).map(([tienda, cantidad]) => ({
+        tienda,
+        cantidad: Number(cantidad.toFixed(2))
+      })),
       distribucionPorTienda,
       distribucion_tiendas: distribucionTiendasCanonico,
       cuadreTiendasValido,
@@ -2455,11 +2640,16 @@ export function validateAndNormalizeAlkostoOC(
       const sumAll = Object.values(mergedTiendas).reduce((acc, v) => acc + v, 0);
       const primaryCant = sumAk > 0 ? sumAk : sumAll;
       existing.tiendas = mergedTiendas;
+      existing.desglosePorTienda = Object.entries(mergedTiendas).map(([tienda, cantidad]) => ({
+        tienda,
+        cantidad: Number(cantidad.toFixed(2))
+      }));
       existing.distribucionPorTienda = construirDistribucionPorTienda(mergedTiendas);
       existing.distribucion_tiendas = construirDistribucionTiendasCanonico(mergedTiendas);
       existing.totalCantidad = primaryCant;
       existing.cantidadTotal = primaryCant;
       existing.totalRenglon = Number((primaryCant * existing.costoUnitario).toFixed(2));
+      existing.subtotal = Number((primaryCant * existing.costoUnitario).toFixed(2));
       if (item.alertaRevision) {
         existing.alertaRevision = true;
         existing.notaRevision = [existing.notaRevision, item.notaRevision].filter(Boolean).join(' | ') || null;
@@ -2499,13 +2689,14 @@ export function validateAndNormalizeAlkostoOC(
     ''
   ).trim();
   const fechaEmisionExtraida = String(
-    pickProp(cabeceraObj, ['fecha_emision', 'fechaEmision']) ??
-    pickProp(root, ['fechaEmision', 'fecha_emision']) ??
+    pickProp(cabeceraObj, ['fecha_emision', 'fechaEmision', 'fechaOrden', 'fecha_orden']) ??
+    pickProp(root, ['fechaEmision', 'fecha_emision', 'fechaOrden', 'fecha_orden']) ??
+    pickProp(rawInput, ['fechaEmision', 'fecha_emision', 'fechaOrden', 'fecha_orden']) ??
     ''
   ).trim();
   const fechaEntregaExtraida = String(
     pickProp(cabeceraObj, ['fecha_entrega_estimada', 'fechaEntregaEstimada', 'fecha_entrega', 'fechaEntrega']) ??
-    pickProp(root, ['fechaEntrega', 'fecha_entrega', 'fecha_entrega_estimada', 'FECHA', 'fecha', 'entrega', 'fechaEmision', 'fecha_emision']) ??
+    pickProp(root, ['fechaEntrega', 'fecha_entrega', 'fecha_entrega_estimada', 'FECHA', 'fecha', 'entrega', 'fechaEmision', 'fecha_emision', 'fechaOrden']) ??
     ''
   ).trim();
   const monedaExtraida = String(
@@ -2564,9 +2755,9 @@ export function validateAndNormalizeAlkostoOC(
     0
   );
   const explicitSubGen = parseNumeroEstricto(
-    pickProp(root, ['subtotalGeneral', 'subtotal_general', 'total_factura', 'totalFactura', 'totalNeto', 'total_neto', 'total_general']) ??
-    pickProp(cabeceraObj, ['total_factura', 'totalFactura', 'total_general']) ??
-    pickProp(resumenObj, ['monto_total_orden', 'subtotal_neto', 'total_factura', 'total_general']),
+    pickProp(root, ['montoTotal', 'monto_total', 'subtotalGeneral', 'subtotal_general', 'total_factura', 'totalFactura', 'totalNeto', 'total_neto', 'total_general']) ??
+    pickProp(cabeceraObj, ['montoTotal', 'total_factura', 'totalFactura', 'total_general']) ??
+    pickProp(resumenObj, ['monto_total_orden', 'montoTotal', 'subtotal_neto', 'total_factura', 'total_general']),
     0
   );
 
@@ -2580,7 +2771,7 @@ export function validateAndNormalizeAlkostoOC(
 
   const subtotalCalc = Number(normalizedItems.reduce((acc, it) => acc + (it.totalRenglon || 0), 0).toFixed(2));
   const rawSubtotal = parseNumeroEstricto(
-    root.subtotal ?? root.total ?? pickProp(resumenObj, ['subtotal_neto', 'monto_total_orden']),
+    root.subtotal ?? root.total ?? root.montoTotal ?? pickProp(resumenObj, ['subtotal_neto', 'monto_total_orden']),
     0
   );
   const normalizedFechaEmision = normalizarFechaAlkosto(fechaEmisionExtraida || fechaEntregaExtraida || '');
@@ -2669,7 +2860,7 @@ export function validateAndNormalizeAlkostoOC(
   const subtotalNetoFinal = subtotalCalc;
   const montoTotalOrdenCalc = Number((subtotalNetoFinal + totalImpuestosFinal).toFixed(2));
   const explicitMontoTotalOrden = parseNumeroEstricto(
-    pickProp(resumenObj, ['monto_total_orden', 'montoTotalOrden']),
+    pickProp(resumenObj, ['monto_total_orden', 'montoTotalOrden']) ?? root.montoTotal,
     0
   );
   const anyRowAlert = renglonesCanonicos.some(r => r.alerta_revision);
@@ -2694,9 +2885,12 @@ export function validateAndNormalizeAlkostoOC(
     cuadre_aritmetico_correcto: cuadreAritmeticoCorrecto
   };
 
+  const tiendasDetectadasList = Array.from(allStoreTags);
+
   return {
     clienteCadena,
     cadenasDetectadas: root.cadenasDetectadas || (hasAk && hasFc ? ['ALKOSTO', 'FAMILIA_CENTER'] : [clienteCadena as any]),
+    tiendasDetectadas: tiendasDetectadasList,
     clienteNombre: clienteNombreClean || undefined,
     idCliente: idClienteClean || undefined,
     ruta: rutaClean || undefined,
@@ -2705,9 +2899,11 @@ export function validateAndNormalizeAlkostoOC(
     cantidadCestas: cantidadCestasClean !== undefined ? cantidadCestasClean : undefined,
     nroPedido: nroPedidoClean || undefined,
     ordenNro: rawOrdenNro || 'S/N',
+    numeroOrden: rawOrdenNro || 'S/N',
     numero_oc: rawOrdenNro || 'S/N',
     sede: String(root.sede || (clienteCadena === 'FAMILIA_CENTER' ? 'FCOP' : 'AKOP')).trim(),
     fechaEmision: normalizedFechaEmision,
+    fechaOrden: normalizedFechaEmision,
     fecha_emision: normalizedFechaEmision,
     fechaEntrega: normalizedFechaEntrega,
     moneda: monedaExtraida,
@@ -2718,6 +2914,7 @@ export function validateAndNormalizeAlkostoOC(
     proveedorRif: String(root.proveedorRif || 'J409876136').trim(),
     observaciones: observacionesClean || undefined,
     subtotal: rawSubtotal > 0 ? rawSubtotal : subtotalCalc,
+    montoTotal: finalSubGen ?? (rawSubtotal > 0 ? rawSubtotal : subtotalCalc),
     subtotalAlkosto: finalSubAk,
     subtotalFamiliaCenter: finalSubFc,
     subtotalGeneral: finalSubGen,
@@ -2814,22 +3011,24 @@ export function normalizeOrderForCodizulca(rawData: any): ParsedOrdenCompraAlkos
       }
     }
 
-    const distInput = Array.isArray(it.distribucion_tiendas)
-      ? it.distribucion_tiendas
-      : Array.isArray(it.distribucionPorTienda)
-        ? it.distribucionPorTienda
-        : [];
+    const distInput = Array.isArray(it.desglosePorTienda)
+      ? it.desglosePorTienda
+      : Array.isArray(it.distribucion_tiendas)
+        ? it.distribucion_tiendas
+        : Array.isArray(it.distribucionPorTienda)
+          ? it.distribucionPorTienda
+          : [];
     for (const d of distInput) {
       if (!d || typeof d !== 'object') continue;
-      const tag = safeStr((d as any).codigo_tienda ?? (d as any).codigoTienda).toUpperCase();
+      const tag = safeStr((d as any).tienda ?? (d as any).codigo_tienda ?? (d as any).codigoTienda).toUpperCase();
       const qty = safeNum((d as any).cantidad, 0);
       if (valid17Stores.has(tag) && qty > 0 && cleanStores[tag] === undefined) {
         cleanStores[tag] = Number(qty.toFixed(2));
       }
     }
 
-    const codeKey = safeStr(it.codigo || it.codigoPrincipal || it.skuCodizulca || it.codigoBarra, `ITEM_${i + 1}`);
-    const costoUnit = safeNum(it.costoUnitario, 0);
+    const codeKey = safeStr(it.codigo || it.codigoPrincipal || it.codigoProducto || it.skuCodizulca || it.codigoBarra, `ITEM_${i + 1}`);
+    const costoUnit = safeNum(it.costoUnitario ?? it.precioUnitario, 0);
     const costoBruto = safeNum(it.costoBruto, costoUnit);
     const sumAk = Object.entries(cleanStores)
       .filter(([tk]) => tk.startsWith('AK'))
@@ -2851,19 +3050,26 @@ export function normalizeOrderForCodizulca(rawData: any): ParsedOrdenCompraAlkos
       const mSumAll = Object.values(mergedTiendas).reduce((acc, v) => acc + v, 0);
       const primaryCant = mSumAk > 0 ? mSumAk : mSumAll;
       existing.tiendas = mergedTiendas;
+      existing.desglosePorTienda = Object.entries(mergedTiendas).map(([tienda, cantidad]) => ({
+        tienda,
+        cantidad: Number(cantidad.toFixed(2))
+      }));
       existing.distribucionPorTienda = construirDistribucionPorTienda(mergedTiendas);
       existing.distribucion_tiendas = construirDistribucionTiendasCanonico(mergedTiendas);
       existing.totalCantidad = Number(primaryCant.toFixed(2));
       existing.cantidadTotal = Number(primaryCant.toFixed(2));
       existing.totalRenglon = Number((primaryCant * existing.costoUnitario).toFixed(2));
+      existing.subtotal = Number((primaryCant * existing.costoUnitario).toFixed(2));
     } else {
       mergedItemsMap.set(codeKey, {
         renglon: mergedItemsMap.size + 1,
         codigo: codeKey,
         codigoPrincipal: safeStr(it.codigoPrincipal, codeKey),
+        codigoProducto: safeStr(it.codigoProducto, codeKey),
         skuCodizulca: safeStr(it.skuCodizulca, codeKey),
         codigoBarra: safeStr(it.codigoBarra, ''),
         codigoEan: it.codigoEan ?? (it.codigoBarra || null),
+        ean: it.ean ?? it.codigoEan ?? (it.codigoBarra || null),
         codigoInternoAlkosto: it.codigoInternoAlkosto ?? null,
         descripcion: safeStr(it.descripcion, 'PRODUCTO CODIZULCA'),
         iva: safeNum(it.iva, 0),
@@ -2875,8 +3081,14 @@ export function normalizeOrderForCodizulca(rawData: any): ParsedOrdenCompraAlkos
         costoBruto,
         ...(safeNum(it.descuento, 0) > 0 ? { descuento: Number(safeNum(it.descuento, 0).toFixed(2)) } : {}),
         costoUnitario: costoUnit,
+        precioUnitario: costoUnit,
         totalRenglon: effectiveTotal > 0 ? effectiveTotal : Number(safeNum(it.totalRenglon, 0).toFixed(2)),
+        subtotal: effectiveTotal > 0 ? effectiveTotal : Number(safeNum(it.totalRenglon, 0).toFixed(2)),
         tiendas: cleanStores,
+        desglosePorTienda: Object.entries(cleanStores).map(([tienda, cantidad]) => ({
+          tienda,
+          cantidad: Number(cantidad.toFixed(2))
+        })),
         distribucionPorTienda: construirDistribucionPorTienda(cleanStores),
         distribucion_tiendas: construirDistribucionTiendasCanonico(cleanStores),
         cuadreTiendasValido: it.cuadreTiendasValido !== false,
@@ -2933,13 +3145,18 @@ export function normalizeOrderForCodizulca(rawData: any): ParsedOrdenCompraAlkos
       ? safeNum(validated.subtotalGeneral, 0)
       : Number((subAkFinal + subFcFinal).toFixed(2)) || safeNum(validated.subtotal, 0);
 
-  const ordenNroSafe = safeStr(validated.ordenNro || validated.numero_oc || (rawData as any)?.numero_orden, 'S/N');
-  const fechaEmisionSafe = safeStr(validated.fechaEmision || validated.fecha_emision || (rawData as any)?.fecha_emision, '');
+  const ordenNroSafe = safeStr(validated.ordenNro || validated.numeroOrden || validated.numero_oc || (rawData as any)?.numeroOrden || (rawData as any)?.numero_orden, 'S/N');
+  const fechaEmisionSafe = safeStr(validated.fechaEmision || validated.fechaOrden || validated.fecha_emision || (rawData as any)?.fechaOrden || (rawData as any)?.fecha_emision, '');
   const fechaEntregaSafe = safeStr(validated.fechaEntrega || (rawData as any)?.fecha_entrega || fechaEmisionSafe, '');
   const diasCreditoSafe = Math.max(0, Math.round(safeNum(validated.diasCredito ?? (rawData as any)?.dias_credito, 15)));
   const tasaCambioSafe = safeNum(validated.tasaCambio ?? (rawData as any)?.tasa_cambio, 0);
   const observacionesSafe = safeStr(validated.observaciones ?? (rawData as any)?.observaciones, '');
   const subtotalSafe = safeNum(validated.subtotal, 0) > 0 ? safeNum(validated.subtotal, 0) : (subAkFinal > 0 ? subAkFinal : subGenFinal);
+
+  const tiendasDetectadasSafe = new Set<string>();
+  safeItems.forEach(it => {
+    if (it.tiendas) Object.keys(it.tiendas).forEach(t => tiendasDetectadasSafe.add(t));
+  });
 
   return {
     ...validated,
@@ -2947,10 +3164,13 @@ export function normalizeOrderForCodizulca(rawData: any): ParsedOrdenCompraAlkos
     cadenasDetectadas: Array.isArray(validated.cadenasDetectadas) && validated.cadenasDetectadas.length > 0
       ? validated.cadenasDetectadas
       : ['ALKOSTO'],
+    tiendasDetectadas: Array.from(tiendasDetectadasSafe),
     ordenNro: ordenNroSafe,
+    numeroOrden: ordenNroSafe,
     numero_oc: ordenNroSafe,
     sede: safeStr(validated.sede, 'AKOP'),
     fechaEmision: fechaEmisionSafe,
+    fechaOrden: fechaEmisionSafe,
     fecha_emision: fechaEmisionSafe,
     fechaEntrega: fechaEntregaSafe,
     moneda: safeStr(validated.moneda, 'USD'),
@@ -2961,6 +3181,7 @@ export function normalizeOrderForCodizulca(rawData: any): ParsedOrdenCompraAlkos
     proveedorRif: safeStr(validated.proveedorRif, 'J409876136'),
     observaciones: observacionesSafe,
     subtotal: Number(subtotalSafe.toFixed(2)),
+    montoTotal: Number((subGenFinal || subtotalSafe).toFixed(2)),
     subtotalAlkosto: subAkFinal > 0 ? Number(subAkFinal.toFixed(2)) : undefined,
     subtotalFamiliaCenter: subFcFinal > 0 ? Number(subFcFinal.toFixed(2)) : undefined,
     subtotalGeneral: subGenFinal > 0 ? Number(subGenFinal.toFixed(2)) : undefined,

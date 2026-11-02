@@ -9,6 +9,8 @@
  *    continuidad operativa ante micro-cortes o indisponibilidad de API externa.
  */
 
+import { GoogleGenAI, Type } from '@google/genai';
+
 export type MetodoPagoSoportado =
   | 'Pago Móvil'
   | 'Transferencia'
@@ -22,6 +24,15 @@ export type ConfianzaLectura = 'alta' | 'media' | 'baja';
 export type NivelConfianzaSoporte = 'ALTO' | 'MEDIO' | 'BAJO';
 
 export const MAX_COHERENT_MONTO_BS = 5_000_000_000;
+
+export interface PreparedGeminiImage {
+  base64Data: string;
+  mimeType: string;
+  dataUrl: string;
+  width?: number;
+  height?: number;
+  wasResized: boolean;
+}
 
 export interface DatosExtraidosSoporte {
   fecha_operacion: string | null;
@@ -73,33 +84,71 @@ export interface AuditedReceiptResult extends Partial<CanonicalVenezuelanReceipt
   observacion_ia: string;
 }
 
-export const VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT = `# ROL Y OBJETIVO
-Eres un motor de extracción de datos financieros de alta precisión especializado en soportes de pago y comprobantes bancarios de Venezuela. Tu única función es extraer datos verificables de la imagen proporcionada y devolverlos exclusivamente en formato JSON válido.
+export const VENEZUELAN_RECEIPT_RESPONSE_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    lectura_exitosa: { type: Type.BOOLEAN },
+    nivel_confianza: { type: Type.STRING, description: 'ALTO, MEDIO o BAJO' },
+    requiere_revision_manual: { type: Type.BOOLEAN },
+    motivo_revision: { type: Type.STRING, nullable: true },
+    datos_extraidos: {
+      type: Type.OBJECT,
+      properties: {
+        fecha_operacion: { type: Type.STRING, nullable: true, description: 'Fecha normalizada YYYY-MM-DD (ej. 2026-11-02) o null' },
+        fecha_original: { type: Type.STRING, nullable: true, description: 'Texto original de la fecha (ej. 02/11/2026) o null' },
+        numero_referencia: { type: Type.STRING, nullable: true, description: 'Referencia con ceros a la izquierda (ej. 000019111) o null' },
+        monto_numerico: { type: Type.NUMBER, nullable: true, description: 'Monto float estándar con punto decimal (ej. 576599.07) o null' },
+        monto_texto: { type: Type.STRING, nullable: true, description: 'Texto original del monto (ej. 576.599,07) o null' },
+        moneda: { type: Type.STRING, nullable: true, description: 'VES o USD o null' },
+        banco_identificado: { type: Type.STRING, nullable: true, description: 'Nombre del banco (ej. BBVA Provincial, Banesco, Banco Mercantil, Banco de Venezuela, Bancamiga, BNC, Bancaribe, Banco Exterior) o null' },
+        codigo_banco: { type: Type.STRING, nullable: true, description: 'Código bancario de 4 dígitos (0108, 0134, 0105, 0102, 0172, 0191, 0114, 0115) o null' },
+        plataforma_canal: { type: Type.STRING, nullable: true, description: 'Provinet, BanescOnline, Mercantil, BDVenlínea, Pago Móvil, Transferencia o null' },
+        numero_cuenta: { type: Type.STRING, nullable: true, description: 'Cuenta de 20 caracteres conservando asteriscos (ej. 0108*****40*****7396) o null' }
+      }
+    },
+    evidencia_visual: {
+      type: Type.OBJECT,
+      properties: {
+        tiene_etiquetas_visibles: { type: Type.BOOLEAN },
+        es_foto_de_pantalla: { type: Type.BOOLEAN },
+        lineas_crudas_detectadas: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING }
+        }
+      }
+    },
+    titular_remitente: { type: Type.STRING, nullable: true },
+    rif_ci_titular: { type: Type.STRING, nullable: true },
+    beneficiario_detectado: { type: Type.STRING, nullable: true },
+    codigo_autorizacion: { type: Type.STRING, nullable: true }
+  },
+  required: ['lectura_exitosa', 'nivel_confianza', 'requiere_revision_manual', 'datos_extraidos', 'evidencia_visual']
+};
 
-# REGLAS ESTRICTAS ANTI-ALUCINACIÓN (CRÍTICO)
-1. CERO INVENCIÓN: Está terminantemente prohibido adivinar, completar, inferir dígitos ocultos o inventar datos que no sean visualmente legibles en la imagen.
-2. MANEJO DE NULOS: Si un dato no aparece en la imagen, está totalmente ilegible o cortado, su valor DEBE ser \`null\`. Nunca inventes valores por defecto.
-3. DÍGITOS ENMASCARADOS: Si un número de cuenta o tarjeta contiene asteriscos (ejemplo: \`0108*****40*****7396\`), extráelo exactamente con los asteriscos en \`numero_cuenta\` (o \`cuenta_origen_o_destino\`) sin intentar adivinar los números ocultos.
-4. PRECISIÓN DE CARACTERES: Conserva todos los ceros a la izquierda en el número de referencia u operación (ejemplo: \`000019111\` debe extraerse como string \`"000019111"\`). Ignora cualquier ícono gráfico de copiado/compartir al final de la referencia (nunca lo conviertas en "0", "O" ni "8").
+export const VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT = `Eres un motor de extracción de datos financieros y bancarios de Venezuela de precisión quirúrgica.
+REGLAS ANTI-ALUCINACIÓN:
+1. PROHIBIDO INVENTAR: Extrae únicamente lo que sea visualmente legible en la imagen. Si un campo no existe o no se lee, devuelve \`null\`.
+2. CUENTAS ENMASCARADAS: Conserva exactamente los asteriscos (ej. \`0108*****40*****7396\`).
+3. CEROS A LA IZQUIERDA: Extrae el número de referencia como texto (\`string\`) respetando todos los ceros iniciales (ej. \`"000019111"\`). Ignora cualquier ícono gráfico de copiado/compartir al final de la referencia.
 
-# HEURÍSTICA PARA SOPORTES RECORTADOS (SIN ETIQUETAS VISIBLES)
-Muchos vendedores suben fotos tomadas a monitores (con efecto moiré) o recortadas donde NO se ven las etiquetas de la izquierda ("Fecha:", "Referencia:", "Monto:", "Banco:"). Cuando no existan etiquetas, clasifica cada fila aplicando estrictamente estas reglas morfológicas:
-- FECHA (\`fecha_operacion\`): Cadena con formato \`DD/MM/YYYY\`, \`DD-MM-YYYY\` o \`YYYY-MM-DD\` (ejemplo: \`02/11/2026\`). Normalízala siempre a \`YYYY-MM-DD\` (\`2026-11-02\`) y guarda el texto original en \`fecha_original\`.
-- REFERENCIA (\`numero_referencia\`): Secuencia numérica continua (usualmente de 6 a 15 dígitos, a menudo con ceros a la izquierda como \`000019111\`) que NO tiene separadores de miles (\`.\`), NO tiene decimales (\`,\`), ni asteriscos (\`*\`).
-- MONTO (\`monto_numerico\` y \`monto_texto\`): Valor numérico con formato monetario venezolano (punto \`.\` para miles y coma \`,\` para dos decimales, ejemplo: \`576.599,07\`). En \`monto_texto\` guarda el string exacto (\`"576.599,07"\`) y en \`monto_numerico\` conviértelo a float estándar con punto decimal (\`576599.07\`).
-- CUENTA BANCARIA (\`numero_cuenta\`): Secuencia de 20 dígitos (o secuencia parcial con asteriscos \`*\` como \`0108*****40*****7396\`) que inicia con un código bancario venezolano de 4 dígitos (\`0102\`, \`0105\`, \`0108\`, \`0134\`, \`0172\`, \`0114\`, \`0115\`, \`0174\`, \`0191\`, etc.).
-- BANCO / PLATAFORMA (\`banco_identificado\` y \`plataforma_canal\`): Identifica el banco por su nombre explícito, por la plataforma en pantalla o por los primeros 4 dígitos de la cuenta:
-  * \`0108\` o texto \`"Provinet"\` -> \`"BBVA Provincial"\`
-  * \`0134\` o texto \`"BanescOnline"\` -> \`"Banesco"\`
-  * \`0105\` o texto \`"Mercantil en Línea"\` -> \`"Banco Mercantil"\`
-  * \`0102\` o texto \`"BDVenlínea"\` -> \`"Banco de Venezuela"\`
+REGLAS DE RECONOCIMIENTO POR PATRONES (SOPORTES RECORTADOS SIN ETIQUETAS):
+Muchos vendedores suben fotos recortadas donde NO aparecen los títulos de las filas ("Fecha", "Referencia", "Monto", "Cuenta", "Banco"). Clasifica cada dato por su morfología visual:
+- FECHA: Patrón \`DD/MM/YYYY\`, \`DD-MM-YYYY\` o \`YYYY-MM-DD\` (ej. \`02/11/2026\`). Normalízala a \`YYYY-MM-DD\` (\`"2026-11-02"\`) y guarda el texto original en \`fecha_original\` (\`"02/11/2026"\`).
+- REFERENCIA: Secuencia de dígitos continuos sin puntos ni comas ni asteriscos (ej. \`"000019111"\`).
+- MONTO: Patrón monetario con separador de miles (\`.\`) y decimales (\`,\`), como \`576.599,07\`. Devuelve el texto original en \`monto_texto\` (\`"576.599,07"\`) y el valor numérico float estándar en \`monto_numerico\` (\`576599.07\`).
+- CUENTA: Secuencia de 20 caracteres (dígitos y asteriscos) que inicia con un código bancario venezolano de 4 dígitos (ej. \`0108*****40*****7396\`).
+- BANCO Y PLATAFORMA: Deduce el banco por texto explícito, nombre de plataforma o los primeros 4 dígitos de la cuenta:
+  * \`0108\` o \`"Provinet"\` -> \`"BBVA Provincial"\`
+  * \`0134\` o \`"BanescOnline"\` -> \`"Banesco"\`
+  * \`0105\` o \`"Mercantil"\` -> \`"Banco Mercantil"\`
+  * \`0102\` o \`"BDVenlínea"\` -> \`"Banco de Venezuela"\`
   * \`0172\` -> \`"Bancamiga"\`
-  * \`0191\` -> \`"BNC (Banco Nacional de Crédito)"\`
+  * \`0191\` -> \`"BNC"\`
   * \`0114\` -> \`"Bancaribe"\`
   * \`0115\` -> \`"Banco Exterior"\`
 
-# ESTRUCTURA DE SALIDA (JSON PURO)
-Responde ÚNICAMENTE con un objeto JSON válido (sin bloques de código markdown ni texto adicional) siguiendo exactamente esta estructura:
+ESTRUCTURA DE SALIDA (JSON PURO):
+Responde ÚNICAMENTE con un objeto JSON válido siguiendo exactamente esta estructura:
 {
   "lectura_exitosa": true,
   "nivel_confianza": "ALTO",
@@ -313,8 +362,236 @@ export function isBeneficiaryRif(rif: string | null | undefined): boolean {
 }
 
 /**
- * Regla 1 y Regla 6: Convierte montos impresos en formato venezolano ("Bs. 203.242,47", "22.000,00 Bs")
- * o estándar a número flotante con 2 decimales (ej. 22000.00) sin separadores de miles.
+ * Detecta dinámicamente el mimeType real de un soporte (`image/jpeg`, `image/png`, `image/webp` o `application/pdf`)
+ * inspeccionando magic bytes, encabezado DataURL, MIME declarado y extensión de archivo.
+ * Nunca deja fijo `image/png` si entra un `.jpeg` o `.webp`.
+ */
+export function detectReceiptMimeType(
+  base64OrDataUrl?: string | Uint8Array | null,
+  declaredMime?: string | null,
+  fileName?: string | null
+): string {
+  if (typeof base64OrDataUrl === 'string') {
+    const trimmed = base64OrDataUrl.trim();
+    const dataUrlMatch = trimmed.match(/^data:(image\/(?:jpeg|jpg|png|webp)|application\/pdf);base64,/i);
+    if (dataUrlMatch) {
+      const m = dataUrlMatch[1].toLowerCase();
+      return m === 'image/jpg' ? 'image/jpeg' : m;
+    }
+    const pureB64 = (trimmed.includes(',') ? trimmed.split(',')[1] : trimmed).replace(/\s+/g, '');
+    if (pureB64.startsWith('JVBERi0')) return 'application/pdf';
+    if (pureB64.startsWith('/9j/')) return 'image/jpeg';
+    if (pureB64.startsWith('iVBORw0KGgo')) return 'image/png';
+    if (pureB64.startsWith('UklGR')) return 'image/webp';
+  } else if (base64OrDataUrl && base64OrDataUrl.length >= 12) {
+    const b = base64OrDataUrl;
+    if (b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46) return 'application/pdf';
+    if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+    if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png';
+    if (
+      b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+      b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50
+    ) {
+      return 'image/webp';
+    }
+  }
+
+  const rawMime = String(declaredMime || '').trim().toLowerCase();
+  if (rawMime === 'image/jpg' || rawMime === 'image/jpeg') return 'image/jpeg';
+  if (rawMime === 'image/png') return 'image/png';
+  if (rawMime === 'image/webp') return 'image/webp';
+  if (rawMime === 'application/pdf') return 'application/pdf';
+
+  const lowerName = String(fileName || '').trim().toLowerCase();
+  if (lowerName.endsWith('.pdf')) return 'application/pdf';
+  if (lowerName.endsWith('.png')) return 'image/png';
+  if (lowerName.endsWith('.webp')) return 'image/webp';
+  if (lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg')) return 'image/jpeg';
+
+  return 'image/jpeg';
+}
+
+/**
+ * 1. ARQUITECTURA DE PROCESAMIENTO DE IMAGEN (PRE-ENVÍO A LA IA): `prepareImageForGemini`
+ * - Acepta archivos `image/jpeg`, `image/png`, `image/webp` (y `application/pdf`).
+ * - Detecta dinámicamente el `mimeType` real del archivo (nunca deja fijo `image/png` si entra un `.jpeg`).
+ * - Extrae únicamente el payload Base64 puro haciendo `.split(',')[1]` sobre el `DataURL` para eliminar
+ *   el prefijo `data:image/...;base64,` (evitando errores 400 Bad Request en `inlineData`).
+ * - Si la imagen supera los 2048px de ancho/alto, la redimensiona en un `<canvas>` manteniendo la
+ *   proporción original y calidad alta (`0.92`) para conservar la nitidez en fotos a monitores (efecto moiré).
+ */
+export async function prepareImageForGemini(
+  input: File | Blob | string,
+  options: { maxDimension?: number; quality?: number; declaredMime?: string; fileName?: string } = {}
+): Promise<PreparedGeminiImage> {
+  const maxDim = options.maxDimension ?? 2048;
+  const quality = options.quality ?? 0.92;
+
+  const readInputAsDataUrl = (): Promise<{ dataUrl: string; declaredMime: string; fileName: string }> => {
+    if (typeof input === 'string') {
+      const trimmed = input.trim();
+      const detected = detectReceiptMimeType(trimmed, options.declaredMime, options.fileName);
+      const pure = (trimmed.includes(',') ? trimmed.split(',')[1] : trimmed).replace(/\s+/g, '');
+      const fullDataUrl = trimmed.startsWith('data:') ? trimmed : `data:${detected};base64,${pure}`;
+      return Promise.resolve({
+        dataUrl: fullDataUrl,
+        declaredMime: detected,
+        fileName: options.fileName || ''
+      });
+    }
+
+    const fileObj = input as File;
+    const fMime = fileObj.type || options.declaredMime || '';
+    const fName = fileObj.name || options.fileName || '';
+
+    if (typeof FileReader !== 'undefined') {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const result = String(e.target?.result || '');
+          if (!result) {
+            return reject(new Error('El archivo de soporte está vacío o no pudo leerse.'));
+          }
+          resolve({ dataUrl: result, declaredMime: fMime, fileName: fName });
+        };
+        reader.onerror = () => reject(new Error('Error al leer el archivo de soporte.'));
+        reader.readAsDataURL(input);
+      });
+    }
+
+    return input.arrayBuffer().then((ab) => {
+      const bytes = new Uint8Array(ab);
+      const detected = detectReceiptMimeType(bytes, fMime, fName);
+      let binary = '';
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const b64 = typeof Buffer !== 'undefined' ? Buffer.from(ab).toString('base64') : btoa(binary);
+      return {
+        dataUrl: `data:${detected};base64,${b64}`,
+        declaredMime: detected,
+        fileName: fName
+      };
+    });
+  };
+
+  const { dataUrl, declaredMime, fileName } = await readInputAsDataUrl();
+  const rawBase64 = (dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl).replace(/\s+/g, '');
+  const detectedMime = detectReceiptMimeType(rawBase64, declaredMime, fileName);
+
+  // Si es PDF o estamos en entorno Node sin DOM Image/Canvas, retornar el Base64 puro con su MIME real
+  if (
+    detectedMime === 'application/pdf' ||
+    typeof window === 'undefined' ||
+    typeof document === 'undefined' ||
+    typeof Image === 'undefined'
+  ) {
+    return {
+      base64Data: rawBase64,
+      mimeType: detectedMime,
+      dataUrl: `data:${detectedMime};base64,${rawBase64}`,
+      wasResized: false
+    };
+  }
+
+  // En navegador: verificar dimensiones de la imagen y redimensionar en <canvas> si supera 2048px (calidad 0.92)
+  return new Promise<PreparedGeminiImage>((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        let width = img.naturalWidth || img.width || 0;
+        let height = img.naturalHeight || img.height || 0;
+
+        if (width <= 0 || height <= 0 || (width <= maxDim && height <= maxDim)) {
+          return resolve({
+            base64Data: rawBase64,
+            mimeType: detectedMime,
+            dataUrl: `data:${detectedMime};base64,${rawBase64}`,
+            width: width || undefined,
+            height: height || undefined,
+            wasResized: false
+          });
+        }
+
+        if (width > height) {
+          height = Math.round((height * maxDim) / width);
+          width = maxDim;
+        } else {
+          width = Math.round((width * maxDim) / height);
+          height = maxDim;
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          return resolve({
+            base64Data: rawBase64,
+            mimeType: detectedMime,
+            dataUrl: `data:${detectedMime};base64,${rawBase64}`,
+            width,
+            height,
+            wasResized: false
+          });
+        }
+
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        const outputMime = detectedMime === 'image/png' || detectedMime === 'image/webp' ? detectedMime : 'image/jpeg';
+        if (outputMime === 'image/jpeg') {
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, width, height);
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const resizedDataUrl = canvas.toDataURL(outputMime, quality);
+        const resizedBase64 = (resizedDataUrl.includes(',') ? resizedDataUrl.split(',')[1] : resizedDataUrl).replace(/\s+/g, '');
+        const finalMime = detectReceiptMimeType(resizedBase64, outputMime, fileName);
+
+        resolve({
+          base64Data: resizedBase64,
+          mimeType: finalMime,
+          dataUrl: `data:${finalMime};base64,${resizedBase64}`,
+          width,
+          height,
+          wasResized: true
+        });
+      } catch {
+        resolve({
+          base64Data: rawBase64,
+          mimeType: detectedMime,
+          dataUrl: `data:${detectedMime};base64,${rawBase64}`,
+          wasResized: false
+        });
+      }
+    };
+    img.onerror = () => {
+      resolve({
+        base64Data: rawBase64,
+        mimeType: detectedMime,
+        dataUrl: `data:${detectedMime};base64,${rawBase64}`,
+        wasResized: false
+      });
+    };
+    img.src = `data:${detectedMime};base64,${rawBase64}`;
+  });
+}
+
+/**
+ * 3. PARSER NUMÉRICO VENEZOLANO EN CÓDIGO (DOBLE VERIFICACIÓN): `parseMontoVenezolano(valor)`
+ * Si la IA o el usuario devuelve `"576.599,07"`, elimina los puntos de miles y reemplaza la coma decimal
+ * por punto antes de hacer `parseFloat()`, garantizando que el resultado sea exactamente `576599.07`
+ * y nunca `NaN` ni `576.599`.
+ */
+export function parseMontoVenezolano(valor: unknown): number {
+  const parsed = parseVenezuelanMonto(valor);
+  return parsed !== null && Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * Regla 1 y Regla 6: Convierte montos impresos en formato venezolano ("Bs. 203.242,47", "576.599,07", "22.000,00 Bs")
+ * o estándar a número flotante con 2 decimales (ej. 576599.07) sin separadores de miles.
  * Rechaza dígitos de teléfonos, RIF/Cédula, cuentas bancarias o montos incoherentes (> 5.000.000.000,00 Bs o > 10 dígitos enteros).
  */
 export function parseVenezuelanMonto(val: unknown): number | null {
@@ -1395,4 +1672,122 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
         ? 'Comprobante de operación exitosa leído correctamente.'
         : 'Lectura parcial del comprobante; verifique los campos antes de consolidar.'
   });
+}
+
+export const VENEZUELAN_RECEIPT_MODEL_CASCADE = [
+  'gemini-2.5-flash',
+  'gemini-2.5-pro',
+  'gemini-2.0-flash',
+  'gemini-2.5-flash-lite'
+] as const;
+
+/**
+ * 2. SERVICIO DE EXTRACCIÓN CON GEMINI API (DETERMINISTA Y ESTRUCTURADO): `extractSupportWithGemini`
+ * - Configura `temperature: 0.0` y `topP: 0.1` para eliminar cualquier creatividad o invención de datos.
+ * - Fuerza `responseMimeType: "application/json"` y define `responseSchema: VENEZUELAN_RECEIPT_RESPONSE_SCHEMA`
+ *   para que el modelo NUNCA devuelva bloques markdown ni rompa el `JSON.parse()`.
+ * - Incluye bloque `try / catch` detallado que captura errores de red, cuota o imágenes ilegibles
+ *   sin romper la interfaz de usuario, y aplica doble verificación numérica con `parseMontoVenezolano`.
+ */
+export async function extractSupportWithGemini(options: {
+  apiKeys: string[];
+  base64Data: string;
+  mimeType: string;
+  fileName?: string;
+}): Promise<{
+  audited: AuditedReceiptResult | null;
+  usedModel: string | null;
+  errorType: 'NONE' | 'NO_API_KEY' | 'QUOTA_EXCEEDED' | 'NETWORK_ERROR' | 'UNREADABLE_IMAGE';
+  errorMessage: string | null;
+}> {
+  const { apiKeys, base64Data, mimeType, fileName } = options;
+  const cleanB64 = (base64Data.includes(',') ? base64Data.split(',')[1] : base64Data).replace(/\s+/g, '');
+  const resolvedMime = detectReceiptMimeType(cleanB64, mimeType, fileName);
+
+  if (!apiKeys || apiKeys.length === 0) {
+    return {
+      audited: null,
+      usedModel: null,
+      errorType: 'NO_API_KEY',
+      errorMessage: 'No hay claves GEMINI_API_KEY configuradas para lectura multimodal.'
+    };
+  }
+
+  const userInstruction =
+    'Analiza minuciosamente este soporte o comprobante de pago venezolano (incluyendo soportes recortados sin etiquetas o fotos a pantallas de monitores). Extrae únicamente datos legibles aplicando las reglas anti-alucinación y devuelve el JSON estructurado.';
+
+  let lastErrorMsg = '';
+  let sawQuota = false;
+  let sawNetwork = false;
+  let partialAudited: AuditedReceiptResult | null = null;
+
+  for (const apiKey of apiKeys) {
+    const ai = new GoogleGenAI({ apiKey });
+
+    for (const modelName of VENEZUELAN_RECEIPT_MODEL_CASCADE) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const response = await ai.models.generateContent({
+            model: modelName,
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  { inlineData: { mimeType: resolvedMime, data: cleanB64 } },
+                  { text: userInstruction }
+                ]
+              }
+            ],
+            config: {
+              systemInstruction: VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT,
+              responseMimeType: 'application/json',
+              responseSchema: VENEZUELAN_RECEIPT_RESPONSE_SCHEMA,
+              temperature: 0.0,
+              topP: 0.1
+            }
+          });
+
+          const rawText = String(response?.text || '').trim();
+          if (rawText) {
+            const parsedJson = safeExtractReceiptJson(rawText);
+            const audited = auditAndNormalizeReceiptPayload(parsedJson);
+            if (audited.legible || audited.lectura_exitosa) {
+              return {
+                audited,
+                usedModel: modelName,
+                errorType: 'NONE',
+                errorMessage: null
+              };
+            }
+            partialAudited = audited;
+          }
+          break;
+        } catch (err: any) {
+          const msg = String(err?.message || err || '');
+          lastErrorMsg = msg;
+          if (/RESOURCE_EXHAUSTED|quota|429|billing|prepayment/i.test(msg)) {
+            sawQuota = true;
+          }
+          if (/fetch|network|timeout|ECONNRESET|503|502|504/i.test(msg)) {
+            sawNetwork = true;
+          }
+          if (/API_KEY_INVALID|API key not valid|reported as leaked|PERMISSION_DENIED/i.test(msg)) {
+            break;
+          }
+          if (attempt === 0 && /503|502|504|overloaded|UNAVAILABLE|fetch|network/i.test(msg)) {
+            await new Promise((r) => setTimeout(r, 350));
+            continue;
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  return {
+    audited: partialAudited,
+    usedModel: null,
+    errorType: sawQuota ? 'QUOTA_EXCEEDED' : sawNetwork ? 'NETWORK_ERROR' : 'UNREADABLE_IMAGE',
+    errorMessage: lastErrorMsg || 'No se lograron identificar con claridad los datos del soporte.'
+  };
 }

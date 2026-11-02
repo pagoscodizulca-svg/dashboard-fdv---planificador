@@ -5,7 +5,8 @@ import {
   Camera, UploadCloud, CheckCircle, AlertTriangle, Search, 
   Loader2, Download, History, Trash2, Calendar, FileText, 
   RefreshCw, DollarSign, Building2, User, Hash, ArrowRight,
-  Share2, ClipboardPaste, Smartphone, X, Cloud, CloudOff, Eye, ExternalLink, CreditCard
+  Share2, ClipboardPaste, Smartphone, X, Cloud, CloudOff, Eye, ExternalLink, CreditCard,
+  ZoomIn, ZoomOut
 } from 'lucide-react';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -27,6 +28,11 @@ import {
   normalizeMetodoPago,
   normalizeReferenciaBancaria,
   parseVenezuelanMonto,
+  parseMontoVenezolano,
+  prepareImageForGemini,
+  extractSupportWithGemini,
+  extractNumeroCuentaVenezolana,
+  resolveVenezuelanBankDetails,
   safeExtractReceiptJson
 } from '../services/venezuelanReceiptAuditor';
 
@@ -180,12 +186,30 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
   const [metodoPago, setMetodoPago] = useState<string>('Pago Móvil');
   const [tasa, setTasa] = useState('');
   const [banco, setBanco] = useState('');
+  const [cuentaCanal, setCuentaCanal] = useState('');
   const [montoDisplay, setMontoDisplay] = useState('');
   const [montoNumerico, setMontoNumerico] = useState<number>(0);
   const [referencia, setReferencia] = useState('');
   const [fechaPago, setFechaPago] = useState(() => new Date().toISOString().split('T')[0]);
   const [titular, setTitular] = useState('');
   const [rifTitular, setRifTitular] = useState('');
+
+  // Zoom interactivo para comparar visualmente el soporte contra los datos extraídos + control de campos faltantes (null) y reintento
+  const [previewZoom, setPreviewZoom] = useState<number>(1);
+  const [modalZoom, setModalZoom] = useState<number>(1);
+  const [missingFields, setMissingFields] = useState<{
+    fecha?: boolean;
+    referencia?: boolean;
+    monto?: boolean;
+    banco?: boolean;
+    cuenta?: boolean;
+  }>({});
+  const [lastOcrPayload, setLastOcrPayload] = useState<{
+    base64: string;
+    mimeType: string;
+    fallbackDateIso?: string;
+    fileName?: string;
+  } | null>(null);
 
   // Safe localStorage persistence + IndexedDB offline queue hydration
   const [pagosConsolidados, setPagosConsolidados] = useState<any[]>(() => {
@@ -371,55 +395,42 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
     }
   }, [fechaPago]);
 
-  // Limpiar y parsear montos en formato venezolano e internacional de forma 100% exacta
+  // Limpiar y parsear montos en formato venezolano ("576.599,07" -> 576599.07) e internacional de forma 100% exacta
   const parseMontoExacto = (val: any): number => {
-    if (typeof val === 'number') return isNaN(val) ? 0 : val;
-    if (!val) return 0;
-    const s = String(val).trim();
-    if (/^\d{1,3}(\.\d{3})+(,\d+)?$/.test(s)) {
-      const num = parseFloat(s.replace(/\./g, '').replace(',', '.'));
-      return isNaN(num) ? 0 : num;
-    }
-    if (/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)) {
-      const num = parseFloat(s.replace(/,/g, ''));
-      return isNaN(num) ? 0 : num;
-    }
-    if (/^\d+,\d+$/.test(s)) {
-      const num = parseFloat(s.replace(',', '.'));
-      return isNaN(num) ? 0 : num;
-    }
-    const cleaned = s.replace(/[$BsUSD\s]/gi, '');
-    if (cleaned.includes('.') && cleaned.includes(',')) {
-      if (cleaned.indexOf('.') < cleaned.indexOf(',')) {
-        const n = parseFloat(cleaned.replace(/\./g, '').replace(',', '.'));
-        return isNaN(n) ? 0 : n;
-      } else {
-        const n = parseFloat(cleaned.replace(/,/g, ''));
-        return isNaN(n) ? 0 : n;
-      }
-    }
-    if (cleaned.includes(',')) {
-      const n = parseFloat(cleaned.replace(',', '.'));
-      return isNaN(n) ? 0 : n;
-    }
-    const num = parseFloat(cleaned);
-    return isNaN(num) ? 0 : num;
+    return parseMontoVenezolano(val);
   };
 
   const handleMontoChange = (val: string) => {
     setMontoDisplay(val);
-    const num = parseMontoExacto(val);
+    const num = parseMontoVenezolano(val);
     setMontoNumerico(num);
+    if (num > 0) {
+      setMissingFields((prev) => ({ ...prev, monto: false }));
+    }
   };
 
   const handleMontoBlur = () => {
-    const num = parseMontoExacto(montoDisplay);
+    const num = parseMontoVenezolano(montoDisplay);
     if (num > 0) {
       setMontoDisplay(new Intl.NumberFormat('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(num));
       setMontoNumerico(num);
+      setMissingFields((prev) => ({ ...prev, monto: false }));
     } else {
       setMontoDisplay('');
       setMontoNumerico(0);
+    }
+  };
+
+  const handleCuentaCanalChange = (val: string) => {
+    setCuentaCanal(val);
+    if (val.trim()) {
+      setMissingFields((prev) => ({ ...prev, cuenta: false }));
+      // Deducción automática del banco por prefijo de cuenta (ej. 0108*****40*****7396 -> BBVA Provincial) o plataforma (Provinet, BanescOnline)
+      const deduced = resolveVenezuelanBankDetails(null, val, extractNumeroCuentaVenezolana(val) || val);
+      if (deduced.banco_identificado && !banco.trim()) {
+        setBanco(deduced.banco_identificado);
+        setMissingFields((prev) => ({ ...prev, banco: false }));
+      }
     }
   };
 
@@ -498,7 +509,7 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
     setTimeout(() => setAlertMsg(null), 3000);
   };
 
-  // Fase 1 y 3: Validación estricta de formato/tamaño (máx. 10 MB), soporte PDF + Imagen, vista previa inmediata y retroalimentación Toast
+  // Fase 1 y 3: Validación estricta de formato/tamaño (máx. 10 MB), prepareImageForGemini (<= 2048px, calidad 0.92), vista previa inmediata y retroalimentación Toast
   const handleImageInput = async (file: File, fromWhatsApp = false) => {
     if (pagosConsolidados.length >= 60) {
       notifyUser('error', 'Has alcanzado el límite de 60 pagos en la relación. Por favor exporta en PDF para archivar.', 6000);
@@ -515,9 +526,11 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
       setReceivedFromWhatsApp(true);
     }
 
+    setPreviewZoom(1);
+    setMissingFields({});
     setIsProcessing(true);
-    setProcessingLabel('Procesando soporte...');
-    notifyUser('info', `Procesando soporte "${file.name || 'comprobante'}" (${formatFileSize(file.size)})...`, 4000);
+    setProcessingLabel('Analizando soporte de pago...');
+    notifyUser('info', `Analizando soporte de pago "${file.name || 'comprobante'}" (${formatFileSize(file.size)})...`, 4000);
 
     let finalFile = file;
 
@@ -542,52 +555,14 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
     };
     const fallbackFileDateIso = resolveFallbackFileDateIso(file);
 
-    // Si es un documento PDF compartido desde WhatsApp o seleccionado del dispositivo
-    if (validation.isPdf) {
-      const resolvedPdfName = file.name || `comprobante_${Date.now()}.pdf`;
-      // Mostrar la tarjeta de PDF de inmediato mientras FileReader convierte a Base64
-      setSharedFileMeta({
-        name: resolvedPdfName,
-        mimeType: 'application/pdf',
-        size: file.size,
-        isPdf: true
-      });
-
-      const pdfReader = new FileReader();
-      pdfReader.onload = (e) => {
-        const rawDataUrl = String(e.target?.result || '');
-        const base64Part = rawDataUrl.includes(',') ? rawDataUrl.split(',')[1] : rawDataUrl;
-        const normalizedPdfDataUrl = `data:application/pdf;base64,${base64Part}`;
-        setPreviewImage(null);
-        setPreviewPdfDataUrl(normalizedPdfDataUrl);
-        setSharedFileMeta({
-          name: resolvedPdfName,
-          mimeType: 'application/pdf',
-          size: file.size,
-          isPdf: true
-        });
-        notifyUser(
-          'success',
-          `PDF cargado: ${resolvedPdfName} (${formatFileSize(file.size)}). Extrayendo datos...`,
-          4500
-        );
-        processOCR(base64Part, 'application/pdf', fallbackFileDateIso);
-      };
-      pdfReader.onerror = () => {
-        setIsProcessing(false);
-        notifyUser('error', 'No se pudo leer el documento PDF seleccionado.', 6000);
-      };
-      pdfReader.readAsDataURL(file);
-      return;
-    }
-
-    // Soporte para formato HEIC de iPhone
+    // Soporte para formato HEIC de iPhone antes de pasar a prepareImageForGemini
     if (validation.isHeic) {
       try {
         setProcessingLabel('Convirtiendo soporte HEIC...');
-        const converted = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.8 });
+        const converted = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.92 });
         const blobResult = Array.isArray(converted) ? converted[0] : converted;
         finalFile = new File([blobResult as Blob], (file.name || 'soporte.heic').replace(/\.(heic|heif)$/i, '.jpg'), { type: 'image/jpeg' });
+        setProcessingLabel('Analizando soporte de pago...');
       } catch (err) {
         console.error("Fallo conversión HEIC:", err);
         setIsProcessing(false);
@@ -596,192 +571,205 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
       }
     }
 
-    // Comprimir y redimensionar imagen con Canvas a un máximo de 1200px (calidad 0.80) con fallback directo si Canvas/Image falla en Android WebView
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const rawDataUrl = String(e.target?.result || '');
-      if (!rawDataUrl) {
-        setIsProcessing(false);
-        notifyUser('error', 'El archivo de imagen está vacío o no pudo leerse.', 6000);
-        return;
+    try {
+      const prepared = await prepareImageForGemini(finalFile, { maxDimension: 2048, quality: 0.92 });
+      const isPdfFile = prepared.mimeType === 'application/pdf' || validation.isPdf;
+      const resolvedFileName =
+        finalFile.name || (isPdfFile ? `comprobante_${Date.now()}.pdf` : `soporte_whatsapp.jpg`);
+      const approxBytes = Math.round((prepared.base64Data.length * 3) / 4);
+
+      if (isPdfFile) {
+        setPreviewImage(null);
+        setPreviewPdfDataUrl(prepared.dataUrl);
+        setSharedFileMeta({
+          name: resolvedFileName,
+          mimeType: 'application/pdf',
+          size: finalFile.size || approxBytes,
+          isPdf: true
+        });
+      } else {
+        setPreviewPdfDataUrl(null);
+        setPreviewImage(prepared.dataUrl);
+        setSharedFileMeta({
+          name: resolvedFileName,
+          mimeType: prepared.mimeType,
+          size: finalFile.size || approxBytes,
+          isPdf: false
+        });
       }
 
-      const resolvedName = (finalFile.name || 'soporte_whatsapp.jpg').replace(/\.[^.]+$/, '.jpg');
-
-      // Mostrar previsualización inmediata con el DataURL original para que la pantalla NUNCA se quede estática
-      setPreviewPdfDataUrl(null);
-      setPreviewImage(rawDataUrl);
-      setSharedFileMeta({
-        name: resolvedName,
-        mimeType: validation.resolvedMime || 'image/jpeg',
-        size: finalFile.size,
-        isPdf: false
+      setLastOcrPayload({
+        base64: prepared.base64Data,
+        mimeType: prepared.mimeType,
+        fallbackDateIso: fallbackFileDateIso,
+        fileName: resolvedFileName
       });
 
-      // Si la imagen subida pesa menos de 1 MB (ej. captures de WhatsApp de ~46 KB),
-      // NO reducir su resolución ni recomprimir en Canvas para preservar 100% la nitidez en textos pequeños
-      const ONE_MB_BYTES = 1024 * 1024;
-      if (finalFile.size > 0 && finalFile.size < ONE_MB_BYTES) {
-        const crispBase64 = rawDataUrl.includes(',') ? rawDataUrl.split(',')[1] : rawDataUrl;
-        notifyUser(
-          'success',
-          `Soporte cargado: ${resolvedName} (${formatFileSize(finalFile.size)}). Analizando...`,
-          4500
-        );
-        processOCR(crispBase64, validation.resolvedMime || 'image/jpeg', fallbackFileDateIso);
-        return;
-      }
-
-      const img = new Image();
-      img.onload = () => {
-        try {
-          const canvas = document.createElement('canvas');
-          let width = img.width || 800;
-          let height = img.height || 800;
-          const MAX_DIM = 2200;
-
-          if (width > MAX_DIM || height > MAX_DIM) {
-            if (width > height) {
-              height = Math.round((height * MAX_DIM) / width);
-              width = MAX_DIM;
-            } else {
-              width = Math.round((width * MAX_DIM) / height);
-              height = MAX_DIM;
-            }
-          }
-
-          canvas.width = width;
-          canvas.height = height;
-          const ctx = canvas.getContext('2d');
-          ctx?.drawImage(img, 0, 0, width, height);
-
-          const resizedBase64 = canvas.toDataURL('image/jpeg', 0.9);
-          const approxCompressedBytes = Math.round((resizedBase64.length * 3) / 4);
-          setPreviewPdfDataUrl(null);
-          setPreviewImage(resizedBase64);
-          setSharedFileMeta({
-            name: resolvedName,
-            mimeType: 'image/jpeg',
-            size: finalFile.size || approxCompressedBytes,
-            isPdf: false
-          });
-          notifyUser(
-            'success',
-            `Soporte cargado: ${resolvedName} (${formatFileSize(finalFile.size || approxCompressedBytes)}). Analizando...`,
-            4500
-          );
-          processOCR(resizedBase64.split(',')[1], 'image/jpeg', fallbackFileDateIso);
-        } catch (canvasErr) {
-          console.warn('Fallback a imagen sin comprimir tras error en Canvas:', canvasErr);
-          const fallbackBase64 = rawDataUrl.includes(',') ? rawDataUrl.split(',')[1] : rawDataUrl;
-          notifyUser(
-            'success',
-            `Soporte cargado: ${resolvedName} (${formatFileSize(finalFile.size)}). Analizando...`,
-            4500
-          );
-          processOCR(fallbackBase64, validation.resolvedMime || 'image/jpeg', fallbackFileDateIso);
-        }
-      };
-
-      img.onerror = () => {
-        // Si la decodificación en <img> falla en algún contenedor Android, usar el DataURL leído y enviar a OCR
-        const fallbackBase64 = rawDataUrl.includes(',') ? rawDataUrl.split(',')[1] : rawDataUrl;
-        if (fallbackBase64) {
-          notifyUser(
-            'success',
-            `Soporte cargado: ${resolvedName} (${formatFileSize(finalFile.size)}). Analizando...`,
-            4500
-          );
-          processOCR(fallbackBase64, validation.resolvedMime || 'image/jpeg', fallbackFileDateIso);
-        } else {
-          setIsProcessing(false);
-          notifyUser('error', 'No se pudo decodificar la imagen. Intente con JPG, PNG o PDF.', 6000);
-        }
-      };
-
-      img.src = rawDataUrl;
-    };
-
-    reader.onerror = () => {
+      await processOCR(prepared.base64Data, prepared.mimeType, fallbackFileDateIso);
+    } catch (prepErr: any) {
+      console.error('Error en prepareImageForGemini:', prepErr);
       setIsProcessing(false);
-      notifyUser('error', 'Error al abrir el archivo de comprobante.', 6000);
-    };
-
-    reader.readAsDataURL(finalFile);
+      notifyUser('error', prepErr?.message || 'Error al preparar el archivo de comprobante.', 6000);
+    }
   };
 
-  // Auditoría Bancaria y Extracción Financiera (soporta imágenes WhatsApp y documentos PDF)
+  // Botón para reintentar la lectura con IA sobre el soporte actualmente cargado
+  const handleReintentarLectura = async () => {
+    if (lastOcrPayload && lastOcrPayload.base64) {
+      await processOCR(lastOcrPayload.base64, lastOcrPayload.mimeType, lastOcrPayload.fallbackDateIso);
+      return;
+    }
+    const activeDataUrl = previewPdfDataUrl || previewImage;
+    if (activeDataUrl) {
+      const pureBase64 = activeDataUrl.includes(',') ? activeDataUrl.split(',')[1] : activeDataUrl;
+      const mime = sharedFileMeta?.mimeType || (previewPdfDataUrl ? 'application/pdf' : 'image/jpeg');
+      await processOCR(pureBase64, mime);
+    }
+  };
+
+  // Auditoría Bancaria y Extracción Financiera Determinista (soporta imágenes JPEG/PNG/WEBP y documentos PDF)
   const processOCR = async (
     base64: string,
     mimeType: string = 'image/jpeg',
     fallbackDateIso?: string
   ) => {
-    setIsProcessing(true);
-    setProcessingLabel(
-      mimeType === 'application/pdf'
-        ? 'Auditando PDF bancario con IA...'
-        : 'Auditando comprobante con IA...'
-    );
-    try {
-      const res = await fetch('/api/ocr', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          ...getAuthHeaders()
-        },
-        body: JSON.stringify({ imageBase64: base64, mimeType })
-      });
+    const pureBase64 = base64.includes(',') ? base64.split(',')[1].trim() : base64.trim();
+    setLastOcrPayload((prev) => ({
+      base64: pureBase64,
+      mimeType,
+      fallbackDateIso: fallbackDateIso ?? prev?.fallbackDateIso,
+      fileName: sharedFileMeta?.name ?? prev?.fileName
+    }));
 
-      let data: any = {};
+    setIsProcessing(true);
+    setProcessingLabel('Analizando soporte de pago...');
+    try {
+      let data: any = null;
+      let resOk = false;
+
       try {
+        const res = await fetch('/api/ocr', {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            ...getAuthHeaders()
+          },
+          body: JSON.stringify({ imageBase64: pureBase64, mimeType })
+        });
+        resOk = res.ok;
         const rawBodyText = await res.text();
         data = safeExtractReceiptJson(rawBodyText);
-      } catch (e) {
+      } catch (networkErr) {
+        // Fallback directo en cliente si el endpoint /api/ocr no responde y existe clave configurada
+        const clientApiKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || '';
+        if (clientApiKey) {
+          const directRes = await extractSupportWithGemini({
+            apiKeys: [clientApiKey],
+            base64Data: pureBase64,
+            mimeType
+          });
+          data = directRes.audited;
+          resOk = Boolean(data?.legible || data?.lectura_exitosa);
+        } else {
+          throw networkErr;
+        }
+      }
+
+      if (!data || typeof data !== 'object') {
         throw new Error("El servidor devolvió un formato no válido.");
       }
 
       const camposCargados: string[] = [];
+      const camposFaltantes: string[] = [];
+      const nextMissing: {
+        fecha?: boolean;
+        referencia?: boolean;
+        monto?: boolean;
+        banco?: boolean;
+        cuenta?: boolean;
+      } = {};
+
       const datosExtraidos =
         data && typeof data.datos_extraidos === 'object' && data.datos_extraidos !== null
           ? data.datos_extraidos
           : {};
 
       // 1. Método de Pago estricto (seleccionado automáticamente en el selector)
-      const rawMetodoCandidate = data.metodo_pago ?? datosExtraidos.plataforma_canal ?? null;
+      const rawMetodoCandidate =
+        data.metodo_pago ?? datosExtraidos.plataforma_canal ?? data.plataforma_canal ?? null;
       if (rawMetodoCandidate && rawMetodoCandidate !== 'null') {
         const normalizedMetodo = normalizeMetodoPago(
           rawMetodoCandidate,
           `${data.observacion_auditoria || ''} ${data.observacion_ia || ''} ${data.motivo_revision || ''}`
         );
         setMetodoPago(normalizedMetodo);
-        if (res.ok || (data.legible !== false && data.lectura_exitosa !== false)) {
+        if (resOk || (data.legible !== false && data.lectura_exitosa !== false)) {
           camposCargados.push(normalizedMetodo);
         }
       }
 
-      // 2. Banco normalizado (priorizando banco_identificado / banco principal / origen / destino)
-      const resolvedBanco =
+      // 2. Cuenta / Canal (conserva asteriscos exactos como 0108*****40*****7396 o canal como Provinet / BanescOnline)
+      const rawCuentaMask =
+        datosExtraidos.numero_cuenta ??
+        data.cuenta_origen_o_destino ??
+        data.numero_cuenta ??
+        null;
+      const rawCanal = datosExtraidos.plataforma_canal ?? data.plataforma_canal ?? null;
+      const resolvedCuentaCanal =
+        (rawCuentaMask && rawCuentaMask !== 'null' ? String(rawCuentaMask).trim() : '') ||
+        (rawCanal && rawCanal !== 'null' ? String(rawCanal).trim() : '');
+
+      if (resolvedCuentaCanal) {
+        setCuentaCanal(resolvedCuentaCanal);
+        camposCargados.push(`Cuenta/Canal: ${resolvedCuentaCanal}`);
+      } else {
+        setCuentaCanal('');
+      }
+
+      // 3. Banco normalizado (priorizando banco_identificado o deducción por código de cuenta 0108 / plataforma Provinet)
+      const deducedBankInfo = resolveVenezuelanBankDetails(
         datosExtraidos.banco_identificado ??
+          data.banco_identificado ??
+          data.banco ??
+          data.banco_origen ??
+          data.banco_destino ??
+          datosExtraidos.codigo_banco ??
+          data.codigo_banco,
+        rawCanal,
+        rawCuentaMask
+      );
+      const resolvedBanco =
+        deducedBankInfo.banco_identificado ??
+        datosExtraidos.banco_identificado ??
+        data.banco_identificado ??
         data.banco ??
         data.banco_origen ??
         data.banco_destino ??
         null;
+
       if (resolvedBanco && resolvedBanco !== 'null') {
         const cleanBanco = String(resolvedBanco).trim();
         setBanco(cleanBanco);
         if (cleanBanco) camposCargados.push(cleanBanco);
-      } else if (res.ok) {
+      } else {
         setBanco('');
+        nextMissing.banco = true;
+        camposFaltantes.push('Banco');
       }
 
-      // 3. Monto en Bolívares con validación de coherencia (Regla 1 y Regla 6: <= 5.000.000.000,00 Bs)
-      const rawMonto =
-        datosExtraidos.monto_numerico ??
+      // 4. Monto en Bolívares usando parseMontoVenezolano ("576.599,07" -> 576599.07) y validación de coherencia
+      const rawMontoTexto =
         datosExtraidos.monto_texto ??
+        data.monto_texto ??
+        data.monto_texto_original ??
+        datosExtraidos.monto_numerico ??
+        data.monto_numerico ??
         data.monto_bs ??
-        data.monto ??
-        data.monto_texto_original;
-      const coherentMonto = parseVenezuelanMonto(rawMonto);
+        data.monto;
+      const parsedByHelper = parseMontoVenezolano(rawMontoTexto);
+      const coherentMonto =
+        parseVenezuelanMonto(rawMontoTexto) ?? (parsedByHelper > 0 ? parsedByHelper : null);
+
       if (coherentMonto !== null && coherentMonto > 0) {
         const formattedMonto = new Intl.NumberFormat('es-VE', {
           minimumFractionDigits: 2,
@@ -790,23 +778,36 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
         setMontoNumerico(coherentMonto);
         setMontoDisplay(formattedMonto);
         camposCargados.push(`Bs. ${formattedMonto}`);
+      } else {
+        setMontoNumerico(0);
+        setMontoDisplay('');
+        nextMissing.monto = true;
+        camposFaltantes.push('Monto');
       }
 
-      // 4. Número de Referencia (Regla 2: solo dígitos, conservando ceros a la izquierda, ignorando íconos de copiado)
+      // 5. Número de Referencia (conservando TODOS los ceros a la izquierda, ej. "000019111")
       const resolvedRef =
         normalizeReferenciaBancaria(
-          datosExtraidos.numero_referencia ?? data.referencia ?? data.nro_referencia
+          datosExtraidos.numero_referencia ??
+            data.numero_referencia ??
+            data.referencia ??
+            data.nro_referencia
         ) ?? normalizeReferenciaBancaria(data.codigo_autorizacion);
+
       if (resolvedRef) {
         setReferencia(resolvedRef);
         camposCargados.push(`Ref: ${resolvedRef}`);
-      } else if (res.ok) {
+      } else {
         setReferencia('');
+        nextMissing.referencia = true;
+        camposFaltantes.push('Referencia');
       }
 
-      // 5. Fecha explícita del comprobante (Regla 5: si es null como en BNC Pago Móvil, usar fecha del archivo o día actual)
-      const rawFechaOriginal = datosExtraidos.fecha_original ?? data.fecha_pago;
-      const rawFechaOperacionIso = datosExtraidos.fecha_operacion ?? data.fecha_iso;
+      // 6. Fecha del comprobante (si viene null porque fue recortada en la foto, marca aviso en Fecha sin bloquear)
+      const rawFechaOriginal =
+        datosExtraidos.fecha_original ?? data.fecha_original ?? data.fecha_pago;
+      const rawFechaOperacionIso =
+        datosExtraidos.fecha_operacion ?? data.fecha_operacion ?? data.fecha_iso;
       const normalizedDates = normalizeReceiptDates(rawFechaOriginal, rawFechaOperacionIso);
       const explicitIsoDate =
         rawFechaOperacionIso && /^\d{4}-\d{2}-\d{2}$/.test(String(rawFechaOperacionIso).trim())
@@ -815,13 +816,17 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
       const effectiveIsoDate =
         explicitIsoDate || fallbackDateIso || new Date().toISOString().split('T')[0];
 
-      if (effectiveIsoDate) {
+      if (explicitIsoDate) {
+        setFechaPago(explicitIsoDate);
+        camposCargados.push(`Fecha: ${normalizedDates.fecha_pago || explicitIsoDate}`);
+      } else {
         setFechaPago(effectiveIsoDate);
-        if (explicitIsoDate) {
-          camposCargados.push(`Fecha: ${normalizedDates.fecha_pago || explicitIsoDate}`);
-        }
+        nextMissing.fecha = true;
+        camposFaltantes.push('Fecha (no visible en recorte)');
+      }
 
-        // Consultar tasa oficial BCV correspondiente a la fecha del comprobante (o fecha asignada por defecto)
+      if (effectiveIsoDate) {
+        // Consultar tasa oficial BCV correspondiente a la fecha del comprobante
         try {
           const rateRes = await fetch(`/api/tasa-bcv?date=${effectiveIsoDate}`);
           if (rateRes.ok) {
@@ -838,7 +843,7 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
         }
       }
 
-      // 6. Distinción estricta Emisor vs. Beneficiario (NUNCA colocar CODIZULCA en Titular / RIF)
+      // 7. Distinción estricta Emisor vs. Beneficiario (NUNCA colocar CODIZULCA en Titular / RIF)
       const resolvedTitular = data.titular_remitente ?? data.titular ?? null;
       if (resolvedTitular && resolvedTitular !== 'null' && !isBeneficiaryName(String(resolvedTitular))) {
         const titularStr = String(resolvedTitular).trim();
@@ -873,37 +878,67 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
         setRifTitular('');
       }
 
-      // Verificar si se extrajo al menos un campo financiero real (permitiendo lecturas parciales exitosas)
+      setMissingFields(nextMissing);
+
+      // Verificar si se extrajo al menos un campo financiero real (permitiendo lecturas parciales sin lanzar error general)
       const tieneDatosFinancierosExtraidos = Boolean(
         (resolvedBanco && resolvedBanco !== 'null') ||
           (coherentMonto !== null && coherentMonto > 0) ||
           resolvedRef ||
           explicitIsoDate ||
-          datosExtraidos.numero_cuenta ||
+          resolvedCuentaCanal ||
           (resolvedTitular && resolvedTitular !== 'null' && !isBeneficiaryName(String(resolvedTitular)))
       );
 
-      if (!tieneDatosFinancierosExtraidos && (!res.ok || data.legible === false || data.lectura_exitosa === false)) {
-        throw new Error(
-          data.motivo_revision || data.observacion_auditoria || data.observacion_ia || data.error || 'Error al procesar con OCR'
+      if (!tieneDatosFinancierosExtraidos) {
+        setMissingFields({
+          fecha: true,
+          referencia: true,
+          monto: true,
+          banco: true
+        });
+        const reason =
+          data.motivo_revision ||
+          data.observacion_auditoria ||
+          data.observacion_ia ||
+          data.error ||
+          'No se detectaron datos legibles en la imagen.';
+        notifyUser(
+          'info',
+          `Lectura asistida: ${reason} Completa los campos resaltados en ámbar o presiona "Reintentar lectura".`,
+          6500
         );
+        return;
       }
 
-      notifyUser(
-        'success',
-        `¡Datos cargados del comprobante! ${camposCargados.join(' • ')}`,
-        6000
-      );
+      if (camposFaltantes.length > 0) {
+        notifyUser(
+          'info',
+          `Datos extraídos (${camposCargados.join(' • ')}). Completa manualmente: ${camposFaltantes.join(', ')}.`,
+          6500
+        );
+      } else {
+        notifyUser(
+          'success',
+          `¡Datos cargados del comprobante! ${camposCargados.join(' • ')}`,
+          6000
+        );
+      }
     } catch (err: any) {
       console.error("Error en processOCR:", err);
+      setMissingFields({
+        referencia: !referencia.trim(),
+        monto: montoNumerico <= 0,
+        banco: !banco.trim()
+      });
       const raw = String(err?.message || '');
       const looksRaw = raw.trim().startsWith('{') || /RESOURCE_EXHAUSTED|prepayment|billing|API Key/i.test(raw);
       notifyUser(
         'info',
         looksRaw || !raw
-          ? 'Soporte cargado en vista previa. Completa los datos del pago manualmente abajo.'
-          : `Soporte cargado. (${raw})`,
-        6000
+          ? 'Soporte cargado en vista previa. Completa los campos resaltados abajo o toca "Reintentar lectura".'
+          : `Soporte en vista previa (${raw}). Puedes completar los datos manualmente o tocar "Reintentar lectura".`,
+        6500
       );
     } finally {
       setIsProcessing(false);
@@ -1245,10 +1280,12 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
   const handleSave = async () => {
     const cleanRef = referencia.trim();
     if (!cleanRef) {
+      setMissingFields((prev) => ({ ...prev, referencia: true }));
       setAlertMsg({ type: 'error', text: 'Debe ingresar el número de referencia del pago.' });
       return;
     }
     if (montoNumerico <= 0) {
+      setMissingFields((prev) => ({ ...prev, monto: true }));
       setAlertMsg({ type: 'error', text: 'Debe ingresar un monto válido mayor a 0.' });
       return;
     }
@@ -1323,6 +1360,10 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
       setPreviewPdfDataUrl(null);
       setSharedFileMeta(null);
       setReceivedFromWhatsApp(false);
+      setPreviewZoom(1);
+      setMissingFields({});
+      setLastOcrPayload(null);
+      setCuentaCanal('');
       setReferencia('');
       setMontoDisplay('');
       setMontoNumerico(0);
@@ -1768,7 +1809,7 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
                   <UploadCloud className="w-4 h-4 text-red-500" />
                   1. Carga de comprobante (WhatsApp / Imagen o PDF)
                 </h3>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-1.5">
                   {receivedFromWhatsApp && (previewImage || previewPdfDataUrl || sharedFileMeta) && (
                     <span className="text-[10px] font-sans font-bold bg-emerald-950/60 text-emerald-400 border border-emerald-700/60 px-2 py-0.5 rounded-full">
                       Recibido de WhatsApp
@@ -1776,6 +1817,16 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
                   )}
                   {(previewImage || previewPdfDataUrl || sharedFileMeta) && (
                     <>
+                      <button
+                        type="button"
+                        onClick={handleReintentarLectura}
+                        disabled={isProcessing}
+                        className="text-[11px] text-amber-300 hover:text-amber-200 bg-amber-950/50 hover:bg-amber-900/50 disabled:opacity-50 px-2.5 py-1 rounded border border-amber-700/60 transition-colors cursor-pointer font-bold inline-flex items-center gap-1"
+                        title="Volver a analizar el soporte de pago con Gemini Vision"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${isProcessing ? 'animate-spin' : ''}`} />
+                        <span>Reintentar lectura</span>
+                      </button>
                       <button
                         type="button"
                         onClick={triggerNativeFilePicker}
@@ -1790,6 +1841,9 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
                           setPreviewPdfDataUrl(null);
                           setSharedFileMeta(null);
                           setReceivedFromWhatsApp(false);
+                          setPreviewZoom(1);
+                          setMissingFields({});
+                          setLastOcrPayload(null);
                           setIsProcessing(false);
                         }}
                         className="text-[11px] text-neutral-400 hover:text-red-400 bg-neutral-900 px-2 py-1 rounded border border-neutral-800 transition-colors cursor-pointer inline-flex items-center gap-1"
@@ -1911,7 +1965,7 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
                     <div className="flex flex-col items-center justify-center py-2">
                       <Loader2 className="w-7 h-7 text-emerald-500 animate-spin mb-2" />
                       <span className="text-xs font-bold text-emerald-400 animate-pulse">
-                        {processingLabel || 'Procesando soporte...'}
+                        {processingLabel || 'Analizando soporte de pago...'}
                       </span>
                     </div>
                   ) : (
@@ -1945,15 +1999,16 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
                     {previewPdfDataUrl && (
                       <button
                         type="button"
-                        onClick={() =>
+                        onClick={() => {
+                          setModalZoom(1);
                           setSelectedReceiptModal({
                             nombre_cliente: nombreCliente || 'Vista Previa PDF',
                             referencia: referencia || 'En edición',
                             fileMimeType: 'application/pdf',
                             fileDataUrl: previewPdfDataUrl,
                             fileName: sharedFileMeta?.name || 'Comprobante.pdf'
-                          })
-                        }
+                          });
+                        }}
                         className="px-2.5 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-[11px] font-bold flex items-center gap-1 shrink-0 cursor-pointer"
                       >
                         <Eye className="w-3.5 h-3.5 text-emerald-400" />
@@ -1976,39 +2031,74 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
                     <div className="absolute inset-0 bg-neutral-950/85 flex flex-col items-center justify-center z-10 backdrop-blur-xs">
                       <Loader2 className="w-8 h-8 text-emerald-500 animate-spin mb-2" />
                       <span className="text-emerald-400 text-xs font-bold animate-pulse">
-                        {processingLabel || 'Procesando soporte PDF...'}
+                        {processingLabel || 'Analizando soporte de pago...'}
                       </span>
                     </div>
                   )}
                 </div>
               ) : (
                 <div className="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden relative flex flex-col">
-                  {/* Cabecera con nombre y peso de la imagen cargada */}
-                  <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-neutral-800 bg-neutral-950/60">
+                  {/* Cabecera con nombre, peso y controles de Zoom para comparar el soporte contra los datos extraídos */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 border-b border-neutral-800 bg-neutral-950/60">
                     <div className="flex items-center gap-2 min-w-0">
                       <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
                       <span className="text-xs font-bold text-white truncate">
                         {sharedFileMeta?.name || 'soporte_whatsapp.jpg'}
                       </span>
+                      <span className="text-[10px] font-mono text-neutral-400 shrink-0">
+                        ({formatFileSize(sharedFileMeta?.size)})
+                      </span>
                     </div>
-                    <span className="text-[10px] font-mono text-neutral-400 shrink-0">
-                      {formatFileSize(sharedFileMeta?.size)}
-                    </span>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setPreviewZoom((z) => Math.max(1, Number((z - 0.5).toFixed(1))))}
+                        className="p-1 rounded bg-neutral-900 hover:bg-neutral-800 text-neutral-300 border border-neutral-800 cursor-pointer"
+                        title="Reducir zoom"
+                      >
+                        <ZoomOut className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPreviewZoom((z) => (z >= 3 ? 1 : Number((z + 0.5).toFixed(1))))}
+                        className="px-1.5 py-0.5 rounded bg-neutral-900 hover:bg-neutral-800 text-[10px] font-mono font-bold text-emerald-400 border border-neutral-800 cursor-pointer"
+                        title="Alternar nivel de zoom"
+                      >
+                        {previewZoom}x
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPreviewZoom((z) => Math.min(3, Number((z + 0.5).toFixed(1))))}
+                        className="p-1 rounded bg-neutral-900 hover:bg-neutral-800 text-neutral-300 border border-neutral-800 cursor-pointer"
+                        title="Aumentar zoom para inspeccionar dígitos"
+                      >
+                        <ZoomIn className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
 
-                  <div className="relative flex items-center justify-center h-44 group bg-neutral-950/40">
-                    <img src={previewImage!} alt="Comprobante" className="w-full h-full object-contain" />
+                  <div className="relative flex items-center justify-center h-52 overflow-auto group bg-neutral-950/40">
+                    <img
+                      src={previewImage!}
+                      alt="Comprobante"
+                      style={{
+                        transform: `scale(${previewZoom})`,
+                        transformOrigin: 'center center'
+                      }}
+                      className="w-full h-full object-contain transition-transform duration-150"
+                    />
                     <button
                       type="button"
-                      onClick={() =>
+                      onClick={() => {
+                        setModalZoom(1);
                         setSelectedReceiptModal({
                           nombre_cliente: nombreCliente || 'Vista Previa de Soporte',
                           referencia: referencia || 'En edición',
-                          fileMimeType: 'image/jpeg',
+                          fileMimeType: sharedFileMeta?.mimeType || 'image/jpeg',
                           image: previewImage,
                           fileName: sharedFileMeta?.name || 'soporte_whatsapp.jpg'
-                        })
-                      }
+                        });
+                      }}
                       className="absolute bottom-2 right-2 px-2.5 py-1 rounded-lg bg-neutral-950/80 hover:bg-neutral-900 text-white text-[11px] font-bold border border-neutral-700 flex items-center gap-1 cursor-pointer"
                     >
                       <Eye className="w-3.5 h-3.5 text-emerald-400" />
@@ -2018,7 +2108,7 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
                       <div className="absolute inset-0 bg-neutral-950/85 flex flex-col items-center justify-center z-10 backdrop-blur-xs">
                         <Loader2 className="w-8 h-8 text-emerald-500 animate-spin mb-2" />
                         <span className="text-emerald-400 text-xs font-bold animate-pulse">
-                          {processingLabel || 'Procesando soporte...'}
+                          {processingLabel || 'Analizando soporte de pago...'}
                         </span>
                       </div>
                     )}
@@ -2029,10 +2119,17 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
 
             {/* 2. FORMULARIO DE COBRO Y CLIENTE */}
             <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-5 shadow-sm space-y-4">
-              <h3 className="text-xs font-sans font-bold text-neutral-300 uppercase tracking-wider flex items-center gap-2 border-b border-neutral-800/80 pb-2">
-                <FileText className="w-4 h-4 text-emerald-500" />
-                2. Datos del Pago y Cliente
-              </h3>
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-800/80 pb-2">
+                <h3 className="text-xs font-sans font-bold text-neutral-300 uppercase tracking-wider flex items-center gap-2">
+                  <FileText className="w-4 h-4 text-emerald-500" />
+                  2. Datos del Pago y Cliente
+                </h3>
+                {(missingFields.fecha || missingFields.referencia || missingFields.monto || missingFields.banco) && (
+                  <span className="text-[10px] font-sans font-bold text-amber-300 bg-amber-950/50 border border-amber-700/60 px-2 py-0.5 rounded-full">
+                    Completa los campos resaltados en ámbar
+                  </span>
+                )}
+              </div>
 
               {/* Fila Cliente: Código con Autocompletado + Nombre */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 relative">
@@ -2150,15 +2247,31 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
               {/* Fila Banco y Monto */}
               <div className="grid grid-cols-2 gap-3.5">
                 <div>
-                  <label className="text-[10px] font-sans font-bold text-neutral-400 uppercase tracking-wider mb-1 block">
-                    Banco
-                  </label>
+                  <div className="flex justify-between items-center mb-1">
+                    <label className="text-[10px] font-sans font-bold text-neutral-400 uppercase tracking-wider block">
+                      Banco
+                    </label>
+                    {missingFields.banco && (
+                      <span className="text-[10px] font-sans font-bold text-amber-400">
+                        Completar manual
+                      </span>
+                    )}
+                  </div>
                   <input 
                     type="text" 
                     value={banco} 
-                    onChange={e => setBanco(e.target.value)} 
-                    placeholder="Ej: Banco de Venezuela" 
-                    className="w-full bg-neutral-900 border border-neutral-800 rounded-lg p-2.5 text-white text-sm focus:border-red-500 focus:outline-none transition-colors" 
+                    onChange={e => {
+                      setBanco(e.target.value);
+                      if (e.target.value.trim()) {
+                        setMissingFields((prev) => ({ ...prev, banco: false }));
+                      }
+                    }} 
+                    placeholder="Ej: BBVA Provincial / Banesco" 
+                    className={`w-full bg-neutral-900 border rounded-lg p-2.5 text-white text-sm focus:outline-none transition-colors ${
+                      missingFields.banco
+                        ? 'border-amber-500 ring-1 ring-amber-500/40 bg-amber-950/20 focus:border-amber-400'
+                        : 'border-neutral-800 focus:border-red-500'
+                    }`} 
                   />
                 </div>
 
@@ -2167,11 +2280,15 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
                     <label className="text-[10px] font-sans font-bold text-neutral-400 uppercase tracking-wider block">
                       Monto (Bs.) *
                     </label>
-                    {montoNumerico > 0 && parseFloat(tasa) > 0 && (
+                    {missingFields.monto ? (
+                      <span className="text-[10px] font-sans font-bold text-amber-400">
+                        Completar manual
+                      </span>
+                    ) : montoNumerico > 0 && parseFloat(tasa) > 0 ? (
                       <span className="text-[11px] font-mono text-emerald-400 font-bold">
                         ≈ ${(montoNumerico / parseFloat(tasa)).toFixed(2)} USD
                       </span>
-                    )}
+                    ) : null}
                   </div>
                   <input 
                     type="text" 
@@ -2179,7 +2296,11 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
                     onChange={e => handleMontoChange(e.target.value)} 
                     onBlur={handleMontoBlur}
                     placeholder="0,00" 
-                    className="w-full bg-neutral-900 border border-neutral-800 rounded-lg p-2.5 text-emerald-400 font-mono font-bold text-sm focus:border-red-500 focus:outline-none transition-colors" 
+                    className={`w-full bg-neutral-900 border rounded-lg p-2.5 text-emerald-400 font-mono font-bold text-sm focus:outline-none transition-colors ${
+                      missingFields.monto
+                        ? 'border-amber-500 ring-1 ring-amber-500/40 bg-amber-950/20 focus:border-amber-400'
+                        : 'border-neutral-800 focus:border-red-500'
+                    }`} 
                   />
                 </div>
               </div>
@@ -2187,33 +2308,78 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
               {/* Fila Referencia y Fecha de Pago */}
               <div className="grid grid-cols-2 gap-3.5">
                 <div>
-                  <label className="text-[10px] font-sans font-bold text-neutral-400 uppercase tracking-wider mb-1 block">
-                    Nro. de Referencia *
-                  </label>
+                  <div className="flex justify-between items-center mb-1">
+                    <label className="text-[10px] font-sans font-bold text-neutral-400 uppercase tracking-wider block">
+                      Nro. de Referencia *
+                    </label>
+                    {missingFields.referencia && (
+                      <span className="text-[10px] font-sans font-bold text-amber-400">
+                        Completar manual
+                      </span>
+                    )}
+                  </div>
                   <input 
                     type="text" 
                     value={referencia} 
-                    onChange={e => setReferencia(e.target.value)} 
-                    placeholder="Ej: 019283" 
-                    className="w-full bg-neutral-900 border border-neutral-800 rounded-lg p-2.5 text-white font-mono text-sm focus:border-red-500 focus:outline-none transition-colors" 
+                    onChange={e => {
+                      setReferencia(e.target.value);
+                      if (e.target.value.trim()) {
+                        setMissingFields((prev) => ({ ...prev, referencia: false }));
+                      }
+                    }} 
+                    placeholder="Ej: 000019111" 
+                    className={`w-full bg-neutral-900 border rounded-lg p-2.5 text-white font-mono text-sm focus:outline-none transition-colors ${
+                      missingFields.referencia
+                        ? 'border-amber-500 ring-1 ring-amber-500/40 bg-amber-950/20 focus:border-amber-400'
+                        : 'border-neutral-800 focus:border-red-500'
+                    }`} 
                   />
                 </div>
 
                 <div>
-                  <label className="text-[10px] font-sans font-bold text-neutral-400 uppercase tracking-wider mb-1 block">
-                    Fecha de Pago *
-                  </label>
+                  <div className="flex justify-between items-center mb-1">
+                    <label className="text-[10px] font-sans font-bold text-neutral-400 uppercase tracking-wider block">
+                      Fecha de Pago *
+                    </label>
+                    {missingFields.fecha && (
+                      <span className="text-[10px] font-sans font-bold text-amber-400">
+                        Verificar fecha
+                      </span>
+                    )}
+                  </div>
                   <input 
                     type="date" 
                     value={fechaPago} 
-                    onChange={e => setFechaPago(e.target.value)} 
-                    className="w-full bg-neutral-900 border border-neutral-800 rounded-lg p-2.5 text-white text-sm focus:border-red-500 focus:outline-none transition-colors" 
+                    onChange={e => {
+                      setFechaPago(e.target.value);
+                      if (e.target.value) {
+                        setMissingFields((prev) => ({ ...prev, fecha: false }));
+                      }
+                    }} 
+                    className={`w-full bg-neutral-900 border rounded-lg p-2.5 text-white text-sm focus:outline-none transition-colors ${
+                      missingFields.fecha
+                        ? 'border-amber-500 ring-1 ring-amber-500/40 bg-amber-950/20 focus:border-amber-400'
+                        : 'border-neutral-800 focus:border-red-500'
+                    }`} 
                   />
                 </div>
               </div>
 
-              {/* Fila Titular y RIF/Cédula */}
-              <div className="grid grid-cols-2 gap-3.5">
+              {/* Fila Cuenta / Canal y Titular / RIF */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+                <div>
+                  <label className="text-[10px] font-sans font-bold text-neutral-400 uppercase tracking-wider mb-1 block">
+                    Cuenta / Canal Detectado
+                  </label>
+                  <input 
+                    type="text" 
+                    value={cuentaCanal} 
+                    onChange={e => handleCuentaCanalChange(e.target.value)} 
+                    placeholder="Ej: 0108*****40*****7396" 
+                    className="w-full bg-neutral-900 border border-neutral-800 rounded-lg p-2.5 text-neutral-200 font-mono text-xs focus:border-red-500 focus:outline-none transition-colors" 
+                  />
+                </div>
+
                 <div>
                   <label className="text-[10px] font-sans font-bold text-neutral-400 uppercase tracking-wider mb-1 block">
                     Titular / Remitente
@@ -2559,6 +2725,37 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
                 </p>
               </div>
               <div className="flex items-center gap-2 shrink-0">
+                {!(
+                  selectedReceiptModal.fileMimeType === 'application/pdf' ||
+                  String(selectedReceiptModal.comprobante_url || '').endsWith('.pdf')
+                ) && (
+                  <div className="flex items-center gap-1 mr-1">
+                    <button
+                      type="button"
+                      onClick={() => setModalZoom((z) => Math.max(1, Number((z - 0.5).toFixed(1))))}
+                      className="p-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-200 cursor-pointer"
+                      title="Reducir zoom"
+                    >
+                      <ZoomOut className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setModalZoom((z) => (z >= 3 ? 1 : Number((z + 0.5).toFixed(1))))}
+                      className="px-2 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-xs font-mono font-bold text-emerald-400 cursor-pointer"
+                      title="Alternar zoom"
+                    >
+                      {modalZoom}x
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setModalZoom((z) => Math.min(3, Number((z + 0.5).toFixed(1))))}
+                      className="p-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-200 cursor-pointer"
+                      title="Aumentar zoom"
+                    >
+                      <ZoomIn className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
                 {selectedReceiptModal.comprobante_url && (
                   <a
                     href={selectedReceiptModal.comprobante_url}
@@ -2596,7 +2793,11 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
                     selectedReceiptModal.comprobante_url
                   }
                   alt="Soporte de pago"
-                  className="max-w-full max-h-[65vh] object-contain rounded-lg"
+                  style={{
+                    transform: `scale(${modalZoom})`,
+                    transformOrigin: 'center center'
+                  }}
+                  className="max-w-full max-h-[65vh] object-contain rounded-lg transition-transform duration-150"
                 />
               )}
             </div>

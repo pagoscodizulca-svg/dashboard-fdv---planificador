@@ -301,9 +301,11 @@ export interface ParsedOrdenCompraAlkosto {
   cantidadCestas?: string | number;
   nroPedido?: string;
   ordenNro: string;
+  numeroOrden?: string;
   numero_oc?: string;
   sede: string;
   fechaEmision: string;
+  fechaOrden?: string;
   fecha_emision?: string;
   fechaEntrega: string;
   moneda?: 'USD' | 'BS' | string;
@@ -314,20 +316,24 @@ export interface ParsedOrdenCompraAlkosto {
   proveedorRif: string;
   observaciones?: string;
   subtotal: number;
+  montoTotal?: number;
   subtotalAlkosto?: number;
   subtotalFamiliaCenter?: number;
   subtotalGeneral?: number;
   totalNeto?: number;
   tiendas?: string[];
+  tiendasDetectadas?: string[];
   cabecera_orden?: AlkostoOcCabeceraOrden;
   renglones?: AlkostoOcRenglonExtraido[];
   resumen_totales?: AlkostoOcResumenTotales;
   items: Array<{
     renglon: number;
     codigo: string;
+    codigoProducto?: string;
     codigoPrincipal?: string;
     skuCodizulca?: string;
     codigoBarra?: string;
+    ean?: string | null;
     codigoEan?: string | null;
     codigoInternoAlkosto?: string | null;
     descripcion: string;
@@ -340,8 +346,11 @@ export interface ParsedOrdenCompraAlkosto {
     costoBruto?: number;
     descuento?: number;
     costoUnitario: number;
+    precioUnitario?: number;
     totalRenglon: number;
+    subtotal?: number;
     tiendas?: Record<string, number>;
+    desglosePorTienda?: Array<{ tienda: string; cantidad: number }>;
     distribucionPorTienda?: DistribucionPorTiendaItem[];
     distribucion_tiendas?: AlkostoOcDistribucionTienda[];
     cuadreTiendasValido?: boolean;

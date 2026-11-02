@@ -73,7 +73,9 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
   const [parsedOCData, setParsedOCData] = useState<ParsedOrdenCompraAlkosto | null>(null);
   const [ocLoadKey, setOcLoadKey] = useState(0);
   const [ocrLoading, setOcrLoading] = useState(false);
+  const [ocrStepMessage, setOcrStepMessage] = useState<string>('Optimizando documento...');
   const [ocrError, setOcrError] = useState<string | null>(null);
+  const [lastSelectedFile, setLastSelectedFile] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
@@ -141,50 +143,70 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
     return detectAlkostoFileMimeType(null, file?.type, file?.name);
   };
 
-  // Optimización y compresión client-side de imágenes (JPG, PNG, WEBP) y PDFs para OCR rápido, nítido y liviano
-  const optimizarImagenParaOCR = (file: File): Promise<{ base64: string; mimeType: string }> => {
+  // Optimización y compresión client-side de imágenes (JPG, PNG, WEBP) y validación previa de PDFs para OCR rápido, nítido y liviano
+  const optimizarImagenParaOCR = (file: File, fromCamera = false): Promise<{ base64: string; mimeType: string }> => {
     return new Promise((resolve, reject) => {
       const initialMime = inferirMimeTypeSeguro(file);
       const isPdf = initialMime === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
 
+      // 2. Validación previa de PDFs: verificar que no esté vacío y tenga cabecera PDF válida
       if (isPdf) {
+        if (!file.size || file.size < 64) {
+          return reject(
+            new AlkostoOcrStageError(
+              '1-Archivo',
+              'El archivo PDF seleccionado está vacío o corrupto (menos de 64 bytes).'
+            )
+          );
+        }
         const reader = new FileReader();
         reader.onload = (e) => {
           const readerResult = String(e.target?.result || '');
-          const base64Data = (readerResult.includes(',') ? readerResult.split(',')[1] : readerResult).replace(/\s+/g, '');
-          const cleanB64 = sanitizeBase64Payload(base64Data);
+          const cleanB64 = sanitizeBase64Payload(readerResult);
+          if (!cleanB64 || cleanB64.length < 40) {
+            return reject(
+              new AlkostoOcrStageError(
+                '1-Archivo',
+                'No se pudo extraer contenido Base64 válido del archivo PDF.'
+              )
+            );
+          }
           const detectedMime = detectAlkostoFileMimeType(cleanB64, 'application/pdf', file.name);
           resolve({ base64: cleanB64, mimeType: detectedMime });
         };
-        reader.onerror = () => reject(new Error('Error al leer el archivo PDF'));
+        reader.onerror = () =>
+          reject(new AlkostoOcrStageError('1-Archivo', 'Error al leer el archivo PDF desde el navegador.'));
         reader.readAsDataURL(file);
         return;
       }
 
-      // Si es una imagen liviana (< 2.5 MB) en formato nativo soportado (JPG, PNG, WEBP),
-      // enviarla sin recodificar para preservar nitidez absoluta en dígitos pequeños y códigos EAN/SKU
+      // 1. Si es una imagen liviana (<= 2 MB) y no viene directo de cámara en crudo,
+      // enviarla sin recodificar si ya está en formato soportado (JPG, PNG, WEBP)
       const isDirectFormat = ['image/jpeg', 'image/png', 'image/webp'].includes(initialMime) && !/heic|bmp|tiff/i.test(file.type || '');
-      if (file.size < 2.5 * 1024 * 1024 && isDirectFormat) {
+      const needsCanvasCompression = fromCamera || file.size > 2 * 1024 * 1024 || !isDirectFormat;
+
+      if (!needsCanvasCompression) {
         const reader = new FileReader();
         reader.onload = (e) => {
           const readerResult = String(e.target?.result || '');
-          const base64Data = (readerResult.includes(',') ? readerResult.split(',')[1] : readerResult).replace(/\s+/g, '');
-          const cleanB64 = sanitizeBase64Payload(base64Data);
+          const cleanB64 = sanitizeBase64Payload(readerResult);
           const detectedMime = detectAlkostoFileMimeType(cleanB64, initialMime, file.name);
           resolve({ base64: cleanB64, mimeType: detectedMime });
         };
-        reader.onerror = () => reject(new Error('Error al leer la imagen'));
+        reader.onerror = () =>
+          reject(new AlkostoOcrStageError('1-Archivo', 'Error al leer la imagen de la Orden de Compra.'));
         reader.readAsDataURL(file);
         return;
       }
 
-      // Para imágenes de cámara o alta resolución (> 2.5 MB), comprimir en cliente para evitar 413 Payload Too Large
+      // Compresión en cliente para fotos de cámara e imágenes pesadas (> 2 MB):
+      // máx. 2048px por lado, calidad JPEG 0.85 para evitar 413 Payload Too Large y acelerar respuesta en Render (3-5s)
       const reader = new FileReader();
       reader.onload = (e) => {
         const rawDataUrl = String(e.target?.result || '');
         const img = new Image();
         img.onload = () => {
-          const MAX_DIM = 2400; // Equilibrio óptimo entre nitidez de tablas y tamaño de payload Base64
+          const MAX_DIM = 2048;
           let { width, height } = img;
           if (width > MAX_DIM || height > MAX_DIM) {
             if (width > height) {
@@ -200,8 +222,7 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
           canvas.height = height;
           const ctx = canvas.getContext('2d');
           if (!ctx) {
-            const base64Fallback = (rawDataUrl.includes(',') ? rawDataUrl.split(',')[1] : rawDataUrl).replace(/\s+/g, '');
-            const cleanFallback = sanitizeBase64Payload(base64Fallback);
+            const cleanFallback = sanitizeBase64Payload(rawDataUrl);
             const fallbackMime = detectAlkostoFileMimeType(cleanFallback, initialMime, file.name);
             return resolve({ base64: cleanFallback, mimeType: fallbackMime });
           }
@@ -210,27 +231,27 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
           ctx.fillStyle = '#FFFFFF';
           ctx.fillRect(0, 0, width, height);
           ctx.drawImage(img, 0, 0, width, height);
-          const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.88);
-          const base64Compressed = (compressedDataUrl.includes(',') ? compressedDataUrl.split(',')[1] : compressedDataUrl).replace(/\s+/g, '');
-          const cleanCompressed = sanitizeBase64Payload(base64Compressed);
+          const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+          const cleanCompressed = sanitizeBase64Payload(compressedDataUrl);
           resolve({ base64: cleanCompressed, mimeType: 'image/jpeg' });
         };
         img.onerror = () => {
-          const base64Fallback = (rawDataUrl.includes(',') ? rawDataUrl.split(',')[1] : rawDataUrl).replace(/\s+/g, '');
-          const cleanFallback = sanitizeBase64Payload(base64Fallback);
+          const cleanFallback = sanitizeBase64Payload(rawDataUrl);
           const fallbackMime = detectAlkostoFileMimeType(cleanFallback, initialMime, file.name);
           resolve({ base64: cleanFallback, mimeType: fallbackMime });
         };
         img.src = rawDataUrl;
       };
-      reader.onerror = () => reject(new Error('Error al leer el archivo'));
+      reader.onerror = () =>
+        reject(new AlkostoOcrStageError('1-Archivo', 'Error al leer el archivo de imagen.'));
       reader.readAsDataURL(file);
     });
   };
 
   // Procesar archivo seleccionado (Imagen JPG, PNG, WEBP o PDF) con el Lector OCR
-  const procesarArchivoOCR = async (file: File) => {
+  const procesarArchivoOCR = async (file: File, fromCamera = false) => {
     if (!file) return;
+    setLastSelectedFile(file);
 
     const inferredMime = inferirMimeTypeSeguro(file);
     const isPdf = inferredMime === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
@@ -238,6 +259,13 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
 
     if (!isPdf && !isImage && file.type && !file.type.includes('octet-stream')) {
       const msg = 'Error en Etapa [1-Archivo]: Formato no soportado. Por favor sube una imagen (JPG, PNG, WEBP) o un archivo PDF.';
+      setOcrError(msg);
+      setAlertaError(msg);
+      return;
+    }
+
+    if (file.size === 0) {
+      const msg = 'Error en Etapa [1-Archivo]: El archivo seleccionado está vacío (0 bytes).';
       setOcrError(msg);
       setAlertaError(msg);
       return;
@@ -251,16 +279,19 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
     }
 
     setOcrLoading(true);
+    setOcrStepMessage('Optimizando documento...');
     setOcrError(null);
     setAlertaError(null);
 
     let currentStage: AlkostoOcrStage = '1-Archivo';
 
     try {
-      const { base64, mimeType } = await optimizarImagenParaOCR(file);
+      const { base64, mimeType } = await optimizarImagenParaOCR(file, fromCamera);
       currentStage = '2-Conexión Gemini-Render';
+      setOcrStepMessage('Extrayendo renglones y cantidades por tienda con IA...');
       const rawData = await parseAlkostoOrderImage(base64, mimeType || inferredMime, file.name);
       currentStage = '4-Mapeo Nota de Pedido';
+      setOcrStepMessage('Montando en Nota de Pedido de Codizulca...');
       const data = normalizeOrderForCodizulca(rawData);
       setParsedOCData(data);
       setOcLoadKey(k => k + 1);
@@ -300,6 +331,14 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
       setOcrLoading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
       if (cameraInputRef.current) cameraInputRef.current.value = '';
+    }
+  };
+
+  const handleReintentarOCR = () => {
+    if (lastSelectedFile && !ocrLoading) {
+      procesarArchivoOCR(lastSelectedFile);
+    } else {
+      fileInputRef.current?.click();
     }
   };
 
@@ -448,7 +487,7 @@ ${pedido.observaciones ? `💬 *Observaciones:* ${pedido.observaciones}` : ''}
         capture="environment"
         onChange={(e) => {
           if (e.target.files && e.target.files[0]) {
-            procesarArchivoOCR(e.target.files[0]);
+            procesarArchivoOCR(e.target.files[0], true);
           }
         }}
         className="hidden"
@@ -562,9 +601,22 @@ ${pedido.observaciones ? `💬 *Observaciones:* ${pedido.observaciones}` : ''}
       )}
 
       {alertaError && (
-        <div className="print:hidden bg-red-950/60 border border-red-800 text-red-300 p-4 rounded-xl flex items-center gap-3 animate-in fade-in">
-          <AlertCircle className="w-5 h-5 text-red-400 shrink-0" />
-          <span className="text-xs sm:text-sm font-bold">{alertaError}</span>
+        <div className="print:hidden bg-red-950/60 border border-red-800 text-red-300 p-4 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-in fade-in">
+          <div className="flex items-start sm:items-center gap-3">
+            <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5 sm:mt-0" />
+            <span className="text-xs sm:text-sm font-bold">{alertaError}</span>
+          </div>
+          {lastSelectedFile && (
+            <button
+              type="button"
+              onClick={handleReintentarOCR}
+              disabled={ocrLoading}
+              className="inline-flex items-center gap-1.5 bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white px-3 py-1.5 rounded-lg text-xs font-bold shrink-0 transition-colors"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${ocrLoading ? 'animate-spin' : ''}`} />
+              <span>Reintentar procesamiento</span>
+            </button>
+          )}
         </div>
       )}
 
@@ -579,9 +631,11 @@ ${pedido.observaciones ? `💬 *Observaciones:* ${pedido.observaciones}` : ''}
             <div className="flex items-center gap-2 text-neutral-300">
               <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
               <span>
-                {parsedOCData?.ordenNro 
-                  ? `Mostrando Orden de Compra N° ${parsedOCData.ordenNro} (${parsedOCData.items?.length || 0} renglones montados en el formato • Subtotal: $${(parsedOCData.subtotal || 0).toFixed(2)}).`
-                  : 'Formato Codizulca listo. Puedes escanear o subir una Orden de Compra (Foto o PDF) para montarla de inmediato.'}
+                {ocrLoading
+                  ? ocrStepMessage
+                  : parsedOCData?.ordenNro 
+                    ? `Mostrando Orden de Compra N° ${parsedOCData.ordenNro} (${parsedOCData.items?.length || 0} renglones montados en el formato • Subtotal: $${(parsedOCData.subtotal || 0).toFixed(2)}).`
+                    : 'Formato Codizulca listo. Puedes escanear o subir una Orden de Compra (Foto o PDF) para montarla de inmediato.'}
               </span>
             </div>
 
@@ -593,7 +647,7 @@ ${pedido.observaciones ? `💬 *Observaciones:* ${pedido.observaciones}` : ''}
                 className="bg-red-600 hover:bg-red-500 text-white shadow-md shadow-red-900/40 px-3.5 py-1.5 rounded-lg font-bold flex items-center gap-1.5 transition-colors text-xs"
               >
                 <UploadCloud className="w-3.5 h-3.5" />
-                <span>{ocrLoading ? 'Leyendo...' : 'Subir Orden (Foto o PDF)'}</span>
+                <span>{ocrLoading ? ocrStepMessage : 'Subir Orden (Foto o PDF)'}</span>
               </button>
 
               <button
@@ -658,9 +712,20 @@ ${pedido.observaciones ? `💬 *Observaciones:* ${pedido.observaciones}` : ''}
 
             {/* ERROR DE OCR */}
             {ocrError && (
-              <div className="bg-red-950/60 border border-red-800 text-red-300 p-4 rounded-xl flex items-center gap-3 text-xs sm:text-sm font-bold">
-                <AlertCircle className="w-5 h-5 text-red-400 shrink-0" />
-                <span>{ocrError}</span>
+              <div className="bg-red-950/60 border border-red-800 text-red-300 p-4 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs sm:text-sm font-bold">
+                <div className="flex items-start sm:items-center gap-3">
+                  <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5 sm:mt-0" />
+                  <span>{ocrError}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleReintentarOCR}
+                  disabled={ocrLoading}
+                  className="inline-flex items-center gap-1.5 bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white px-3.5 py-2 rounded-lg text-xs font-bold shrink-0 transition-colors"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${ocrLoading ? 'animate-spin' : ''}`} />
+                  <span>Reintentar procesamiento</span>
+                </button>
               </div>
             )}
 
@@ -686,9 +751,9 @@ ${pedido.observaciones ? `💬 *Observaciones:* ${pedido.observaciones}` : ''}
                 <div className="space-y-4">
                   <div className="w-12 h-12 border-4 border-red-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
                   <div className="space-y-1">
-                    <h3 className="text-sm font-bold text-white">Extrayendo datos de la Orden de Compra...</h3>
+                    <h3 className="text-sm font-bold text-white">{ocrStepMessage}</h3>
                     <p className="text-xs text-neutral-400 font-mono">
-                      Analizando códigos, cantidades por tienda AK01-AK10, descripciones y subtotales...
+                      Analizando códigos, cantidades por tienda AK01-AK10 y FC01-FC07, descripciones y subtotales...
                     </p>
                   </div>
                   <button

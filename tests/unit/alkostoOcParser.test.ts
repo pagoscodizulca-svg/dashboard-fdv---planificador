@@ -30,6 +30,7 @@ import {
   normalizarFechaISOAlkosto,
   toCanonicalAlkostoOcJson,
   ALKOSTO_OC_EXTRACTION_SYSTEM_PROMPT,
+  ALKOSTO_OC_RESPONSE_SCHEMA,
   AlkostoParseValidationError,
   AlkostoOcrStageError
 } from '../../src/services/alkostoOcParser';
@@ -843,6 +844,61 @@ describe('Unit & Regression: alkostoOcParser', () => {
       expect(normalized.subtotalFamiliaCenter).toBe(10450);
       expect(normalized.totalNeto).toBe(46150);
       expect(normalized.items).toHaveLength(2);
+    });
+
+    it('should validate ALKOSTO_OC_RESPONSE_SCHEMA and normalize Structured Output camelCase payload (numeroOrden, fechaOrden, tiendasDetectadas, desglosePorTienda, montoTotal)', () => {
+      expect(ALKOSTO_OC_RESPONSE_SCHEMA).toBeDefined();
+      expect(ALKOSTO_OC_RESPONSE_SCHEMA.properties.numeroOrden).toBeDefined();
+      expect(ALKOSTO_OC_RESPONSE_SCHEMA.properties.fechaOrden).toBeDefined();
+      expect(ALKOSTO_OC_RESPONSE_SCHEMA.properties.tiendasDetectadas).toBeDefined();
+      expect(ALKOSTO_OC_RESPONSE_SCHEMA.properties.renglones).toBeDefined();
+      expect(ALKOSTO_OC_RESPONSE_SCHEMA.properties.montoTotal).toBeDefined();
+
+      const structuredPayload = {
+        numeroOrden: '0000054457',
+        fechaOrden: '06/10/2026',
+        fechaEntrega: '12/10/2026',
+        tiendasDetectadas: ['AK01', 'AK02', 'FC01'],
+        renglones: [
+          {
+            codigoProducto: '7590377000503',
+            ean: '7590377000503',
+            descripcion: 'LECHE EN POLVO COMPLETA 400GR / 2.98',
+            cantidadTotal: 55,
+            desglosePorTienda: [
+              { tienda: 'AK01', cantidad: 30 },
+              { tienda: 'AK02', cantidad: 25 },
+              { tienda: 'FC01', cantidad: 10 },
+              { tienda: 'AKOP', cantidad: 999 },
+              { tienda: 'CI', cantidad: 888 }
+            ],
+            precioUnitario: 40,
+            subtotal: 2200
+          }
+        ],
+        montoTotal: 2600
+      };
+
+      const normalized = normalizeOrderForCodizulca(structuredPayload);
+      expect(normalized.ordenNro).toBe('0000054457');
+      expect(normalized.numeroOrden).toBe('0000054457');
+      expect(normalized.fechaEmision).toBe('06/10/2026');
+      expect(normalized.fechaOrden).toBe('06/10/2026');
+      expect(normalized.fechaEntrega).toBe('12/10/2026');
+      expect(normalized.tiendasDetectadas).toEqual(['AK01', 'AK02', 'FC01']);
+      expect(normalized.items).toHaveLength(1);
+      expect(normalized.items[0].codigoProducto).toBe('7590377000503');
+      expect(normalized.items[0].ean).toBe('7590377000503');
+      expect(normalized.items[0].precioUnitario).toBe(40);
+      expect(normalized.items[0].tiendas).toEqual({ AK01: 30, AK02: 25, FC01: 10 });
+      expect(normalized.items[0].desglosePorTienda).toEqual([
+        { tienda: 'AK01', cantidad: 30 },
+        { tienda: 'AK02', cantidad: 25 },
+        { tienda: 'FC01', cantidad: 10 }
+      ]);
+      expect(normalized.subtotalAlkosto).toBe(2200);
+      expect(normalized.subtotalFamiliaCenter).toBe(400);
+      expect(normalized.montoTotal).toBe(2600);
     });
   });
 });

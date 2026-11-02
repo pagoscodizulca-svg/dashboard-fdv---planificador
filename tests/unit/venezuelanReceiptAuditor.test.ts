@@ -3,6 +3,10 @@ import {
   auditAndNormalizeReceiptPayload,
   parseVenezuelanReceiptText,
   parseVenezuelanMonto,
+  parseMontoVenezolano,
+  detectReceiptMimeType,
+  VENEZUELAN_RECEIPT_RESPONSE_SCHEMA,
+  VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT,
   normalizeReferenciaBancaria,
   normalizeVenezuelanBank,
   normalizeReceiptDates,
@@ -403,5 +407,69 @@ describe('Agente Experto en Auditoría Bancaria Venezolana (venezuelanReceiptAud
       plataforma_canal: null,
       numero_cuenta: null
     });
+  });
+
+  it('Parser Numérico Venezolano (parseMontoVenezolano): convierte "576.599,07" a 576599.07 y nunca devuelve NaN o 576.599', () => {
+    expect(parseMontoVenezolano('576.599,07')).toBe(576599.07);
+    expect(parseMontoVenezolano('Bs. 576.599,07')).toBe(576599.07);
+    expect(parseMontoVenezolano('1.234.567,89')).toBe(1234567.89);
+    expect(parseMontoVenezolano(576599.07)).toBe(576599.07);
+    expect(parseMontoVenezolano(null)).toBe(0);
+    expect(parseMontoVenezolano('')).toBe(0);
+    expect(parseMontoVenezolano('texto_invalido')).toBe(0);
+    expect(Number.isNaN(parseMontoVenezolano('576.599,07'))).toBe(false);
+  });
+
+  it('Detección dinámica de mimeType (detectReceiptMimeType): identifica image/jpeg, image/png, image/webp y application/pdf sin fijar image/png', () => {
+    expect(detectReceiptMimeType(null, 'image/jpeg', 'foto.jpg')).toBe('image/jpeg');
+    expect(detectReceiptMimeType(null, '', 'comprobante.jpeg')).toBe('image/jpeg');
+    expect(detectReceiptMimeType(null, '', 'captura.png')).toBe('image/png');
+    expect(detectReceiptMimeType(null, 'image/webp', 'whatsapp.webp')).toBe('image/webp');
+    expect(detectReceiptMimeType(null, '', 'soporte.webp')).toBe('image/webp');
+    expect(detectReceiptMimeType(null, '', 'recibo.pdf')).toBe('application/pdf');
+    expect(detectReceiptMimeType('data:image/webp;base64,UklGRg==')).toBe('image/webp');
+  });
+
+  it('Esquema estricto VENEZUELAN_RECEIPT_RESPONSE_SCHEMA y mapeo de cuenta_origen_o_destino', () => {
+    expect(VENEZUELAN_RECEIPT_RESPONSE_SCHEMA.type).toBe('OBJECT');
+    expect(VENEZUELAN_RECEIPT_RESPONSE_SCHEMA.required).toEqual([
+      'lectura_exitosa',
+      'nivel_confianza',
+      'requiere_revision_manual',
+      'datos_extraidos',
+      'evidencia_visual'
+    ]);
+    expect(VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT).toContain('0108*****40*****7396');
+    expect(VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT).toContain('000019111');
+
+    const auditedSchemaOutput = auditAndNormalizeReceiptPayload({
+      lectura_exitosa: true,
+      nivel_confianza: 'ALTO',
+      datos_extraidos: {
+        fecha_operacion: '2026-11-02',
+        fecha_original: '02/11/2026',
+        numero_referencia: '000019111',
+        monto_numerico: 576599.07,
+        monto_texto: '576.599,07',
+        moneda: 'VES',
+        banco_identificado: 'BBVA Provincial',
+        codigo_banco: '0108',
+        cuenta_origen_o_destino: '0108*****40*****7396',
+        plataforma_canal: 'Provinet'
+      },
+      evidencia_visual: {
+        tiene_etiquetas_visibles: false,
+        es_foto_de_monitor: true,
+        lineas_detectadas: ['0108*****40*****7396', '02/11/2026', '000019111', '576.599,07']
+      },
+      observaciones: null
+    });
+
+    expect(auditedSchemaOutput.lectura_exitosa).toBe(true);
+    expect(auditedSchemaOutput.banco).toBe('BBVA Provincial');
+    expect(auditedSchemaOutput.monto_bs).toBe(576599.07);
+    expect(auditedSchemaOutput.referencia).toBe('000019111');
+    expect(auditedSchemaOutput.fecha_iso).toBe('2026-11-02');
+    expect(auditedSchemaOutput.datos_extraidos.numero_cuenta).toBe('0108*****40*****7396');
   });
 });
