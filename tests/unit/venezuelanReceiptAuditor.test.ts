@@ -7,7 +7,11 @@ import {
   normalizeVenezuelanBank,
   normalizeReceiptDates,
   normalizeRifCiTitular,
-  safeExtractReceiptJson
+  safeExtractReceiptJson,
+  extractNumeroCuentaVenezolana,
+  extractMontoTextoExacto,
+  resolveVenezuelanBankDetails,
+  toCanonicalVenezuelanReceiptJson
 } from '../../src/services/venezuelanReceiptAuditor';
 
 describe('Agente Experto en Auditoría Bancaria Venezolana (venezuelanReceiptAuditor)', () => {
@@ -31,7 +35,23 @@ describe('Agente Experto en Auditoría Bancaria Venezolana (venezuelanReceiptAud
 
     const audited = auditAndNormalizeReceiptPayload(rawFromAiWithHallucinatedSender);
 
-    expect(audited).toEqual({
+    expect(audited).toMatchObject({
+      lectura_exitosa: true,
+      nivel_confianza: 'ALTO',
+      requiere_revision_manual: false,
+      motivo_revision: null,
+      datos_extraidos: {
+        fecha_operacion: '2026-10-29',
+        fecha_original: '29/10/2026',
+        numero_referencia: '460284758160',
+        monto_numerico: 203242.47,
+        monto_texto: '203.242,47',
+        moneda: 'VES',
+        banco_identificado: 'Banesco',
+        codigo_banco: '0134',
+        plataforma_canal: 'Pago Móvil',
+        numero_cuenta: null
+      },
       legible: true,
       confianza: 0.98,
       confianza_lectura: 'alta',
@@ -261,5 +281,127 @@ describe('Agente Experto en Auditoría Bancaria Venezolana (venezuelanReceiptAud
     expect(auditedDirect.referencia).toBe('000019111');
     expect(auditedDirect.monto_bs).toBe(576599.07);
     expect(auditedDirect.fecha_pago).toBe('02/11/2026');
+  });
+
+  it('Estructura de salida JSON Puro (toCanonicalVenezuelanReceiptJson) y Heurística para Soportes Recortados sin etiquetas', () => {
+    const rawAiCanonicalPayload = {
+      lectura_exitosa: true,
+      nivel_confianza: 'ALTO',
+      requiere_revision_manual: false,
+      motivo_revision: null,
+      datos_extraidos: {
+        fecha_operacion: '2026-11-02',
+        fecha_original: '02/11/2026',
+        numero_referencia: '000019111',
+        monto_numerico: 576599.07,
+        monto_texto: '576.599,07',
+        moneda: 'VES',
+        banco_identificado: null,
+        codigo_banco: null,
+        plataforma_canal: 'Provinet',
+        numero_cuenta: '0108*****40*****7396'
+      },
+      evidencia_visual: {
+        tiene_etiquetas_visibles: false,
+        es_foto_de_pantalla: true,
+        lineas_crudas_detectadas: [
+          '0108*****40*****7396',
+          '02/11/2026',
+          '000019111',
+          '576.599,07'
+        ]
+      }
+    };
+
+    const canonical = toCanonicalVenezuelanReceiptJson(rawAiCanonicalPayload);
+
+    expect(canonical).toEqual({
+      lectura_exitosa: true,
+      nivel_confianza: 'ALTO',
+      requiere_revision_manual: false,
+      motivo_revision: null,
+      datos_extraidos: {
+        fecha_operacion: '2026-11-02',
+        fecha_original: '02/11/2026',
+        numero_referencia: '000019111',
+        monto_numerico: 576599.07,
+        monto_texto: '576.599,07',
+        moneda: 'VES',
+        banco_identificado: 'BBVA Provincial',
+        codigo_banco: '0108',
+        plataforma_canal: 'Provinet',
+        numero_cuenta: '0108*****40*****7396'
+      },
+      evidencia_visual: {
+        tiene_etiquetas_visibles: false,
+        es_foto_de_pantalla: true,
+        lineas_crudas_detectadas: [
+          '0108*****40*****7396',
+          '02/11/2026',
+          '000019111',
+          '576.599,07'
+        ]
+      }
+    });
+  });
+
+  it('Reglas Anti-Alucinación: conserva asteriscos en cuenta enmascarada, mapea códigos bancarios y devuelve null en datos faltantes', () => {
+    expect(extractNumeroCuentaVenezolana('0108*****40*****7396')).toBe('0108*****40*****7396');
+    expect(extractNumeroCuentaVenezolana('01340031880311234567')).toBe('01340031880311234567');
+    expect(extractMontoTextoExacto('Bs. 576.599,07')).toBe('576.599,07');
+
+    expect(resolveVenezuelanBankDetails('0108', 'Provinet', '0108*****40*****7396')).toMatchObject({
+      banco_identificado: 'BBVA Provincial',
+      codigo_banco: '0108',
+      plataforma_canal: 'Provinet'
+    });
+    expect(resolveVenezuelanBankDetails('0134', 'BanescOnline')).toMatchObject({
+      banco_identificado: 'Banesco',
+      codigo_banco: '0134',
+      plataforma_canal: 'BanescOnline'
+    });
+    expect(resolveVenezuelanBankDetails('0105', 'Mercantil en Línea')).toMatchObject({
+      banco_identificado: 'Banco Mercantil',
+      codigo_banco: '0105',
+      plataforma_canal: 'Mercantil en Línea'
+    });
+    expect(resolveVenezuelanBankDetails('0102', 'BDVenlínea')).toMatchObject({
+      banco_identificado: 'Banco de Venezuela',
+      codigo_banco: '0102',
+      plataforma_canal: 'BDVenlínea'
+    });
+    expect(resolveVenezuelanBankDetails('0172')).toMatchObject({
+      banco_identificado: 'Bancamiga',
+      codigo_banco: '0172'
+    });
+    expect(resolveVenezuelanBankDetails('0191')).toMatchObject({
+      banco_identificado: 'BNC (Banco Nacional de Crédito)',
+      codigo_banco: '0191'
+    });
+    expect(resolveVenezuelanBankDetails('0114')).toMatchObject({
+      banco_identificado: 'Bancaribe',
+      codigo_banco: '0114'
+    });
+    expect(resolveVenezuelanBankDetails('0115')).toMatchObject({
+      banco_identificado: 'Banco Exterior',
+      codigo_banco: '0115'
+    });
+
+    const emptyCanonical = toCanonicalVenezuelanReceiptJson({});
+    expect(emptyCanonical.lectura_exitosa).toBe(false);
+    expect(emptyCanonical.nivel_confianza).toBe('BAJO');
+    expect(emptyCanonical.requiere_revision_manual).toBe(true);
+    expect(emptyCanonical.datos_extraidos).toEqual({
+      fecha_operacion: null,
+      fecha_original: null,
+      numero_referencia: null,
+      monto_numerico: null,
+      monto_texto: null,
+      moneda: null,
+      banco_identificado: null,
+      codigo_banco: null,
+      plataforma_canal: null,
+      numero_cuenta: null
+    });
   });
 });

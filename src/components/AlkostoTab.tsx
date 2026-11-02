@@ -51,7 +51,10 @@ import {
 } from '../services/alkostoService';
 import {
   detectAlkostoFileMimeType,
-  sanitizeBase64Payload
+  sanitizeBase64Payload,
+  normalizeOrderForCodizulca,
+  AlkostoOcrStage,
+  AlkostoOcrStageError
 } from '../services/alkostoOcParser';
 import { CodizulcaNotaPedido } from './CodizulcaNotaPedido';
 
@@ -234,14 +237,14 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
     const isImage = inferredMime.startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp|heic|tiff?)$/i.test(file.name);
 
     if (!isPdf && !isImage && file.type && !file.type.includes('octet-stream')) {
-      const msg = 'Error procesando orden de compra: Formato no soportado. Por favor sube una imagen (JPG, PNG, WEBP) o un archivo PDF.';
+      const msg = 'Error en Etapa [1-Archivo]: Formato no soportado. Por favor sube una imagen (JPG, PNG, WEBP) o un archivo PDF.';
       setOcrError(msg);
       setAlertaError(msg);
       return;
     }
 
     if (file.size > 25 * 1024 * 1024) {
-      const msg = 'Error procesando orden de compra: El archivo supera el límite máximo permitido (25 MB).';
+      const msg = 'Error en Etapa [1-Archivo]: El archivo supera el límite máximo permitido (25 MB).';
       setOcrError(msg);
       setAlertaError(msg);
       return;
@@ -251,9 +254,14 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
     setOcrError(null);
     setAlertaError(null);
 
+    let currentStage: AlkostoOcrStage = '1-Archivo';
+
     try {
       const { base64, mimeType } = await optimizarImagenParaOCR(file);
-      const data = await parseAlkostoOrderImage(base64, mimeType || inferredMime, file.name);
+      currentStage = '2-Conexión Gemini-Render';
+      const rawData = await parseAlkostoOrderImage(base64, mimeType || inferredMime, file.name);
+      currentStage = '4-Mapeo Nota de Pedido';
+      const data = normalizeOrderForCodizulca(rawData);
       setParsedOCData(data);
       setOcLoadKey(k => k + 1);
       
@@ -265,15 +273,24 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
       // Cambiar automáticamente a la vista del Formato Codizulca
       setActiveView('formato');
     } catch (error: any) {
-      const rawReason = error?.message || 'Error desconocido';
-      const diagnosticMessage = rawReason.startsWith('Error procesando orden de compra:')
+      const rawReason = String(error?.message || 'Error desconocido').trim();
+      const stage: AlkostoOcrStage =
+        error instanceof AlkostoOcrStageError
+          ? error.stage
+          : /JSON|parse|llave/i.test(rawReason)
+            ? '3-Parseo JSON'
+            : currentStage;
+
+      const diagnosticMessage = /^Error en Etapa \[/i.test(rawReason)
         ? rawReason
-        : `Error procesando orden de compra: ${rawReason}`;
-      console.error('[AlkostoTab] Error procesando Orden de Compra:', {
+        : `Error en Etapa [${stage}]: ${rawReason}`;
+
+      console.error('[AlkostoTab] Diagnóstico por etapas de Orden de Compra:', {
+        stage,
         fileName: file.name,
         fileType: file.type,
         fileSizeKB: Math.round(file.size / 1024),
-        errorMessage: error?.message,
+        errorMessage: diagnosticMessage,
         statusCode: error?.statusCode,
         details: error?.details
       });

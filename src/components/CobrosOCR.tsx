@@ -741,21 +741,31 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
       }
 
       const camposCargados: string[] = [];
+      const datosExtraidos =
+        data && typeof data.datos_extraidos === 'object' && data.datos_extraidos !== null
+          ? data.datos_extraidos
+          : {};
 
       // 1. Método de Pago estricto (seleccionado automáticamente en el selector)
-      if (data.metodo_pago && data.metodo_pago !== 'null') {
+      const rawMetodoCandidate = data.metodo_pago ?? datosExtraidos.plataforma_canal ?? null;
+      if (rawMetodoCandidate && rawMetodoCandidate !== 'null') {
         const normalizedMetodo = normalizeMetodoPago(
-          data.metodo_pago,
-          `${data.observacion_auditoria || ''} ${data.observacion_ia || ''}`
+          rawMetodoCandidate,
+          `${data.observacion_auditoria || ''} ${data.observacion_ia || ''} ${data.motivo_revision || ''}`
         );
         setMetodoPago(normalizedMetodo);
-        if (res.ok || data.legible !== false) {
+        if (res.ok || (data.legible !== false && data.lectura_exitosa !== false)) {
           camposCargados.push(normalizedMetodo);
         }
       }
 
-      // 2. Banco normalizado (priorizando banco principal / origen / destino)
-      const resolvedBanco = data.banco ?? data.banco_origen ?? data.banco_destino ?? null;
+      // 2. Banco normalizado (priorizando banco_identificado / banco principal / origen / destino)
+      const resolvedBanco =
+        datosExtraidos.banco_identificado ??
+        data.banco ??
+        data.banco_origen ??
+        data.banco_destino ??
+        null;
       if (resolvedBanco && resolvedBanco !== 'null') {
         const cleanBanco = String(resolvedBanco).trim();
         setBanco(cleanBanco);
@@ -765,7 +775,12 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
       }
 
       // 3. Monto en Bolívares con validación de coherencia (Regla 1 y Regla 6: <= 5.000.000.000,00 Bs)
-      const rawMonto = data.monto_bs ?? data.monto ?? data.monto_texto_original;
+      const rawMonto =
+        datosExtraidos.monto_numerico ??
+        datosExtraidos.monto_texto ??
+        data.monto_bs ??
+        data.monto ??
+        data.monto_texto_original;
       const coherentMonto = parseVenezuelanMonto(rawMonto);
       if (coherentMonto !== null && coherentMonto > 0) {
         const formattedMonto = new Intl.NumberFormat('es-VE', {
@@ -777,10 +792,11 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
         camposCargados.push(`Bs. ${formattedMonto}`);
       }
 
-      // 4. Número de Referencia (Regla 2: solo dígitos, ignorando íconos de copiado y separando Código autorización)
+      // 4. Número de Referencia (Regla 2: solo dígitos, conservando ceros a la izquierda, ignorando íconos de copiado)
       const resolvedRef =
-        normalizeReferenciaBancaria(data.referencia ?? data.nro_referencia) ??
-        normalizeReferenciaBancaria(data.codigo_autorizacion);
+        normalizeReferenciaBancaria(
+          datosExtraidos.numero_referencia ?? data.referencia ?? data.nro_referencia
+        ) ?? normalizeReferenciaBancaria(data.codigo_autorizacion);
       if (resolvedRef) {
         setReferencia(resolvedRef);
         camposCargados.push(`Ref: ${resolvedRef}`);
@@ -789,10 +805,12 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
       }
 
       // 5. Fecha explícita del comprobante (Regla 5: si es null como en BNC Pago Móvil, usar fecha del archivo o día actual)
-      const normalizedDates = normalizeReceiptDates(data.fecha_pago, data.fecha_iso);
+      const rawFechaOriginal = datosExtraidos.fecha_original ?? data.fecha_pago;
+      const rawFechaOperacionIso = datosExtraidos.fecha_operacion ?? data.fecha_iso;
+      const normalizedDates = normalizeReceiptDates(rawFechaOriginal, rawFechaOperacionIso);
       const explicitIsoDate =
-        data.fecha_iso && /^\d{4}-\d{2}-\d{2}$/.test(String(data.fecha_iso).trim())
-          ? String(data.fecha_iso).trim()
+        rawFechaOperacionIso && /^\d{4}-\d{2}-\d{2}$/.test(String(rawFechaOperacionIso).trim())
+          ? String(rawFechaOperacionIso).trim()
           : normalizedDates.fecha_iso;
       const effectiveIsoDate =
         explicitIsoDate || fallbackDateIso || new Date().toISOString().split('T')[0];
@@ -861,12 +879,13 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
           (coherentMonto !== null && coherentMonto > 0) ||
           resolvedRef ||
           explicitIsoDate ||
+          datosExtraidos.numero_cuenta ||
           (resolvedTitular && resolvedTitular !== 'null' && !isBeneficiaryName(String(resolvedTitular)))
       );
 
-      if (!tieneDatosFinancierosExtraidos && (!res.ok || data.legible === false)) {
+      if (!tieneDatosFinancierosExtraidos && (!res.ok || data.legible === false || data.lectura_exitosa === false)) {
         throw new Error(
-          data.observacion_auditoria || data.observacion_ia || data.error || 'Error al procesar con OCR'
+          data.motivo_revision || data.observacion_auditoria || data.observacion_ia || data.error || 'Error al procesar con OCR'
         );
       }
 

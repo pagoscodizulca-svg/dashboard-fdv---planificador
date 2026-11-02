@@ -24,7 +24,8 @@ import {
   construirObservacionFormateada,
   normalizarCadenaEstricta,
   calcularResumenCuadreOC,
-  normalizarNombreVendedorSairu
+  normalizarNombreVendedorSairu,
+  normalizeOrderForCodizulca
 } from '../services/alkostoOcParser';
 
 interface CodizulcaNotaPedidoProps {
@@ -103,7 +104,8 @@ function buildFilasFromData(
   tienda: string = 'CONSOLIDADO',
   cadena: 'ALKOSTO' | 'FAMILIA_CENTER' = 'ALKOSTO'
 ): CodizulcaNotaPedidoItem[] {
-  const itemsList = extractItemsList(data);
+  const safeData = data ? normalizeOrderForCodizulca(data) : null;
+  const itemsList = extractItemsList(safeData);
   const totalItems = itemsList.length;
   const result: CodizulcaNotaPedidoItem[] = [];
   const chainPrefix = cadena === 'FAMILIA_CENTER' ? 'FC' : 'AK';

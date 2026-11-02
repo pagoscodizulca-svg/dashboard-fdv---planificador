@@ -70,20 +70,43 @@ import {
 } from './alkostoService';
 
 /**
- * Lista oficial de modelos Gemini en cascada automática por orden de precisión documental:
- * 1º `gemini-2.5-pro` (máxima exactitud para tablas densas, códigos y matrices de tiendas AK01-AK10)
- * 2º `gemini-2.5-flash` (rápido y multimodal de alta precisión para PDFs e imágenes)
- * 3º `gemini-2.0-flash` (respaldo de alta compatibilidad)
+ * Lista oficial de modelos Gemini en cascada automática (Paso 3):
+ * 1º `gemini-2.5-flash` (óptimo en velocidad y lectura de tablas multimodales, evitando timeouts en Render)
+ * 2º `gemini-2.5-pro` (máxima profundidad analítica de respaldo)
+ * 3º `gemini-2.0-flash` (respaldo de compatibilidad)
  */
 export const ALKOSTO_OCR_MODEL_CASCADE = [
-  'gemini-2.5-pro',
   'gemini-2.5-flash',
+  'gemini-2.5-pro',
   'gemini-2.0-flash'
 ] as const;
 
+export type AlkostoOcrStage =
+  | '1-Archivo'
+  | '2-Conexión Gemini-Render'
+  | '3-Parseo JSON'
+  | '4-Mapeo Nota de Pedido';
+
+export class AlkostoOcrStageError extends Error {
+  public readonly stage: AlkostoOcrStage;
+  public readonly statusCode?: number;
+  public readonly code?: string;
+  public readonly details?: any;
+
+  constructor(stage: AlkostoOcrStage, message: string, options?: { statusCode?: number; code?: string; details?: any }) {
+    const cleanMsg = String(message || 'Error desconocido').replace(/^Error en Etapa \[[^\]]+\]:\s*/i, '');
+    super(`Error en Etapa [${stage}]: ${cleanMsg}`);
+    this.name = 'AlkostoOcrStageError';
+    this.stage = stage;
+    this.statusCode = options?.statusCode;
+    this.code = options?.code;
+    this.details = options?.details;
+  }
+}
+
 /**
- * Construye dinámicamente el System Prompt del motor OCR inyectando las abreviaturas sincronizadas
- * en base de datos (`AK01` a `AK10` para Alkosto y `FC01` a `FC07` para Familia Center).
+ * Construye dinámicamente el System Prompt del motor OCR inyectando las 17 abreviaturas sincronizadas
+ * en base de datos (`AK01` a `AK10` para Alkosto y `FC01` a `FC07` para Familia Center), ignorando `AKOP` y `CI`.
  */
 export function buildAlkostoOcSystemPrompt(
   abrevAlkosto: string[] = CADENAS_ABREVIATURAS?.ALKOSTO || ['AK01', 'AK02', 'AK03', 'AK04', 'AK05', 'AK06', 'AK07', 'AK08', 'AK09', 'AK10'],
@@ -99,18 +122,25 @@ export function buildAlkostoOcSystemPrompt(
     .join(' | ');
 
   return `ROL Y OBJETIVO:
-Eres un motor experto en extracción de datos contables y comerciales (OCR + Comprensión Documental) especializado en procesar Órdenes de Compra emitidas por ALKOSTO (y FAMILIA CENTER) para ser integradas automáticamente en la Nota de Pedido de Codizulca.
+Eres un motor experto en extracción de datos contables y comerciales (OCR + Comprensión Documental) especializado en procesar Órdenes de Compra emitidas por ALKOSTO y FAMILIA CENTER para ser integradas automáticamente en la Nota de Pedido de Codizulca.
 
 TAREA PRINCIPAL:
-Analiza minuciosamente la imagen, captura o documento PDF adjunto correspondiente a una Orden de Compra de ALKOSTO. Extrae la totalidad de los datos de cabecera, todos los renglones de productos, códigos, el desglose de cantidades por tienda/sucursal y los montos financieros, sin omitir ni resumir ningún ítem.
+Analiza minuciosamente la imagen, captura o documento PDF adjunto correspondiente a una Orden de Compra de ALKOSTO / FAMILIA CENTER en TODAS sus páginas. Extrae la totalidad de los datos de cabecera, todos los renglones de productos, códigos, el desglose de cantidades por tienda/sucursal y los montos financieros, sin omitir ni resumir ningún ítem.
 
-ABREVIATURAS DE SUCURSALES SINCRONIZADAS EN BASE DE DATOS (OBLIGATORIAS):
+17 TIENDAS VÁLIDAS SINCRONIZADAS EN BASE DE DATOS (ÚNICAS PERMITIDAS):
 - Alkosto (${akTagsStr}): ${sucursalesAkDetalle}
 - Familia Center (${fcTagsStr}): ${sucursalesFcDetalle}
+- PROHIBIDO extraer las columnas administrativas "AKOP", "FCOP" o "CI": ignóralas por completo.
 
-REGLAS ESTRICTAS DE EXTRACCIÓN Y NORMALIZACIÓN:
-1. INTEGRIDAD DE RENGLONES: Extrae absolutamente TODOS los renglones de la orden (si el documento tiene múltiples páginas o tablas extensas, procésalas de principio a fin). Nunca utilices comentarios como "// resto de los ítems".
-2. CÓDIGOS DE PRODUCTO: Identifica y separa claramente el código interno/referencia del proveedor (Codizulca), el código de barras (EAN/UPC) y el código interno de Alkosto (SKU/PLU) si están presentes. Si solo aparece un código por renglón, asígnalo a \`codigo_principal\`.
+REGLAS ESTRICTAS DE EXTRACCIÓN Y NORMALIZACIÓN (PASO 4):
+1. LECTURA MULTIPÁGINA Y UNIFICACIÓN (ALKOSTO + FAMILIA CENTER):
+   - Lee todas las páginas del documento (unificando la sección de Página 1 "ALKOSTO DONDE COMPRAR ES GANAR, C.A." y la de Página 2 "FAMILIA CENTER, C.A.").
+   - Nunca utilices comentarios como "// resto de los ítems".
+2. EXCLUSIÓN DE COLUMNAS EXTRA (AKOP / CI) Y EXTRACCIÓN DE LAS 17 TIENDAS:
+   - Extrae únicamente las 17 tiendas válidas sincronizadas en base de datos (${akTagsStr} y ${fcTagsStr}).
+   - Ignora por completo las columnas "AKOP", "FCOP" y "CI" que aparecen en las tablas del PDF.
+3. CONSOLIDACIÓN POR CÓDIGO DE PRODUCTO SIN DUPLICADOS:
+   - Si el mismo código de producto (ej. "7590377000503", "7590377000510") aparece en la página de ALKOSTO (AK01..AK10) y en la página de FAMILIA CENTER (FC01..FC07), consolida sus cantidades por tienda en un único renglón por producto dentro de \`tiendas\` (ej. \`{"AK01": 15, ..., "FC01": 10}\`) y en \`distribucion_tiendas\`, evitando claves o filas duplicadas.
    - Homologación oficial Codizulca:
      * 7591289609129 -> codigo_principal: "21", codigo_ean: "7591289609129", unidad_medida: "CJ", descripcion_producto: "MORTADELA DE POLLO DEL CORRAL 1KG"
      * 7591289400023 -> codigo_principal: "047", codigo_ean: "7591289400023", unidad_medida: "UND", descripcion_producto: "NUGGETS DE POLLO DEL CORRAL 460GR"
@@ -126,26 +156,35 @@ REGLAS ESTRICTAS DE EXTRACCIÓN Y NORMALIZACIÓN:
      * 7590377000503 -> codigo_principal: "7590377000503", codigo_ean: "7590377000503", unidad_medida: "CJ", descripcion_producto: "LECHE EN POLVO COMPLETA VENCAMPO 400GR"
      * 7590377000510 -> codigo_principal: "7590377000510", codigo_ean: "7590377000510", unidad_medida: "CJ", descripcion_producto: "LECHE EN POLVO COMPLETA VENCAMPO 900GR"
    - Elimina siempre el sufijo de PVP sugerido tras la barra en la descripción (ej. quitar "/ 2.40", "/ 6.88").
-3. CANTIDADES POR TIENDA:
-   - Si la orden de compra desglosa las unidades pedidas por tienda/sucursal (columnas ${akTagsStr} para Alkosto, ${fcTagsStr} para Familia Center, o sub-filas), extrae cada tienda con cantidad > 0 y su cantidad exacta dentro del arreglo \`distribucion_tiendas\` usando exactamente los códigos oficiales (${akTagsStr} o ${fcTagsStr}) en \`codigo_tienda\`.
-   - Calcula o extrae la \`cantidad_total\` del renglón. Verifica que la suma de las cantidades por tienda coincida con la \`cantidad_total\`. Si una celda tiene decimales pegados (ej. "200" cuando la suma debe ser "3.00" y otra tienda tiene "1.00"), corrígela a "2.00".
-   - Si la orden es para una única tienda general indicada en la cabecera, asigna esa tienda en \`distribucion_tiendas\` con el total de unidades del renglón.
 4. FORMATO NUMÉRICO ESTÁNDAR (CRÍTICO):
-   - Convierte todos los montos, precios, descuentos, impuestos y cantidades a números flotantes estándar (usa punto \`.\` exclusivamente como separador decimal y elimina símbolos de moneda \`$\`, \`Bs\`, \`%\` o separadores de miles). Ejemplo: "1.250,50" -> 1250.50 | "1,250.00" -> 1250.00.
-5. VALIDACIÓN ARITMÉTICA:
-   - Comprueba en cada renglón si \`cantidad_total * costo_unitario\` (menos descuentos, si aplican) coincide con el \`monto_total_renglon\`. Si hay discrepancia por lectura borrosa en la foto, prioriza los valores legibles y marca \`alerta_revision: true\` en ese renglón explicando el motivo en \`nota_revision\`.
+   - Normaliza todos los números eliminando comas de miles ("9,600.00" -> 9600, "46,150.00" -> 46150) y reduciendo costos de 4 decimales ("40.0000" -> 40, "90.0000" -> 90).
+   - Usa punto \`.\` exclusivamente como separador decimal y elimina símbolos de moneda \`$\`, \`Bs\`, \`%\`.
+5. CABECERA COMPLETA Y VALIDACIÓN ARITMÉTICA:
+   - Extrae la cabecera completa: \`numero_orden\`, \`fecha_emision\`, \`fecha_entrega\`, \`dias_credito\`, \`tasa_cambio\` y \`observaciones\`.
+   - Comprueba en cada renglón si \`cantidad_total * costo_unitario\` coincide con \`monto_total_renglon\`. Si hay discrepancia por lectura borrosa en foto, prioriza valores legibles y marca \`alerta_revision: true\`.
 6. SALIDA JSON PURA:
-   - Devuelve ÚNICAMENTE un objeto JSON válido que cumpla estrictamente con el esquema especificado. Prohibido incluir bloques Markdown (\`\`\`json), texto introductorio o explicaciones fuera del JSON.
+   - Devuelve ÚNICAMENTE un objeto JSON válido sin bloques Markdown (\`\`\`json) ni texto adicional.
 
 ESQUEMA JSON DE SALIDA REQUERIDO:
 {
+  "numero_orden": "0000054457",
+  "fecha_emision": "YYYY-MM-DD",
+  "fecha_entrega": "YYYY-MM-DD",
+  "dias_credito": 10,
+  "tasa_cambio": 872.3927,
+  "observaciones": "string | null",
+  "subtotal_alkosto": 0.0,
+  "subtotal_familia_center": 0.0,
+  "total_factura": 0.0,
   "cabecera_orden": {
     "cliente_emisor": "ALKOSTO",
     "receptor_destino": "CODIZULCA",
     "numero_orden_compra": "string",
     "fecha_emision": "YYYY-MM-DD",
     "fecha_entrega_estimada": "YYYY-MM-DD | null",
-    "moneda": "string | null",
+    "dias_credito": 10,
+    "tasa_cambio": 872.3927,
+    "moneda": "USD",
     "condicion_pago": "string | null",
     "observaciones_generales": "string | null"
   },
@@ -156,12 +195,16 @@ ESQUEMA JSON DE SALIDA REQUERIDO:
       "codigo_ean": "string | null",
       "codigo_interno_alkosto": "string | null",
       "descripcion_producto": "string",
-      "unidad_medida": "string (ej. UND, CAJ, KG, BTO)",
+      "unidad_medida": "CJ",
       "unidades_por_empaque": 1,
       "cantidad_total": 0.0,
+      "tiendas": {
+        "AK01": 0.0,
+        "FC01": 0.0
+      },
       "distribucion_tiendas": [
         {
-          "codigo_tienda": "string | null (ej. AK01, AK02... AK10, FC01... FC07)",
+          "codigo_tienda": "AK01",
           "nombre_tienda": "string",
           "cantidad": 0.0
         }
@@ -265,15 +308,13 @@ export function detectAlkostoFileMimeType(
 }
 
 /**
- * Parsea un texto JSON de respuesta de IA de forma blindada sin lanzar excepciones no controladas:
- * a) Limpia bloques markdown (` ```json ` y ` ``` `).
- * b) Extrae el contenido entre la primera llave `{` (o corchete `[`) y la última `}` (o `]`).
- * c) Parsea el JSON limpiando comentarios o comas residuales y devuelve `null` si no es válido.
+ * Recorta el contenido desde la primera `{` hasta la última `}` (o `[` a `]`),
+ * limpia bloques markdown/comentarios y ejecuta `JSON.parse()` (Paso 3).
  */
-export function parseSafeJson(rawText: string): any {
-  if (!rawText || typeof rawText !== 'string') return null;
+export function extractCleanJson(text: string): any {
+  if (!text || typeof text !== 'string') return null;
 
-  const stripped = rawText
+  const stripped = text
     .replace(/```json\s*/gi, '')
     .replace(/```\s*/g, '')
     .trim();
@@ -283,7 +324,6 @@ export function parseSafeJson(rawText: string): any {
   try {
     return JSON.parse(stripped);
   } catch {
-    // Extraer entre la primera llave '{' (o '[') y la última '}' (o ']')
     const firstBrace = stripped.indexOf('{');
     const lastBrace = stripped.lastIndexOf('}');
     const firstBracket = stripped.indexOf('[');
@@ -323,18 +363,150 @@ export function parseSafeJson(rawText: string): any {
 }
 
 /**
- * Sanitiza la salida de texto del modelo de IA usando `parseSafeJson` y lanza error descriptivo
+ * Parsea un texto JSON de respuesta de IA de forma blindada sin lanzar excepciones no controladas:
+ * a) Limpia bloques markdown (` ```json ` y ` ``` `).
+ * b) Extrae el contenido entre la primera llave `{` (o corchete `[`) y la última `}` (o `]`).
+ * c) Parsea el JSON limpiando comentarios o comas residuales y devuelve `null` si no es válido.
+ */
+export function parseSafeJson(rawText: string): any {
+  return extractCleanJson(rawText);
+}
+
+/**
+ * Sanitiza la salida de texto del modelo de IA usando `extractCleanJson` y lanza error descriptivo
  * únicamente si el texto no contiene ningún JSON interpretable.
  */
 export function sanitizeAndParseOcJson(rawText: string): any {
   if (!rawText || typeof rawText !== 'string') {
-    throw new Error('La respuesta del modelo de IA está vacía.');
+    throw new AlkostoOcrStageError('3-Parseo JSON', 'La respuesta del modelo de IA está vacía.');
   }
-  const parsed = parseSafeJson(rawText);
+  const parsed = extractCleanJson(rawText);
   if (parsed === null || parsed === undefined) {
-    throw new Error('No se encontró un bloque JSON válido en la respuesta del modelo.');
+    throw new AlkostoOcrStageError('3-Parseo JSON', 'No se encontró un bloque JSON válido en la respuesta del modelo.');
   }
   return parsed;
+}
+
+/**
+ * Motor de lectura multimodal con cascada de modelos (Paso 3):
+ * 1º `gemini-2.5-flash` (óptimo en velocidad y lectura de tablas multimodales, evitando timeouts en Render)
+ * 2º `gemini-2.5-pro` (máxima profundidad analítica de respaldo)
+ * 3º `gemini-2.0-flash` (respaldo de compatibilidad)
+ */
+export async function callGeminiWithFallback(params: {
+  base64Data: string;
+  mimeType?: string;
+  fileName?: string;
+  apiKeys: string | string[];
+  prompt?: string;
+  systemInstruction?: string;
+}): Promise<{ rawText: string; parsedJson: any; modelUsed: string; usedModel: string }> {
+  const cleanBase64 = sanitizeBase64Payload(params.base64Data);
+  if (!cleanBase64) {
+    throw new AlkostoOcrStageError('1-Archivo', 'El archivo Base64 está vacío o corrupto.');
+  }
+
+  const detectedMime = detectAlkostoFileMimeType(cleanBase64, params.mimeType, params.fileName);
+  const rawKeys = Array.isArray(params.apiKeys) ? params.apiKeys : [params.apiKeys];
+  const validKeys = Array.from(
+    new Set(
+      rawKeys
+        .filter(Boolean)
+        .flatMap(k => String(k).split(','))
+        .map(k => k.trim().replace(/^["']+|["']+$/g, '').trim())
+        .filter(k => k.length > 10 && k !== 'undefined' && k !== 'null')
+    )
+  );
+
+  if (validKeys.length === 0) {
+    throw new AlkostoOcrStageError(
+      '2-Conexión Gemini-Render',
+      'No se encontró la clave GEMINI_API_KEY configurada en las variables de entorno (GEMINI_API_KEY / VITE_GEMINI_API_KEY).',
+      { statusCode: 503, code: 'AI_API_KEY_UNAVAILABLE' }
+    );
+  }
+
+  const { GoogleGenAI } = await import('@google/genai');
+  const systemInstruction = params.systemInstruction || buildAlkostoOcSystemPrompt();
+  const prompt =
+    params.prompt ||
+    `Analiza minuciosamente todas las páginas de la Orden de Compra de ALKOSTO y FAMILIA CENTER adjunta. Unifica las cantidades por tienda únicamente para las 17 tiendas válidas (${(CADENAS_ABREVIATURAS?.ALKOSTO || []).join(', ')} y ${(CADENAS_ABREVIATURAS?.FAMILIA_CENTER || []).join(', ')}), ignorando por completo AKOP y CI. Normaliza todos los montos sin comas de miles y devuelve ÚNICAMENTE el objeto JSON válido.`;
+
+  let lastError: any = null;
+  let lastStage: AlkostoOcrStage = '2-Conexión Gemini-Render';
+
+  for (let keyIdx = 0; keyIdx < validKeys.length; keyIdx++) {
+    const apiKey = validKeys[keyIdx];
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build'
+        }
+      }
+    });
+
+    for (const modelName of ALKOSTO_OCR_MODEL_CASCADE) {
+      try {
+        lastStage = '2-Conexión Gemini-Render';
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                { inlineData: { data: cleanBase64, mimeType: detectedMime } },
+                { text: prompt }
+              ]
+            }
+          ],
+          config: {
+            systemInstruction,
+            responseMimeType: 'application/json',
+            temperature: 0.1
+          }
+        });
+
+        const rawText = String(response?.text || '').trim();
+        if (!rawText) {
+          throw new AlkostoOcrStageError('3-Parseo JSON', `El modelo ${modelName} devolvió una respuesta vacía.`);
+        }
+
+        lastStage = '3-Parseo JSON';
+        const parsedJson = extractCleanJson(rawText);
+        if (!parsedJson || typeof parsedJson !== 'object') {
+          throw new AlkostoOcrStageError(
+            '3-Parseo JSON',
+            `El modelo ${modelName} devolvió texto que no pudo convertirse en JSON válido.`
+          );
+        }
+
+        return {
+          rawText,
+          parsedJson,
+          modelUsed: modelName,
+          usedModel: modelName
+        };
+      } catch (err: any) {
+        lastError = err;
+        const errMsg = String(err?.message || err);
+        console.warn(`[callGeminiWithFallback] Reintento tras fallo en key#${keyIdx + 1} / modelo ${modelName}: ${errMsg.slice(0, 220)}`);
+        if (/API_KEY_INVALID|API key not valid|reported as leaked|PERMISSION_DENIED/i.test(errMsg)) {
+          break; // Probar siguiente clave si hay otra disponible
+        }
+      }
+    }
+  }
+
+  if (lastError instanceof AlkostoOcrStageError) {
+    throw lastError;
+  }
+
+  const finalMsg = String(lastError?.message || 'Fallo al conectar con los modelos Gemini en cascada.');
+  throw new AlkostoOcrStageError(lastStage, finalMsg, {
+    statusCode: lastError?.status || lastError?.statusCode || 503,
+    code: lastError?.code
+  });
 }
 
 /**
@@ -1360,6 +1532,188 @@ export function extractPositionedTextFromAlkostoPdfBuffer(
   return pageTexts.length > 0 ? pageTexts.join('\n\n') : null;
 }
 
+/**
+ * Descomprime un stream FlateDecode de PDF utilizando `DecompressionStream('deflate')` nativo
+ * (compatible en navegadores modernos y Node 18+ sin requerir `zlib` de Node).
+ */
+async function inflatePdfSliceWithWebStream(rawSlice: Uint8Array): Promise<string> {
+  if (typeof DecompressionStream === 'undefined') return '';
+  let start = 0;
+  let end = rawSlice.length;
+  while (start < end && (rawSlice[start] === 0x0d || rawSlice[start] === 0x0a)) start++;
+  while (end > start && (rawSlice[end - 1] === 0x0d || rawSlice[end - 1] === 0x0a)) end--;
+  if (end <= start) return '';
+  const trimmed = rawSlice.subarray(start, end);
+
+  const tryDecompress = async (format: 'deflate' | 'deflate-raw'): Promise<Uint8Array> => {
+    const ds = new DecompressionStream(format as any);
+    const writer = ds.writable.getWriter();
+    writer.write(trimmed).catch(() => {});
+    writer.close().catch(() => {});
+    const reader = ds.readable.getReader();
+    const chunks: Uint8Array[] = [];
+    let totalLen = 0;
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value && value.length > 0) {
+          chunks.push(value);
+          totalLen += value.length;
+        }
+      }
+    } catch {
+      // Ignorar advertencia de bytes de relleno al final del stream si ya se descomprimió el bloque
+    }
+    const out = new Uint8Array(totalLen);
+    let offset = 0;
+    for (const c of chunks) {
+      out.set(c, offset);
+      offset += c.length;
+    }
+    return out;
+  };
+
+  let bytes = await tryDecompress('deflate');
+  if (bytes.length === 0 && trimmed.length > 2) {
+    bytes = await tryDecompress('deflate-raw');
+  }
+  if (bytes.length === 0) return '';
+  let str = '';
+  for (let i = 0; i < bytes.length; i++) {
+    str += String.fromCharCode(bytes[i]);
+  }
+  return str;
+}
+
+/**
+ * Versión asíncrona universal (Browser + Node) de extracción de texto posicionado por coordenadas (X, Y)
+ * desde un PDF digital de Alkosto / Familia Center usando `DecompressionStream('deflate')`.
+ */
+export async function extractPositionedTextFromAlkostoPdfBufferAsync(
+  pdfBytesOrBase64: Uint8Array | string
+): Promise<string | null> {
+  let bytes: Uint8Array;
+  if (typeof pdfBytesOrBase64 === 'string') {
+    const cleanB64 = sanitizeBase64Payload(pdfBytesOrBase64);
+    if (!cleanB64) return null;
+    if (typeof Buffer !== 'undefined') {
+      bytes = new Uint8Array(Buffer.from(cleanB64, 'base64'));
+    } else if (typeof atob === 'function') {
+      const binStr = atob(cleanB64);
+      bytes = new Uint8Array(binStr.length);
+      for (let i = 0; i < binStr.length; i++) {
+        bytes[i] = binStr.charCodeAt(i);
+      }
+    } else {
+      return null;
+    }
+  } else {
+    bytes = pdfBytesOrBase64;
+  }
+
+  if (!bytes || bytes.length < 32) return null;
+
+  let latin1 = '';
+  for (let i = 0; i < bytes.length; i++) {
+    latin1 += String.fromCharCode(bytes[i]);
+  }
+
+  let cursor = 0;
+  const pageTexts: string[] = [];
+
+  while ((cursor = latin1.indexOf('stream', cursor)) !== -1) {
+    let start = latin1.indexOf('\n', cursor);
+    if (start === -1) break;
+    start += 1;
+    const end = latin1.indexOf('endstream', start);
+    if (end === -1) break;
+
+    const rawSlice = bytes.subarray(start, end);
+    cursor = end + 9;
+
+    const inflated = await inflatePdfSliceWithWebStream(rawSlice);
+    if (!inflated || !inflated.includes('BT') || !inflated.includes('ET') || !inflated.includes('Tm')) {
+      continue;
+    }
+
+    const tokens: Array<{ x: number; y: number; txt: string }> = [];
+    const btBlocks = inflated.match(/(?:q\s+[\d.]+\s+0(?:\.0+)?\s+0(?:\.0+)?\s+[\d.]+\s+0(?:\.0+)?\s+0(?:\.0+)?\s+cm[\s\S]{0,80}?)?BT[\s\S]*?ET/g) || [];
+
+    for (const block of btBlocks) {
+      const cmMatch = block.match(/([\d.]+)\s+0(?:\.0+)?\s+0(?:\.0+)?\s+([\d.]+)\s+0(?:\.0+)?\s+0(?:\.0+)?\s+cm/);
+      const cmScaleX = cmMatch ? parseFloat(cmMatch[1]) || 1 : 1;
+      const cmScaleY = cmMatch ? parseFloat(cmMatch[2]) || 1 : 1;
+
+      const tfMatch = block.match(/\/F\d+\s+([\d.]+)\s+Tf/);
+      const rawFontSize = tfMatch ? parseFloat(tfMatch[1]) : 9.28;
+      const fontSize = rawFontSize * cmScaleX;
+      const tmMatch = block.match(/1\s+0\s+0(?:\.0+)?\s+-1\s+([\d.]+)\s+([\d.]+)\s+Tm/);
+      if (!tmMatch) continue;
+
+      let curX = parseFloat(tmMatch[1]) * cmScaleX;
+      const y = parseFloat(tmMatch[2]) * cmScaleY;
+
+      const tjMatch = block.match(/\[([\s\S]*?)\]\s*TJ/);
+      if (!tjMatch) continue;
+
+      const inner = tjMatch[1];
+      const elems = inner.match(/<[0-9A-Fa-f]{4}>|-?\d+(?:\.\d+)?/g) || [];
+      let curWord = '';
+      let wordStartX = curX;
+
+      for (const el of elems) {
+        if (el.startsWith('<')) {
+          const gid = parseInt(el.slice(1, 5), 16);
+          const ch = decodeAlkostoGlyph(gid);
+          if (!curWord) wordStartX = curX;
+          curWord += ch;
+          curX += fontSize * 0.5;
+        } else {
+          const kern = parseFloat(el);
+          if (kern < -400) {
+            if (curWord.trim()) {
+              tokens.push({ x: wordStartX, y, txt: curWord.trim() });
+            }
+            curWord = '';
+          }
+          curX += (-kern / 1000) * fontSize;
+        }
+      }
+
+      if (curWord.trim()) {
+        tokens.push({ x: wordStartX, y, txt: curWord.trim() });
+      }
+    }
+
+    if (tokens.length === 0) continue;
+
+    tokens.sort((a, b) => (Math.abs(a.y - b.y) < 2.5 ? a.x - b.x : a.y - b.y));
+    const rows: Array<{ y: number; items: Array<{ x: number; y: number; txt: string }> }> = [];
+
+    for (const tok of tokens) {
+      const lastRow = rows[rows.length - 1];
+      if (lastRow && Math.abs(lastRow.y - tok.y) < 2.5) {
+        lastRow.items.push(tok);
+      } else {
+        rows.push({ y: tok.y, items: [tok] });
+      }
+    }
+
+    const pageLines = rows.map(r => {
+      r.items.sort((a, b) => a.x - b.x);
+      return r.items.map(i => i.txt).join('  ');
+    });
+
+    const pageStr = pageLines.join('\n');
+    if (/Orden\s*Nro|ALKOSTO|FAMILIA\s*CENTER|VECINO\s*CENTER/i.test(pageStr)) {
+      pageTexts.push(pageStr);
+    }
+  }
+
+  return pageTexts.length > 0 ? pageTexts.join('\n\n') : null;
+}
+
 function decodeAlkostoGlyph(gid: number): string {
   // Mapa TrueType estándar de los reportes ERP de Alkosto (desplazamiento ASCII +29)
   const code = gid + 29;
@@ -1534,9 +1888,9 @@ export function validateAndNormalizeAlkostoOC(
 
   // 3. Validar y normalizar Número de Orden de Compra y metadatos de cabecera
   const rawOrdenNro = String(
-    pickProp(cabeceraObj, ['numero_orden_compra', 'numeroOrdenCompra', 'ordenNro', 'numero_oc', 'ordenCompra', 'oc']) ??
-    pickProp(root, ['numero_orden_compra', 'ordenNro', 'numero_oc', 'ORDEN DE COMPRA', 'ordenCompra', 'orden_compra', 'numeroOrden', 'nroOrden', 'nro_orden', 'oc']) ??
-    pickProp(rawInput, ['numero_orden_compra', 'ordenNro', 'numero_oc', 'ORDEN DE COMPRA', 'ordenCompra', 'numeroOrden', 'nroOrden', 'oc']) ??
+    pickProp(cabeceraObj, ['numero_orden_compra', 'numeroOrdenCompra', 'numero_orden', 'numeroOrden', 'ordenNro', 'numero_oc', 'ordenCompra', 'oc']) ??
+    pickProp(root, ['numero_orden_compra', 'numero_orden', 'ordenNro', 'numero_oc', 'ORDEN DE COMPRA', 'ordenCompra', 'orden_compra', 'numeroOrden', 'nroOrden', 'nro_orden', 'oc']) ??
+    pickProp(rawInput, ['numero_orden_compra', 'numero_orden', 'ordenNro', 'numero_oc', 'ORDEN DE COMPRA', 'ordenCompra', 'numeroOrden', 'nroOrden', 'oc']) ??
     (typeof root.orden === 'string' ? root.orden : '') ??
     ''
   ).trim();
@@ -2197,11 +2551,22 @@ export function validateAndNormalizeAlkostoOC(
     }, 0).toFixed(2)
   );
 
-  const explicitSubAk = parseNumeroEstricto(pickProp(root, ['subtotalAlkosto', 'subtotal_alkosto']), 0);
-  const explicitSubFc = parseNumeroEstricto(pickProp(root, ['subtotalFamiliaCenter', 'subtotal_familia_center']), 0);
+  const explicitSubAk = parseNumeroEstricto(
+    pickProp(root, ['subtotalAlkosto', 'subtotal_alkosto']) ??
+    pickProp(cabeceraObj, ['subtotalAlkosto', 'subtotal_alkosto']) ??
+    pickProp(resumenObj, ['subtotalAlkosto', 'subtotal_alkosto']),
+    0
+  );
+  const explicitSubFc = parseNumeroEstricto(
+    pickProp(root, ['subtotalFamiliaCenter', 'subtotal_familia_center', 'subtotalFamilia', 'subtotal_familia']) ??
+    pickProp(cabeceraObj, ['subtotalFamiliaCenter', 'subtotal_familia_center']) ??
+    pickProp(resumenObj, ['subtotalFamiliaCenter', 'subtotal_familia_center', 'subtotalFamilia', 'subtotal_familia']),
+    0
+  );
   const explicitSubGen = parseNumeroEstricto(
-    pickProp(root, ['subtotalGeneral', 'subtotal_general']) ??
-    pickProp(resumenObj, ['monto_total_orden', 'subtotal_neto']),
+    pickProp(root, ['subtotalGeneral', 'subtotal_general', 'total_factura', 'totalFactura', 'totalNeto', 'total_neto', 'total_general']) ??
+    pickProp(cabeceraObj, ['total_factura', 'totalFactura', 'total_general']) ??
+    pickProp(resumenObj, ['monto_total_orden', 'subtotal_neto', 'total_factura', 'total_general']),
     0
   );
 
@@ -2223,8 +2588,16 @@ export function validateAndNormalizeAlkostoOC(
 
   const creditDigitsMatch = condicionPagoClean.match(/(\d{1,3})/);
   const diasCreditoFinal = parseNumeroEstricto(
-    pickProp(root, ['diasCredito', 'dias_credito']),
+    pickProp(cabeceraObj, ['dias_credito', 'diasCredito']) ??
+    pickProp(root, ['diasCredito', 'dias_credito']) ??
+    pickProp(rawInput, ['diasCredito', 'dias_credito']),
     creditDigitsMatch ? parseInt(creditDigitsMatch[1], 10) : 15
+  );
+  const tasaCambioFinal = parseNumeroEstricto(
+    pickProp(cabeceraObj, ['tasa_cambio', 'tasaCambio']) ??
+    pickProp(root, ['tasaCambio', 'tasa_cambio']) ??
+    pickProp(rawInput, ['tasaCambio', 'tasa_cambio']),
+    0
   );
   const condicionPagoFinal = condicionPagoClean || (diasCreditoFinal > 0 ? `${diasCreditoFinal} días` : null);
 
@@ -2340,7 +2713,7 @@ export function validateAndNormalizeAlkostoOC(
     moneda: monedaExtraida,
     condicionPago: condicionPagoFinal || undefined,
     diasCredito: diasCreditoFinal,
-    tasaCambio: parseNumeroEstricto(pickProp(root, ['tasaCambio', 'tasa_cambio']), 0),
+    tasaCambio: tasaCambioFinal,
     proveedorNombre: String(root.proveedorNombre || receptorDestinoCabecera || 'CODIZULCA, C.A.').trim(),
     proveedorRif: String(root.proveedorRif || 'J409876136').trim(),
     observaciones: observacionesClean || undefined,
@@ -2377,6 +2750,243 @@ export function toCanonicalAlkostoOcJson(
     cabecera_orden: normalized.cabecera_orden!,
     renglones: normalized.renglones!,
     resumen_totales: normalized.resumen_totales!
+  };
+}
+
+/**
+ * PASO 5: Adaptador defensivo hacia la Nota de Pedido de Codizulca (`normalizeOrderForCodizulca(rawData)`).
+ * Garantiza que todos los arreglos (`items`, `renglones`, `cadenasDetectadas`, `distribucion_tiendas`, `distribucionPorTienda`)
+ * y mapas (`tiendas`) existan siempre (`Array.isArray`), excluye `AKOP`, `FCOP` y `CI`, consolida por código de producto,
+ * convierte strings numéricos con comas o 4 decimales a `Number` nativo y rellena valores por defecto (`0` o `""`)
+ * para que la carga automática en la Nota de Pedido jamás falle por `undefined` o `NaN`.
+ */
+export function normalizeOrderForCodizulca(rawData: any): ParsedOrdenCompraAlkosto {
+  if (!rawData || typeof rawData !== 'object') {
+    throw new AlkostoOcrStageError(
+      '4-Mapeo Nota de Pedido',
+      'Los datos extraídos de la Orden de Compra están vacíos o no son un objeto válido.'
+    );
+  }
+
+  let validated: ParsedOrdenCompraAlkosto;
+  try {
+    validated = validateAndNormalizeAlkostoOC(rawData, {
+      strictMath: false,
+      requireOrdenNro: false
+    });
+  } catch (err: any) {
+    throw new AlkostoOcrStageError(
+      '4-Mapeo Nota de Pedido',
+      err?.message || 'Error al normalizar la estructura de la Orden de Compra hacia el Formato Codizulca.'
+    );
+  }
+
+  const valid17Stores = new Set<string>([
+    ...(CADENAS_ABREVIATURAS?.ALKOSTO || ['AK01', 'AK02', 'AK03', 'AK04', 'AK05', 'AK06', 'AK07', 'AK08', 'AK09', 'AK10']),
+    ...(CADENAS_ABREVIATURAS?.FAMILIA_CENTER || ['FC01', 'FC02', 'FC03', 'FC04', 'FC05', 'FC06', 'FC07'])
+  ]);
+
+  const safeNum = (val: unknown, fallback = 0): number => {
+    const n = parseNumeroEstricto(val, fallback);
+    return Number.isFinite(n) && !Number.isNaN(n) ? Number(n.toFixed(4)) : fallback;
+  };
+
+  const safeStr = (val: unknown, fallback = ''): string => {
+    if (val === null || val === undefined) return fallback;
+    const s = String(val).trim();
+    return s || fallback;
+  };
+
+  const rawItemsList = Array.isArray(validated.items) ? validated.items : [];
+  const mergedItemsMap = new Map<string, ParsedOrdenCompraAlkosto['items'][0]>();
+
+  for (let i = 0; i < rawItemsList.length; i++) {
+    const it = rawItemsList[i] || ({} as any);
+    const cleanStores: Record<string, number> = {};
+
+    if (it.tiendas && typeof it.tiendas === 'object') {
+      for (const [k, v] of Object.entries(it.tiendas)) {
+        const tag = safeStr(k).toUpperCase();
+        const qty = safeNum(v, 0);
+        if (valid17Stores.has(tag) && qty > 0) {
+          cleanStores[tag] = Number(((cleanStores[tag] || 0) + qty).toFixed(2));
+        }
+      }
+    }
+
+    const distInput = Array.isArray(it.distribucion_tiendas)
+      ? it.distribucion_tiendas
+      : Array.isArray(it.distribucionPorTienda)
+        ? it.distribucionPorTienda
+        : [];
+    for (const d of distInput) {
+      if (!d || typeof d !== 'object') continue;
+      const tag = safeStr((d as any).codigo_tienda ?? (d as any).codigoTienda).toUpperCase();
+      const qty = safeNum((d as any).cantidad, 0);
+      if (valid17Stores.has(tag) && qty > 0 && cleanStores[tag] === undefined) {
+        cleanStores[tag] = Number(qty.toFixed(2));
+      }
+    }
+
+    const codeKey = safeStr(it.codigo || it.codigoPrincipal || it.skuCodizulca || it.codigoBarra, `ITEM_${i + 1}`);
+    const costoUnit = safeNum(it.costoUnitario, 0);
+    const costoBruto = safeNum(it.costoBruto, costoUnit);
+    const sumAk = Object.entries(cleanStores)
+      .filter(([tk]) => tk.startsWith('AK'))
+      .reduce((acc, [, v]) => acc + v, 0);
+    const sumAll = Object.values(cleanStores).reduce((acc, v) => acc + v, 0);
+    const fallbackCant = safeNum(it.totalCantidad ?? it.cantidadTotal, 0);
+    const effectiveCant = sumAk > 0 ? sumAk : sumAll > 0 ? sumAll : fallbackCant;
+    const effectiveTotal = Number((effectiveCant * costoUnit).toFixed(2));
+
+    const existing = mergedItemsMap.get(codeKey);
+    if (existing && Object.keys(cleanStores).length > 0) {
+      const mergedTiendas: Record<string, number> = { ...(existing.tiendas || {}) };
+      for (const [tk, tv] of Object.entries(cleanStores)) {
+        mergedTiendas[tk] = Number(((mergedTiendas[tk] || 0) + tv).toFixed(2));
+      }
+      const mSumAk = Object.entries(mergedTiendas)
+        .filter(([tk]) => tk.startsWith('AK'))
+        .reduce((acc, [, v]) => acc + v, 0);
+      const mSumAll = Object.values(mergedTiendas).reduce((acc, v) => acc + v, 0);
+      const primaryCant = mSumAk > 0 ? mSumAk : mSumAll;
+      existing.tiendas = mergedTiendas;
+      existing.distribucionPorTienda = construirDistribucionPorTienda(mergedTiendas);
+      existing.distribucion_tiendas = construirDistribucionTiendasCanonico(mergedTiendas);
+      existing.totalCantidad = Number(primaryCant.toFixed(2));
+      existing.cantidadTotal = Number(primaryCant.toFixed(2));
+      existing.totalRenglon = Number((primaryCant * existing.costoUnitario).toFixed(2));
+    } else {
+      mergedItemsMap.set(codeKey, {
+        renglon: mergedItemsMap.size + 1,
+        codigo: codeKey,
+        codigoPrincipal: safeStr(it.codigoPrincipal, codeKey),
+        skuCodizulca: safeStr(it.skuCodizulca, codeKey),
+        codigoBarra: safeStr(it.codigoBarra, ''),
+        codigoEan: it.codigoEan ?? (it.codigoBarra || null),
+        codigoInternoAlkosto: it.codigoInternoAlkosto ?? null,
+        descripcion: safeStr(it.descripcion, 'PRODUCTO CODIZULCA'),
+        iva: safeNum(it.iva, 0),
+        emp: safeNum(it.emp, 1),
+        unid: normalizarUnidadMedidaAlkosto(it.unid, it.descripcion, it.emp),
+        totalCantidad: Number(effectiveCant.toFixed(2)),
+        cantidadTotal: Number(effectiveCant.toFixed(2)),
+        cantDespachada: safeStr(it.cantDespachada, ''),
+        costoBruto,
+        ...(safeNum(it.descuento, 0) > 0 ? { descuento: Number(safeNum(it.descuento, 0).toFixed(2)) } : {}),
+        costoUnitario: costoUnit,
+        totalRenglon: effectiveTotal > 0 ? effectiveTotal : Number(safeNum(it.totalRenglon, 0).toFixed(2)),
+        tiendas: cleanStores,
+        distribucionPorTienda: construirDistribucionPorTienda(cleanStores),
+        distribucion_tiendas: construirDistribucionTiendasCanonico(cleanStores),
+        cuadreTiendasValido: it.cuadreTiendasValido !== false,
+        alertaRevision: Boolean(it.alertaRevision),
+        notaRevision: it.notaRevision ?? null
+      });
+    }
+  }
+
+  const safeItems = Array.from(mergedItemsMap.values());
+  const safeRenglones: AlkostoOcRenglonExtraido[] = safeItems.map((it, idx) => ({
+    numero_renglon: idx + 1,
+    codigo_principal: safeStr(it.codigoPrincipal || it.codigo),
+    codigo_ean: it.codigoEan ?? null,
+    codigo_interno_alkosto: it.codigoInternoAlkosto ?? null,
+    descripcion_producto: safeStr(it.descripcion),
+    unidad_medida: safeStr(it.unid, 'CJ'),
+    unidades_por_empaque: Math.max(1, Math.round(safeNum(it.emp, 1))),
+    cantidad_total: safeNum(it.totalCantidad, 0),
+    distribucion_tiendas: Array.isArray(it.distribucion_tiendas) ? it.distribucion_tiendas : [],
+    costo_unitario: safeNum(it.costoUnitario, 0),
+    porcentaje_descuento: safeNum(it.descuento, 0),
+    porcentaje_impuesto: safeNum(it.iva, 0),
+    monto_total_renglon: safeNum(it.totalRenglon, 0),
+    alerta_revision: Boolean(it.alertaRevision),
+    nota_revision: it.notaRevision ?? null
+  }));
+
+  const calcSubAk = Number(
+    safeItems
+      .reduce((acc, it) => {
+        const akQty = Object.entries(it.tiendas || {})
+          .filter(([tk]) => tk.startsWith('AK'))
+          .reduce((s, [, v]) => s + safeNum(v, 0), 0);
+        return acc + Number((akQty * safeNum(it.costoUnitario, 0)).toFixed(2));
+      }, 0)
+      .toFixed(2)
+  );
+  const calcSubFc = Number(
+    safeItems
+      .reduce((acc, it) => {
+        const fcQty = Object.entries(it.tiendas || {})
+          .filter(([tk]) => tk.startsWith('FC'))
+          .reduce((s, [, v]) => s + safeNum(v, 0), 0);
+        return acc + Number((fcQty * safeNum(it.costoUnitario, 0)).toFixed(2));
+      }, 0)
+      .toFixed(2)
+  );
+
+  const subAkFinal = safeNum(validated.subtotalAlkosto, 0) > 0 ? safeNum(validated.subtotalAlkosto, 0) : calcSubAk;
+  const subFcFinal = safeNum(validated.subtotalFamiliaCenter, 0) > 0 ? safeNum(validated.subtotalFamiliaCenter, 0) : calcSubFc;
+  const subGenFinal =
+    safeNum(validated.subtotalGeneral, 0) > 0
+      ? safeNum(validated.subtotalGeneral, 0)
+      : Number((subAkFinal + subFcFinal).toFixed(2)) || safeNum(validated.subtotal, 0);
+
+  const ordenNroSafe = safeStr(validated.ordenNro || validated.numero_oc || (rawData as any)?.numero_orden, 'S/N');
+  const fechaEmisionSafe = safeStr(validated.fechaEmision || validated.fecha_emision || (rawData as any)?.fecha_emision, '');
+  const fechaEntregaSafe = safeStr(validated.fechaEntrega || (rawData as any)?.fecha_entrega || fechaEmisionSafe, '');
+  const diasCreditoSafe = Math.max(0, Math.round(safeNum(validated.diasCredito ?? (rawData as any)?.dias_credito, 15)));
+  const tasaCambioSafe = safeNum(validated.tasaCambio ?? (rawData as any)?.tasa_cambio, 0);
+  const observacionesSafe = safeStr(validated.observaciones ?? (rawData as any)?.observaciones, '');
+  const subtotalSafe = safeNum(validated.subtotal, 0) > 0 ? safeNum(validated.subtotal, 0) : (subAkFinal > 0 ? subAkFinal : subGenFinal);
+
+  return {
+    ...validated,
+    clienteCadena: safeStr(validated.clienteCadena, 'ALKOSTO'),
+    cadenasDetectadas: Array.isArray(validated.cadenasDetectadas) && validated.cadenasDetectadas.length > 0
+      ? validated.cadenasDetectadas
+      : ['ALKOSTO'],
+    ordenNro: ordenNroSafe,
+    numero_oc: ordenNroSafe,
+    sede: safeStr(validated.sede, 'AKOP'),
+    fechaEmision: fechaEmisionSafe,
+    fecha_emision: fechaEmisionSafe,
+    fechaEntrega: fechaEntregaSafe,
+    moneda: safeStr(validated.moneda, 'USD'),
+    condicionPago: safeStr(validated.condicionPago, `${diasCreditoSafe} días`),
+    diasCredito: diasCreditoSafe,
+    tasaCambio: tasaCambioSafe,
+    proveedorNombre: safeStr(validated.proveedorNombre, 'CODIZULCA, C.A.'),
+    proveedorRif: safeStr(validated.proveedorRif, 'J409876136'),
+    observaciones: observacionesSafe,
+    subtotal: Number(subtotalSafe.toFixed(2)),
+    subtotalAlkosto: subAkFinal > 0 ? Number(subAkFinal.toFixed(2)) : undefined,
+    subtotalFamiliaCenter: subFcFinal > 0 ? Number(subFcFinal.toFixed(2)) : undefined,
+    subtotalGeneral: subGenFinal > 0 ? Number(subGenFinal.toFixed(2)) : undefined,
+    totalNeto: Number((subGenFinal || subtotalSafe).toFixed(2)),
+    tiendas: Array.from(valid17Stores),
+    cabecera_orden: validated.cabecera_orden || {
+      cliente_emisor: safeStr(validated.clienteCadena, 'ALKOSTO'),
+      receptor_destino: 'CODIZULCA',
+      numero_orden_compra: ordenNroSafe,
+      fecha_emision: normalizarFechaISOAlkosto(fechaEmisionSafe) || fechaEmisionSafe,
+      fecha_entrega_estimada: normalizarFechaISOAlkosto(fechaEntregaSafe),
+      moneda: safeStr(validated.moneda, 'USD'),
+      condicion_pago: safeStr(validated.condicionPago, `${diasCreditoSafe} días`),
+      observaciones_generales: observacionesSafe || null
+    },
+    renglones: safeRenglones,
+    resumen_totales: validated.resumen_totales || {
+      total_renglones_extraidos: safeRenglones.length,
+      total_unidades_pedidas: Number(safeRenglones.reduce((a, r) => a + r.cantidad_total, 0).toFixed(2)),
+      subtotal_neto: Number(subtotalSafe.toFixed(2)),
+      total_descuentos: 0,
+      total_impuestos: 0,
+      monto_total_orden: Number((subGenFinal || subtotalSafe).toFixed(2)),
+      cuadre_aritmetico_correcto: true
+    },
+    items: safeItems
   };
 }
 

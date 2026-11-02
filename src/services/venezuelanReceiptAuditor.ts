@@ -19,10 +19,39 @@ export type MetodoPagoSoportado =
   | 'Divisas';
 
 export type ConfianzaLectura = 'alta' | 'media' | 'baja';
+export type NivelConfianzaSoporte = 'ALTO' | 'MEDIO' | 'BAJO';
 
 export const MAX_COHERENT_MONTO_BS = 5_000_000_000;
 
-export interface AuditedReceiptResult {
+export interface DatosExtraidosSoporte {
+  fecha_operacion: string | null;
+  fecha_original: string | null;
+  numero_referencia: string | null;
+  monto_numerico: number | null;
+  monto_texto: string | null;
+  moneda: 'VES' | 'USD' | null;
+  banco_identificado: string | null;
+  codigo_banco: string | null;
+  plataforma_canal: string | null;
+  numero_cuenta: string | null;
+}
+
+export interface EvidenciaVisualSoporte {
+  tiene_etiquetas_visibles: boolean;
+  es_foto_de_pantalla: boolean;
+  lineas_crudas_detectadas: string[];
+}
+
+export interface CanonicalVenezuelanReceiptResult {
+  lectura_exitosa: boolean;
+  nivel_confianza: NivelConfianzaSoporte;
+  requiere_revision_manual: boolean;
+  motivo_revision: string | null;
+  datos_extraidos: DatosExtraidosSoporte;
+  evidencia_visual: EvidenciaVisualSoporte;
+}
+
+export interface AuditedReceiptResult extends Partial<CanonicalVenezuelanReceiptResult> {
   legible: boolean;
   confianza: number;
   confianza_lectura: ConfianzaLectura;
@@ -44,60 +73,60 @@ export interface AuditedReceiptResult {
   observacion_ia: string;
 }
 
-export const VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT = `Actúa como un Auditor Financiero y Especialista en OCR Bancario de Venezuela (Pago Móvil, Transferencias bancarias, Provinet, Banesco, Mercantil, Banco de Venezuela, BNC, etc.).
-Tu única tarea es extraer con precisión quirúrgica los datos de comprobantes de pago enviados por clientes a través de WhatsApp, incluso si es una foto tomada a un monitor (con interferencia visual) o si está recortada y NO muestra las etiquetas de las filas en la columna izquierda.
+export const VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT = `# ROL Y OBJETIVO
+Eres un motor de extracción de datos financieros de alta precisión especializado en soportes de pago y comprobantes bancarios de Venezuela. Tu única función es extraer datos verificables de la imagen proporcionada y devolverlos exclusivamente en formato JSON válido.
 
-REGLAS ESTRICTAS DE EXTRACCIÓN VISUAL E INFERENCIA POR PATRÓN Y POSICIÓN (ANTI-ALUCINACIÓN):
+# REGLAS ESTRICTAS ANTI-ALUCINACIÓN (CRÍTICO)
+1. CERO INVENCIÓN: Está terminantemente prohibido adivinar, completar, inferir dígitos ocultos o inventar datos que no sean visualmente legibles en la imagen.
+2. MANEJO DE NULOS: Si un dato no aparece en la imagen, está totalmente ilegible o cortado, su valor DEBE ser \`null\`. Nunca inventes valores por defecto.
+3. DÍGITOS ENMASCARADOS: Si un número de cuenta o tarjeta contiene asteriscos (ejemplo: \`0108*****40*****7396\`), extráelo exactamente con los asteriscos en \`numero_cuenta\` (o \`cuenta_origen_o_destino\`) sin intentar adivinar los números ocultos.
+4. PRECISIÓN DE CARACTERES: Conserva todos los ceros a la izquierda en el número de referencia u operación (ejemplo: \`000019111\` debe extraerse como string \`"000019111"\`). Ignora cualquier ícono gráfico de copiado/compartir al final de la referencia (nunca lo conviertas en "0", "O" ni "8").
 
-1. MONTO EN BOLÍVARES (monto_bs):
-   - Localiza la etiqueta "Monto", "Monto pagado" o "Total" (si la comisión es Bs. 0,00, "Monto" y "Total" son iguales; toma el valor principal de la operación, NUNCA sumes ambos ni concatenes otros números).
-   - En Venezuela el formato visual usa punto (.) para separar miles y coma (,) para separar los 2 decimales (ej. "Bs. 22.000,00" o "576.599,07").
-   - Incluso si el comprobante está recortado y NO tiene el símbolo "Bs." ni la palabra "Monto" al lado, identifica como monto el valor que tenga coma seguida de exactamente 2 dígitos decimales (ej. ",07", ",00", ",50").
-   - PROHIBIDO extraer o mezclar dígitos provenientes de "Beneficiario", números de teléfono (0412, 0414, 0424, 0416, 0426), Cédula/RIF (V-, J-, E-) o número de cuenta ("Cuenta debitada" o cuenta enmascarada con asteriscos "*").
-   - OBLIGATORIO: Convierte el valor a un número flotante estándar usando punto (.) SOLO para los dos decimales y SIN separadores de miles (ejemplo: si lees "576.599,07", devuelve 576599.07; si lees "Bs. 22.000,00", devuelve 22000.00). NUNCA devuelvas 0 si existe una cifra con formato de moneda en la imagen.
+# HEURÍSTICA PARA SOPORTES RECORTADOS (SIN ETIQUETAS VISIBLES)
+Muchos vendedores suben fotos tomadas a monitores (con efecto moiré) o recortadas donde NO se ven las etiquetas de la izquierda ("Fecha:", "Referencia:", "Monto:", "Banco:"). Cuando no existan etiquetas, clasifica cada fila aplicando estrictamente estas reglas morfológicas:
+- FECHA (\`fecha_operacion\`): Cadena con formato \`DD/MM/YYYY\`, \`DD-MM-YYYY\` o \`YYYY-MM-DD\` (ejemplo: \`02/11/2026\`). Normalízala siempre a \`YYYY-MM-DD\` (\`2026-11-02\`) y guarda el texto original en \`fecha_original\`.
+- REFERENCIA (\`numero_referencia\`): Secuencia numérica continua (usualmente de 6 a 15 dígitos, a menudo con ceros a la izquierda como \`000019111\`) que NO tiene separadores de miles (\`.\`), NO tiene decimales (\`,\`), ni asteriscos (\`*\`).
+- MONTO (\`monto_numerico\` y \`monto_texto\`): Valor numérico con formato monetario venezolano (punto \`.\` para miles y coma \`,\` para dos decimales, ejemplo: \`576.599,07\`). En \`monto_texto\` guarda el string exacto (\`"576.599,07"\`) y en \`monto_numerico\` conviértelo a float estándar con punto decimal (\`576599.07\`).
+- CUENTA BANCARIA (\`numero_cuenta\`): Secuencia de 20 dígitos (o secuencia parcial con asteriscos \`*\` como \`0108*****40*****7396\`) que inicia con un código bancario venezolano de 4 dígitos (\`0102\`, \`0105\`, \`0108\`, \`0134\`, \`0172\`, \`0114\`, \`0115\`, \`0174\`, \`0191\`, etc.).
+- BANCO / PLATAFORMA (\`banco_identificado\` y \`plataforma_canal\`): Identifica el banco por su nombre explícito, por la plataforma en pantalla o por los primeros 4 dígitos de la cuenta:
+  * \`0108\` o texto \`"Provinet"\` -> \`"BBVA Provincial"\`
+  * \`0134\` o texto \`"BanescOnline"\` -> \`"Banesco"\`
+  * \`0105\` o texto \`"Mercantil en Línea"\` -> \`"Banco Mercantil"\`
+  * \`0102\` o texto \`"BDVenlínea"\` -> \`"Banco de Venezuela"\`
+  * \`0172\` -> \`"Bancamiga"\`
+  * \`0191\` -> \`"BNC (Banco Nacional de Crédito)"\`
+  * \`0114\` -> \`"Bancaribe"\`
+  * \`0115\` -> \`"Banco Exterior"\`
 
-2. NÚMERO DE REFERENCIA (referencia):
-   - Es una secuencia numérica pura de entre 6 y 15 dígitos (a menudo incluye ceros a la izquierda, como "000019111"). Conserva todos los ceros a la izquierda exactamente como aparecen.
-   - Extrae los dígitos que están debajo o al lado de "Referencia", "Nro. de Referencia", "Operación" o "Recibo". En tablas recortadas sin etiquetas (como Provinet), suele ubicarse inmediatamente debajo o encima de la fecha o del monto.
-   - NO la confundas con el número de cuenta enmascarado (que contiene asteriscos "*", ej. "0108*****40*****7396") ni con números de teléfono (0414, 0424, 0412, 0416, 0426).
-   - ¡ALERTA CRÍTICA EN BANCOS (ESPECIALMENTE BNC, MERCANTIL Y BANESCO)!: Al final del número de referencia suele aparecer un ÍCONO GRÁFICO (dos hojas de copiar, ícono de compartir o lupa). NUNCA interpretes ese ícono como el número cero ("0"), la letra "O" ni el número "8" (ejemplo BNC: "947474757 [ícono]" -> "947474757", NO "9474747570").
-   - No confundas "Referencia" con "Código autorización" (en BNC aparece más abajo un código corto de 6 dígitos como "236792"; colócalo en codigo_autorizacion e ignóralo como referencia principal a menos que no exista otra referencia).
-
-3. BANCO (banco):
-   - Identifícalo por el logo, texto explícito o plataforma (ejemplo: si dice "Provinet", el banco es "BBVA Provincial").
-   - Si no hay nombre pero hay un número de cuenta de 20 dígitos (completo o enmascarado con asteriscos) o código bancario de 4 dígitos, identifica el banco por los primeros 4 dígitos (código SUDEBAN):
-     * 0108 -> "BBVA Provincial"
-     * 0102 -> "Banco de Venezuela"
-     * 0134 -> "Banesco"
-     * 0105 -> "Mercantil"
-     * 0191 -> "BNC (Banco Nacional de Crédito)"
-     * 0114 -> "Bancaribe"
-     * 0172 -> "Bancamiga"
-     * 0175 -> "Banco Bicentenario"
-
-4. MÉTODO DE PAGO (metodo_pago):
-   - Clasifica estrictamente en una de las opciones válidas del formulario: "Pago Móvil", "Transferencia", "Zelle", "Divisas Efectivo" o "Biopago".
-   - Si el texto dice "Su pago móvil ha sido Ejecutado exitosamente" o aparece un número de teléfono celular (0412/0414/0424/0416/0426), asigna "Pago Móvil".
-   - Si aparece una cuenta de 20 dígitos (ej. "0108*****40*****7396") o plataforma web como "Provinet" sin número de teléfono celular asociado, clasifícalo como "Transferencia" (o "Pago Móvil" si el comprobante indica Pago Móvil).
-
-5. FECHA DE PAGO (fecha_pago):
-   - Busca patrones de fecha DD/MM/YYYY o YYYY-MM-DD (ejemplo: "02/11/2026") y devuélvela siempre en formato "DD/MM/YYYY".
-   - Si el comprobante (como ocurre en capturas de Pago Móvil del BNC) NO muestra la fecha en el cuerpo del recibo, devuelve null en este campo para que el sistema asigne la fecha del archivo o del día actual por defecto.
-
-6. TITULAR, RIF/CI Y VALIDACIÓN DE COHERENCIA:
-   - Extrae el nombre del remitente/ordenante (titular_remitente) y su documento V-/J-/E-/G- (rif_ci_titular) solo si son visibles y pertenecen al emisor (NUNCA coloques a CODIZULCA C.A. ni J-40987613-6 como remitente).
-   - Si el monto extraído supera los 5.000.000.000,00 Bs. o tiene más de 10 dígitos enteros, es un error de lectura. Re-inspecciona la cifra monetaria con coma y 2 decimales antes de responder.
-
-FORMATO DE SALIDA (JSON ESTRICTO SIN TEXTO ADICIONAL NI BLOQUES MARKDOWN):
+# ESTRUCTURA DE SALIDA (JSON PURO)
+Responde ÚNICAMENTE con un objeto JSON válido (sin bloques de código markdown ni texto adicional) siguiendo exactamente esta estructura:
 {
-  "metodo_pago": "Pago Móvil",
-  "banco": "BBVA Provincial",
-  "monto_bs": 576599.07,
-  "referencia": "000019111",
-  "codigo_autorizacion": null,
-  "fecha_pago": "02/11/2026",
-  "confianza_lectura": "alta",
-  "observacion_auditoria": "Comprobante BBVA Provincial (Provinet) por Bs. 576.599,07 con referencia 000019111."
+  "lectura_exitosa": true,
+  "nivel_confianza": "ALTO",
+  "requiere_revision_manual": false,
+  "motivo_revision": null,
+  "datos_extraidos": {
+    "fecha_operacion": "2026-11-02",
+    "fecha_original": "02/11/2026",
+    "numero_referencia": "000019111",
+    "monto_numerico": 576599.07,
+    "monto_texto": "576.599,07",
+    "moneda": "VES",
+    "banco_identificado": "BBVA Provincial",
+    "codigo_banco": "0108",
+    "plataforma_canal": "Provinet",
+    "numero_cuenta": "0108*****40*****7396"
+  },
+  "evidencia_visual": {
+    "tiene_etiquetas_visibles": false,
+    "es_foto_de_pantalla": true,
+    "lineas_crudas_detectadas": [
+      "0108*****40*****7396",
+      "02/11/2026",
+      "000019111",
+      "576.599,07"
+    ]
+  }
 }`;
 
 const BENEFICIARY_NAME_PATTERNS: RegExp[] = [
@@ -427,11 +456,142 @@ function matchCatalogVenezuelanBank(val: unknown): string | null {
 }
 
 /**
+ * Extrae el número de cuenta bancaria venezolana de 20 dígitos o cuenta enmascarada con asteriscos
+ * (ej. `0108*****40*****7396`) que inicia con un código bancario SUDEBAN de 4 dígitos (`0102`, `0105`, `0108`, `0134`, etc.),
+ * conservando exactamente los asteriscos sin adivinar dígitos ocultos (Regla 3).
+ */
+export function extractNumeroCuentaVenezolana(val: unknown): string | null {
+  const clean = cleanNullableString(val);
+  if (!clean) return null;
+
+  const match = clean.match(/\b(01(?:02|04|05|08|14|15|28|34|37|38|51|56|63|68|69|71|72|74|75|77|91)[*•xX\d-]{8,22})\b/);
+  if (!match) return null;
+
+  const candidate = match[1].trim();
+  const digitsAndMasks = candidate.replace(/-/g, '');
+  if (digitsAndMasks.length < 10 || digitsAndMasks.length > 24) {
+    return null;
+  }
+  return candidate;
+}
+
+/**
+ * Extrae la cadena monetaria exacta (ej. `"576.599,07"` o `"203.242,47"`) desde el texto original sin inventar valores si es nulo.
+ */
+export function extractMontoTextoExacto(val: unknown): string | null {
+  const clean = cleanNullableString(val);
+  if (!clean) return null;
+  const normalized = clean.replace(/(\d)\s*([.,])\s*(\d)/g, '$1$2$3');
+  const m = normalized.match(/(\d{1,3}(?:\.\d{3})+,\d{2}|\d{1,3}(?:,\d{3})+\.\d{2}|\d+,\d{2}|\d+\.\d{2})/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Resuelve `banco_identificado`, `codigo_banco` y `plataforma_canal` aplicando las reglas morfológicas
+ * sobre el nombre explícito, plataforma en pantalla o los primeros 4 dígitos de la cuenta bancaria.
+ */
+export function resolveVenezuelanBankDetails(
+  bankInput: unknown,
+  accountInput?: unknown,
+  platformInput?: unknown,
+  contextText?: string
+): {
+  banco_identificado: string | null;
+  codigo_banco: string | null;
+  plataforma_canal: string | null;
+  legacy_banco: string | null;
+} {
+  const cleanBank = cleanNullableString(bankInput);
+  const rawArg2 = cleanNullableString(accountInput);
+  const rawArg3 = cleanNullableString(platformInput);
+
+  const arg2LooksLikeAccOrCode =
+    Boolean(extractNumeroCuentaVenezolana(rawArg2)) || Boolean(rawArg2 && /^01\d{2}$/.test(rawArg2));
+  const arg3LooksLikeAccOrCode =
+    Boolean(extractNumeroCuentaVenezolana(rawArg3)) || Boolean(rawArg3 && /^01\d{2}$/.test(rawArg3));
+
+  const cleanAcc = arg2LooksLikeAccOrCode
+    ? extractNumeroCuentaVenezolana(rawArg2) || rawArg2
+    : arg3LooksLikeAccOrCode
+      ? extractNumeroCuentaVenezolana(rawArg3) || rawArg3
+      : null;
+
+  const cleanPlat = !arg2LooksLikeAccOrCode && rawArg2
+    ? rawArg2
+    : !arg3LooksLikeAccOrCode && rawArg3
+      ? rawArg3
+      : null;
+
+  const combined = [cleanBank, cleanAcc, cleanPlat, contextText || ''].filter(Boolean).join(' ');
+
+  let codigoBanco: string | null = null;
+  const codeFromAcc = cleanAcc?.match(/^(01\d{2})/);
+  if (codeFromAcc) {
+    codigoBanco = codeFromAcc[1];
+  }
+
+  let matchedEntry: BankCatalogEntry | null = null;
+  for (const entry of VENEZUELAN_BANKS) {
+    if (codigoBanco && entry.codes.includes(codigoBanco)) {
+      matchedEntry = entry;
+      break;
+    }
+    if (
+      (cleanBank && (entry.patterns.some((rx) => rx.test(cleanBank)) || entry.codes.some((c) => new RegExp(`(?:^|\\b)${c}(?:\\b|\\*|\\d)`).test(cleanBank)))) ||
+      (cleanPlat && entry.patterns.some((rx) => rx.test(cleanPlat))) ||
+      (cleanAcc && entry.codes.some((c) => new RegExp(`(?:^|\\b)${c}(?:\\b|\\*|\\d)`).test(cleanAcc)))
+    ) {
+      matchedEntry = entry;
+      codigoBanco = codigoBanco || entry.codes[0] || null;
+      break;
+    }
+  }
+
+  let legacyBanco = normalizeVenezuelanBank(cleanBank) || (matchedEntry ? matchedEntry.canonical : null);
+  let bancoIdentificado = legacyBanco;
+
+  // En el esquema canónico `datos_extraidos.banco_identificado`, 0105 / Mercantil en Línea se normaliza a "Banco Mercantil"
+  if (matchedEntry?.codes.includes('0105') || /\bmercantil\b/i.test(combined)) {
+    bancoIdentificado = 'Banco Mercantil';
+    codigoBanco = codigoBanco || '0105';
+    if (!legacyBanco) legacyBanco = 'Mercantil';
+  } else if (matchedEntry) {
+    bancoIdentificado = matchedEntry.canonical;
+    codigoBanco = codigoBanco || matchedEntry.codes[0] || null;
+  }
+
+  // Plataforma / canal solo si está explícita en el input o en el texto visual (Regla 2: CERO INVENCIÓN)
+  let plataformaCanal: string | null = cleanPlat;
+  if (!plataformaCanal && combined) {
+    if (/\bprovinet\b/i.test(combined)) plataformaCanal = 'Provinet';
+    else if (/\bbanesconline\b/i.test(combined)) plataformaCanal = 'BanescOnline';
+    else if (/mercantil\s+en\s+l[ií]nea/i.test(combined)) plataformaCanal = 'Mercantil en Línea';
+    else if (/bdvenl[ií]nea/i.test(combined)) plataformaCanal = 'BDVenlínea';
+    else if (/pagom[oó]vilbdv/i.test(combined)) plataformaCanal = 'PagoMóvilBDV';
+    else if (/\btpago\b/i.test(combined)) plataformaCanal = 'Tpago';
+    else if (/dinero\s+r[aá]pido/i.test(combined)) plataformaCanal = 'Dinero Rápido';
+    else if (/pago\s*m[oó]vil/i.test(combined)) plataformaCanal = 'Pago Móvil';
+    else if (/\btransferencia\b/i.test(combined)) plataformaCanal = 'Transferencia';
+  }
+
+  return {
+    banco_identificado: bancoIdentificado,
+    codigo_banco: codigoBanco,
+    plataforma_canal: plataformaCanal,
+    legacy_banco: legacyBanco
+  };
+}
+
+/**
  * Regla 3: Normaliza el nombre del banco venezolano según catálogo oficial y códigos SUDEBAN.
  */
 export function normalizeVenezuelanBank(val: unknown): string | null {
   const clean = cleanNullableString(val);
   if (!clean) return null;
+
+  if (/banco\s+mercantil|mercantil\s+en\s+l[ií]nea/i.test(clean)) {
+    return 'Banco Mercantil';
+  }
 
   const catalogMatch = matchCatalogVenezuelanBank(clean);
   if (catalogMatch) return catalogMatch;
@@ -501,12 +661,25 @@ function normalizeConfianzaLectura(
     ?.normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
-  if (clean === 'alta' || clean === 'media' || clean === 'baja') {
-    return clean;
-  }
+  if (clean === 'alta' || clean === 'alto') return 'alta';
+  if (clean === 'media' || clean === 'medio') return 'media';
+  if (clean === 'baja' || clean === 'bajo') return 'baja';
   if (!legible || numericConfianza < 0.5) return 'baja';
   if (isCompleteCore && numericConfianza >= 0.85) return 'alta';
   return 'media';
+}
+
+function toNivelConfianzaSoporte(confianzaLectura: ConfianzaLectura, rawNivel?: unknown): NivelConfianzaSoporte {
+  const clean = cleanNullableString(rawNivel)
+    ?.normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase();
+  if (clean === 'ALTO' || clean === 'ALTA') return 'ALTO';
+  if (clean === 'MEDIO' || clean === 'MEDIA') return 'MEDIO';
+  if (clean === 'BAJO' || clean === 'BAJA') return 'BAJO';
+  if (confianzaLectura === 'alta') return 'ALTO';
+  if (confianzaLectura === 'media') return 'MEDIO';
+  return 'BAJO';
 }
 
 /**
@@ -621,18 +794,22 @@ export function normalizeRifCiTitular(val: unknown): string | null {
 /**
  * Aplica determinísticamente las Reglas Estrictas de Extracción Visual (Anti-Alucinación)
  * sobre cualquier salida cruda (provenga de Gemini Multimodal o del parser determinista PDF/Tesseract).
+ * Soporta tanto la estructura anidada `{ lectura_exitosa, nivel_confianza, datos_extraidos, evidencia_visual }`
+ * como la estructura plana heredada `{ legible, monto_bs, referencia, banco, fecha_pago, ... }`.
  */
 export function auditAndNormalizeReceiptPayload(rawInput: any): AuditedReceiptResult {
   const raw = rawInput && typeof rawInput === 'object' ? rawInput : {};
+  const datosSub = raw.datos_extraidos && typeof raw.datos_extraidos === 'object' ? raw.datos_extraidos : {};
+  const evidenciaSub = raw.evidencia_visual && typeof raw.evidencia_visual === 'object' ? raw.evidencia_visual : {};
 
   let beneficiario = cleanNullableString(
-    raw.beneficiario_detectado ?? raw.beneficiario ?? raw.destinatario
+    raw.beneficiario_detectado ?? raw.beneficiario ?? raw.destinatario ?? datosSub.beneficiario
   );
   let titular = cleanNullableString(
-    raw.titular_remitente ?? raw.titular ?? raw.remitente ?? raw.ordenante ?? raw.emisor
+    raw.titular_remitente ?? raw.titular ?? raw.remitente ?? raw.ordenante ?? raw.emisor ?? datosSub.titular
   );
   let rif = normalizeRifCiTitular(
-    raw.rif_ci_titular ?? raw.rif_ci ?? raw.rif ?? raw.cedula ?? raw.documento_emisor
+    raw.rif_ci_titular ?? raw.rif_ci ?? raw.rif ?? raw.cedula ?? raw.documento_emisor ?? datosSub.rif
   );
 
   // Cortafuegos Emisor vs. Beneficiario
@@ -641,7 +818,6 @@ export function auditAndNormalizeReceiptPayload(rawInput: any): AuditedReceiptRe
       beneficiario = titular;
     }
     titular = null;
-    // Si el titular colocado por error era el beneficiario, descartar también su RIF si coincide o si es J- corporativo sin emisor
     rif = null;
   }
 
@@ -660,59 +836,97 @@ export function auditAndNormalizeReceiptPayload(rawInput: any): AuditedReceiptRe
   }
 
   // REGLA 1 y REGLA 6: Monto en Bolívares con validación de coherencia (<= 5.000.000.000,00 Bs y <= 10 dígitos enteros)
-  const montoTextoOriginal = cleanNullableString(
-    raw.monto_texto_original ?? raw.monto_bs_formateado
+  const rawMontoTextoInput = cleanNullableString(
+    datosSub.monto_texto ?? raw.monto_texto ?? raw.monto_texto_original ?? raw.monto_bs_formateado
   );
-  const rawMontoInput = raw.monto_bs ?? raw.monto;
+  const rawMontoNumInput =
+    datosSub.monto_numerico ?? raw.monto_numerico ?? raw.monto_bs ?? raw.monto;
   const montoBs =
-    parseVenezuelanMonto(rawMontoInput) ??
-    parseVenezuelanMonto(montoTextoOriginal);
+    parseVenezuelanMonto(rawMontoNumInput) ??
+    parseVenezuelanMonto(rawMontoTextoInput);
 
-  // REGLA 2: Número de Referencia (solo dígitos, conservando ceros a la izquierda, sin ícono de copiado ni cuenta enmascarada)
+  const exactMontoTexto =
+    montoBs !== null
+      ? extractMontoTextoExacto(rawMontoTextoInput) ??
+        extractMontoTextoExacto(typeof rawMontoNumInput === 'string' ? rawMontoNumInput : null) ??
+        new Intl.NumberFormat('es-VE', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2
+        }).format(montoBs)
+      : null;
+
+  // REGLA 2 y 4: Número de Referencia (solo dígitos, conservando todos los ceros a la izquierda como "000019111")
   const codigoAutorizacion = normalizeReferenciaBancaria(
-    raw.codigo_autorizacion ?? raw.codigoAutorizacion
+    raw.codigo_autorizacion ?? raw.codigoAutorizacion ?? datosSub.codigo_autorizacion
   );
   const primaryReferencia = normalizeReferenciaBancaria(
-    raw.referencia ?? raw.nro_referencia ?? raw.numero_referencia
+    datosSub.numero_referencia ?? raw.numero_referencia ?? raw.referencia ?? raw.nro_referencia
   );
   const nroReferencia = primaryReferencia ?? codigoAutorizacion ?? null;
 
-  // REGLA 3: Bancos normalizados (incluyendo inferencia por los primeros 4 dígitos SUDEBAN de cuenta_enmascarada)
-  const cuentaEnmascarada = cleanNullableString(
-    raw.cuenta_enmascarada ?? raw.cuenta_origen ?? raw.cuenta_destino
+  // REGLA 3: Cuenta bancaria (20 dígitos o enmascarada con asteriscos como 0108*****40*****7396) y Bancos
+  const rawCuentaInput =
+    datosSub.numero_cuenta ??
+    datosSub.cuenta_origen_o_destino ??
+    raw.numero_cuenta ??
+    raw.cuenta_origen_o_destino ??
+    raw.cuenta_enmascarada ??
+    raw.cuenta_origen ??
+    raw.cuenta_destino;
+  const numeroCuenta = extractNumeroCuentaVenezolana(rawCuentaInput) ?? cleanNullableString(rawCuentaInput);
+
+  const rawLineasCrudas: string[] = Array.isArray(evidenciaSub.lineas_crudas_detectadas)
+    ? evidenciaSub.lineas_crudas_detectadas.map((l: unknown) => String(l ?? '').trim()).filter(Boolean)
+    : Array.isArray(raw.lineas_crudas_detectadas)
+      ? raw.lineas_crudas_detectadas.map((l: unknown) => String(l ?? '').trim()).filter(Boolean)
+      : [];
+
+  const bankDetails = resolveVenezuelanBankDetails(
+    datosSub.banco_identificado ?? raw.banco_identificado ?? raw.banco ?? raw.banco_origen ?? raw.banco_destino,
+    numeroCuenta || datosSub.codigo_banco || raw.codigo_banco,
+    datosSub.plataforma_canal ?? raw.plataforma_canal ?? raw.metodo_pago,
+    rawLineasCrudas.join(' ')
   );
-  const bancoPorCuenta = cuentaEnmascarada
-    ? matchCatalogVenezuelanBank(cuentaEnmascarada)
-    : null;
+
   const bancoOrigen = normalizeVenezuelanBank(raw.banco_origen);
   const bancoDestino = normalizeVenezuelanBank(raw.banco_destino);
   const bancoPrincipal =
     normalizeVenezuelanBank(raw.banco) ||
     bancoOrigen ||
     bancoDestino ||
-    bancoPorCuenta ||
+    bankDetails.legacy_banco ||
+    bankDetails.banco_identificado ||
     null;
 
   // REGLA 4: Método de Pago
   const rawObservacion = cleanNullableString(
-    raw.observacion_auditoria ?? raw.observacion_ia
+    raw.observacion_auditoria ?? raw.observacion_ia ?? raw.motivo_revision
   );
   const metodoPago = normalizeMetodoPago(
-    raw.metodo_pago,
-    `${bancoPrincipal || ''} ${cuentaEnmascarada || ''} ${montoTextoOriginal || ''} ${rawObservacion || ''}`
+    raw.metodo_pago ?? bankDetails.plataforma_canal,
+    `${bancoPrincipal || ''} ${numeroCuenta || ''} ${rawMontoTextoInput || ''} ${rawObservacion || ''} ${rawLineasCrudas.join(' ')}`
   );
 
-  // REGLA 5: Fechas DD/MM/YYYY y YYYY-MM-DD (null si no aparece en el cuerpo del recibo)
+  // REGLA 5: Fechas DD/MM/YYYY (`fecha_original`) y YYYY-MM-DD (`fecha_operacion`)
   const { fecha_pago, fecha_iso } = normalizeReceiptDates(
-    raw.fecha_pago,
-    raw.fecha_iso
+    datosSub.fecha_original ?? raw.fecha_original ?? raw.fecha_pago,
+    datosSub.fecha_operacion ?? raw.fecha_operacion ?? raw.fecha_iso
   );
 
-  // Tolerancia a lectura parcial: si se extrajo al menos monto, referencia o banco/fecha/emisor,
+  const rawMonedaInput = cleanNullableString(datosSub.moneda ?? raw.moneda)?.toUpperCase();
+  const monedaDetectada: 'VES' | 'USD' | null =
+    rawMonedaInput === 'USD' || metodoPago === 'Zelle' || metodoPago === 'Divisas' || metodoPago === 'Divisas Efectivo'
+      ? 'USD'
+      : rawMonedaInput === 'VES' || rawMonedaInput === 'BS' || montoBs !== null || Boolean(bankDetails.codigo_banco)
+        ? 'VES'
+        : null;
+
+  // Tolerancia a lectura parcial: si se extrajo al menos monto, referencia, cuenta o banco/fecha/emisor,
   // marcar legible = true para autocompletar todos los campos encontrados sin bloquear al usuario
   const hasCoreOrPartialData = Boolean(
     (montoBs && montoBs > 0) ||
       nroReferencia ||
+      numeroCuenta ||
       (bancoPrincipal && fecha_iso) ||
       titular
   );
@@ -721,12 +935,12 @@ export function auditAndNormalizeReceiptPayload(rawInput: any): AuditedReceiptRe
 
   let confianza = Number(raw.confianza);
   if (!Number.isFinite(confianza) || confianza < 0 || confianza > 1) {
-    const rawLevel = cleanNullableString(raw.confianza_lectura)?.toLowerCase();
-    if (rawLevel === 'alta') {
+    const rawLevel = cleanNullableString(raw.confianza_lectura ?? raw.nivel_confianza)?.toLowerCase();
+    if (rawLevel === 'alta' || rawLevel === 'alto') {
       confianza = 0.96;
-    } else if (rawLevel === 'media') {
+    } else if (rawLevel === 'media' || rawLevel === 'medio') {
       confianza = 0.78;
-    } else if (rawLevel === 'baja') {
+    } else if (rawLevel === 'baja' || rawLevel === 'bajo') {
       confianza = 0.25;
     } else {
       confianza = legible
@@ -740,11 +954,46 @@ export function auditAndNormalizeReceiptPayload(rawInput: any): AuditedReceiptRe
   }
 
   const confianzaLectura = normalizeConfianzaLectura(
-    raw.confianza_lectura,
+    raw.confianza_lectura ?? raw.nivel_confianza,
     confianza,
     legible,
     isCompleteCore
   );
+  const nivelConfianza = toNivelConfianzaSoporte(confianzaLectura, raw.nivel_confianza);
+
+  const tieneEtiquetasVisibles =
+    typeof evidenciaSub.tiene_etiquetas_visibles === 'boolean'
+      ? evidenciaSub.tiene_etiquetas_visibles
+      : typeof raw.tiene_etiquetas_visibles === 'boolean'
+        ? raw.tiene_etiquetas_visibles
+        : rawLineasCrudas.length > 0
+          ? rawLineasCrudas.some((l) =>
+              /\b(fecha|referencia|operaci[oó]n|monto|importe|total|banco|beneficiario|remitente|ordenante|cuenta)\b/i.test(l)
+            )
+          : true;
+
+  const esFotoDePantalla =
+    typeof evidenciaSub.es_foto_de_pantalla === 'boolean'
+      ? evidenciaSub.es_foto_de_pantalla
+      : typeof raw.es_foto_de_pantalla === 'boolean'
+        ? raw.es_foto_de_pantalla
+        : false;
+
+  const requiereRevisionManual =
+    typeof raw.requiere_revision_manual === 'boolean'
+      ? raw.requiere_revision_manual
+      : !legible || !isCompleteCore || nivelConfianza === 'BAJO';
+
+  const motivoRevision: string | null = requiereRevisionManual
+    ? cleanNullableString(raw.motivo_revision) ||
+      (!legible
+        ? 'No se lograron identificar con claridad el monto o la referencia del comprobante.'
+        : !montoBs
+          ? 'Monto de la operación no visible o ilegible en el soporte.'
+          : !nroReferencia
+            ? 'Número de referencia no visible o ilegible en el soporte.'
+            : 'Soporte con lectura parcial o sin etiquetas completas; verificar datos antes de conciliar.')
+    : cleanNullableString(raw.motivo_revision);
 
   const observacion =
     rawObservacion ||
@@ -754,7 +1003,34 @@ export function auditAndNormalizeReceiptPayload(rawInput: any): AuditedReceiptRe
         : 'Lectura parcial completada; se autocompletaron los datos detectados en el comprobante.'
       : 'No se lograron identificar con claridad el monto o la referencia del comprobante.');
 
+  const datosExtraidos: DatosExtraidosSoporte = {
+    fecha_operacion: fecha_iso,
+    fecha_original: fecha_pago,
+    numero_referencia: nroReferencia,
+    monto_numerico: montoBs,
+    monto_texto: exactMontoTexto,
+    moneda: monedaDetectada,
+    banco_identificado:
+      bankDetails.banco_identificado ||
+      (bancoPrincipal === 'Mercantil' ? 'Banco Mercantil' : bancoPrincipal),
+    codigo_banco: cleanNullableString(datosSub.codigo_banco ?? raw.codigo_banco) ?? bankDetails.codigo_banco,
+    plataforma_canal: cleanNullableString(datosSub.plataforma_canal ?? raw.plataforma_canal) ?? bankDetails.plataforma_canal,
+    numero_cuenta: numeroCuenta
+  };
+
+  const evidenciaVisual: EvidenciaVisualSoporte = {
+    tiene_etiquetas_visibles: tieneEtiquetasVisibles,
+    es_foto_de_pantalla: esFotoDePantalla,
+    lineas_crudas_detectadas: rawLineasCrudas
+  };
+
   return {
+    lectura_exitosa: legible,
+    nivel_confianza: nivelConfianza,
+    requiere_revision_manual: requiereRevisionManual,
+    motivo_revision: motivoRevision,
+    datos_extraidos: datosExtraidos,
+    evidencia_visual: evidenciaVisual,
     legible,
     confianza,
     confianza_lectura: confianzaLectura,
@@ -764,7 +1040,7 @@ export function auditAndNormalizeReceiptPayload(rawInput: any): AuditedReceiptRe
     banco_destino: bancoDestino,
     monto_bs: montoBs,
     monto_texto_original:
-      montoTextoOriginal ||
+      rawMontoTextoInput ||
       (montoBs !== null
         ? `Bs. ${new Intl.NumberFormat('es-VE', {
             minimumFractionDigits: 2,
@@ -785,6 +1061,22 @@ export function auditAndNormalizeReceiptPayload(rawInput: any): AuditedReceiptRe
 }
 
 /**
+ * Devuelve ÚNICAMENTE el objeto JSON puro con la estructura estricta de 6 llaves
+ * (`lectura_exitosa`, `nivel_confianza`, `requiere_revision_manual`, `motivo_revision`, `datos_extraidos`, `evidencia_visual`).
+ */
+export function toCanonicalVenezuelanReceiptJson(rawInput: any): CanonicalVenezuelanReceiptResult {
+  const audited = auditAndNormalizeReceiptPayload(rawInput);
+  return {
+    lectura_exitosa: Boolean(audited.lectura_exitosa),
+    nivel_confianza: audited.nivel_confianza || 'BAJO',
+    requiere_revision_manual: Boolean(audited.requiere_revision_manual),
+    motivo_revision: audited.motivo_revision ?? null,
+    datos_extraidos: audited.datos_extraidos!,
+    evidencia_visual: audited.evidencia_visual!
+  };
+}
+
+/**
  * Motor heurístico determinista sobre texto plano (extraído de PDF digital vía pdf-parse
  * o de imagen vía Tesseract OCR) para comprobantes bancarios venezolanos, incluyendo
  * tablas recortadas sin etiquetas en la columna izquierda (ej. Provinet / fotos a monitor).
@@ -797,6 +1089,20 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
     .filter((l) => l.length > 0);
 
   const fullText = lines.join('\n');
+
+  // 0. Detectar cuenta bancaria de 20 dígitos o enmascarada con asteriscos (ej. 0108*****40*****7396) y evidencia de etiquetas
+  let numeroCuentaDetectada: string | null = null;
+  for (const line of lines) {
+    const acc = extractNumeroCuentaVenezolana(line);
+    if (acc) {
+      numeroCuentaDetectada = acc;
+      break;
+    }
+  }
+
+  const tieneEtiquetasVisibles = lines.some((l) =>
+    /\b(fecha|referencia|operaci[oó]n|monto|importe|total|banco|beneficiario|remitente|ordenante|cuenta)\b/i.test(l)
+  );
 
   // 1. Detectar bancos (Origen, Destino, Marca general o primeros 4 dígitos SUDEBAN de cuenta enmascarada)
   let bancoOrigen: string | null = null;
@@ -847,6 +1153,7 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
   // 2. Extraer Monto Principal en Bolívares (ignorando líneas de comisión, beneficiario, cuenta debitada, teléfonos o RIF)
   let montoBs: number | null = null;
   let montoTextoOriginal: string | null = null;
+  let montoTextoExacto: string | null = null;
   let montoLineIndex = -1;
 
   for (let i = 0; i < lines.length; i++) {
@@ -864,6 +1171,7 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
       if (candidate && (!montoBs || candidate > montoBs)) {
         montoBs = candidate;
         montoTextoOriginal = bsMatch[0].trim();
+        montoTextoExacto = bsMatch[1].trim();
         montoLineIndex = i;
       }
       continue;
@@ -877,6 +1185,7 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
       if (candidate && (!montoBs || candidate > montoBs)) {
         montoBs = candidate;
         montoTextoOriginal = trailingBsMatch[0].trim();
+        montoTextoExacto = trailingBsMatch[1].trim();
         montoLineIndex = i;
       }
       continue;
@@ -892,12 +1201,13 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
       if (picked && (!montoBs || picked > montoBs)) {
         montoBs = picked;
         montoTextoOriginal = sameLine ? line : lines[i + 1];
+        montoTextoExacto = extractMontoTextoExacto(montoTextoOriginal);
         montoLineIndex = sameLine ? i : i + 1;
       }
     }
   }
 
-  // Inferencia por patrón (Regla 3 para tablas recortadas sin etiquetas como Provinet):
+  // Inferencia por patrón (Regla morfológica para soportes recortados sin etiquetas como Provinet):
   // Si no apareció "Bs." ni "Monto", detectar cifra en formato moneda venezolana con coma y exactamente 2 decimales (ej. "576.599,07")
   if (montoBs === null) {
     for (let i = 0; i < lines.length; i++) {
@@ -909,6 +1219,7 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
         if (candidate && (!montoBs || candidate > montoBs)) {
           montoBs = candidate;
           montoTextoOriginal = standaloneMoneyMatch[1];
+          montoTextoExacto = standaloneMoneyMatch[1];
           montoLineIndex = i;
         }
       }
@@ -976,15 +1287,15 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
     }
   }
 
-  // Inferencia por patrón y posición (Regla 2 para tablas recortadas sin etiquetas como Provinet):
+  // Inferencia por patrón y posición (Regla morfológica para tablas recortadas sin etiquetas como Provinet):
   // Buscar secuencia numérica pura de 6 a 15 dígitos (conservando ceros a la izquierda como "000019111"),
-  // priorizando las filas inmediatamente adyacentes a la fecha o al monto.
+  // sin separadores de miles (.), sin decimales (,) ni asteriscos (*).
   if (!nroReferencia) {
     const candidateRefs: { ref: string; distance: number }[] = [];
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       if (i === fechaLineIndex || i === montoLineIndex) continue;
-      if (/[*•,/]/.test(line)) continue;
+      if (/[*•,/.]/.test(line)) continue;
       const pureSeqMatch = line.match(/^(?:#|nro\.?\s*)?(\d{6,15})$/i);
       if (pureSeqMatch) {
         const normalized = normalizeReferenciaBancaria(pureSeqMatch[1]);
@@ -1055,7 +1366,7 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
   const resolvedRef = nroReferencia ?? codigoAutorizacion ?? null;
 
   return auditAndNormalizeReceiptPayload({
-    legible: Boolean((montoBs && montoBs > 0) || resolvedRef),
+    legible: Boolean((montoBs && montoBs > 0) || resolvedRef || numeroCuentaDetectada),
     confianza: montoBs && resolvedRef ? 0.9 : 0.65,
     confianza_lectura: montoBs && resolvedRef ? 'alta' : 'media',
     metodo_pago: metodoPago,
@@ -1063,15 +1374,22 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
     banco_origen: bancoOrigen,
     banco_destino: bancoDestino,
     monto_bs: montoBs,
+    monto_texto: montoTextoExacto,
     monto_texto_original: montoTextoOriginal,
     referencia: resolvedRef,
     nro_referencia: resolvedRef,
     codigo_autorizacion: codigoAutorizacion,
     fecha_pago: fechaPago,
     fecha_iso: fechaIso,
+    numero_cuenta: numeroCuentaDetectada,
     titular_remitente: titularRemitente,
     rif_ci_titular: rifCiTitular,
     beneficiario_detectado: beneficiarioDetectado,
+    evidencia_visual: {
+      tiene_etiquetas_visibles: tieneEtiquetasVisibles,
+      es_foto_de_pantalla: false,
+      lineas_crudas_detectadas: lines
+    },
     observacion_auditoria:
       montoBs && resolvedRef
         ? 'Comprobante de operación exitosa leído correctamente.'

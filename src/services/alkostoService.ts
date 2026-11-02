@@ -1732,13 +1732,17 @@ export async function parseAlkostoOrderImage(
   mimeType: string = 'image/jpeg',
   fileName?: string
 ): Promise<ParsedOrdenCompraAlkosto> {
+  const parserMod = await import('./alkostoOcParser');
   const readerResult = String(imageBase64 || '').trim();
   const base64Data = (readerResult.includes(',') ? readerResult.split(',')[1] : readerResult)
     .replace(/^data:[^;]+;base64,/i, '')
     .replace(/\s+/g, '');
 
   if (!base64Data) {
-    throw new Error('El archivo seleccionado está vacío o no pudo convertirse a Base64.');
+    throw new parserMod.AlkostoOcrStageError(
+      '1-Archivo',
+      'El archivo seleccionado está vacío o no pudo convertirse a Base64.'
+    );
   }
 
   // Inferir mimeType de forma segura si viene vacío o genérico
@@ -1756,142 +1760,203 @@ export async function parseAlkostoOrderImage(
     } else {
       safeMimeType = 'image/jpeg';
     }
+  } else if (lowerName.endsWith('.pdf') || base64Data.startsWith('JVBERi0')) {
+    safeMimeType = 'application/pdf';
   }
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 90000); // 90s de tolerancia para análisis exhaustivo de órdenes completas
+  // Fast-path en navegador para PDFs digitales del ERP de Alkosto / Familia Center (usando DecompressionStream)
+  let clientDeterministicPdfOrder: ParsedOrdenCompraAlkosto | null = null;
+  if (safeMimeType === 'application/pdf') {
+    try {
+      const positionedText = await parserMod.extractPositionedTextFromAlkostoPdfBufferAsync(base64Data);
+      if (positionedText) {
+        const parsedDet = parserMod.parseAlkostoRawText(positionedText);
+        if (parsedDet && Array.isArray(parsedDet.items) && parsedDet.items.length > 0) {
+          clientDeterministicPdfOrder = parserMod.normalizeOrderForCodizulca(parsedDet);
+          const cuadre = parserMod.calcularResumenCuadreOC(clientDeterministicPdfOrder);
+          if (cuadre?.cuadreExacto) {
+            return clientDeterministicPdfOrder;
+          }
+        }
+      }
+    } catch (clientPdfErr: any) {
+      console.warn('[alkostoService] Advertencia en lectura determinista PDF cliente:', clientPdfErr?.message);
+    }
+  }
 
   let backendError: any = null;
+  const maxAttempts = 2; // Reintento automático para tolerar cold starts en Render
 
-  try {
-    const response = await fetch('/api/alkosto/ocr-orden', {
-      method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        ...getAuthHeaders()
-      },
-      body: JSON.stringify({
-        imageBase64: base64Data,
-        mimeType: safeMimeType,
-        fileName
-      }),
-      signal: controller.signal
-    });
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 95000); // 95s de tolerancia extendida para Render
 
-    const responseText = await response.text();
-    let result: any = null;
     try {
-      result = JSON.parse(responseText);
-    } catch {
-      console.error('[alkostoService] Respuesta no-JSON en /api/alkosto/ocr-orden:', {
-        status: response.status,
-        statusText: response.statusText,
-        preview: responseText.slice(0, 300)
+      const response = await fetch('/api/alkosto/ocr-orden', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders()
+        },
+        body: JSON.stringify({
+          imageBase64: base64Data,
+          mimeType: safeMimeType,
+          fileName
+        }),
+        signal: controller.signal
       });
-      if (response.status === 413) {
-        throw new Error('El archivo es demasiado grande para ser procesado (413 Payload Too Large). Por favor sube una imagen o PDF más liviano.');
+
+      const responseText = await response.text();
+      let result: any = null;
+      try {
+        result = JSON.parse(responseText);
+      } catch {
+        const extracted = parserMod.extractCleanJson(responseText);
+        if (extracted) {
+          try {
+            result = typeof extracted === 'string' ? JSON.parse(extracted) : extracted;
+          } catch {
+            result = null;
+          }
+        }
       }
+
+      if (!result) {
+        console.error('[alkostoService] Respuesta no-JSON en /api/alkosto/ocr-orden:', {
+          attempt,
+          status: response.status,
+          statusText: response.statusText,
+          preview: responseText.slice(0, 300)
+        });
+        if (response.status === 413) {
+          throw new parserMod.AlkostoOcrStageError(
+            '1-Archivo',
+            'El archivo es demasiado grande para ser procesado (HTTP 413 Payload Too Large). Por favor sube una imagen o PDF más liviano.'
+          );
+        }
+        // Si es un error de gateway / cold start en Render (502, 503, 504), reintentar
+        if ((response.status === 502 || response.status === 503 || response.status === 504) && attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+        throw new parserMod.AlkostoOcrStageError(
+          '2-Conexión Gemini-Render',
+          `Respuesta no-JSON del servidor en Render (HTTP ${response.status} ${response.statusText || ''}).`
+        );
+      }
+
       if (!response.ok) {
-        throw new Error(`Error en servidor (${response.status}): El servidor no devolvió una respuesta JSON válida.`);
+        const descriptiveError =
+          result?.error ||
+          result?.details ||
+          `Error al procesar la Orden de Compra (HTTP ${response.status})`;
+        const stageFromServer =
+          result?.stage ||
+          (response.status === 400 || response.status === 413
+            ? '1-Archivo'
+            : response.status === 422
+              ? '3-Parseo JSON'
+              : '2-Conexión Gemini-Render');
+        const enrichedErr = new parserMod.AlkostoOcrStageError(stageFromServer, descriptiveError);
+        (enrichedErr as any).statusCode = response.status;
+        (enrichedErr as any).details = result?.details;
+        (enrichedErr as any).code = result?.code;
+        throw enrichedErr;
       }
-      throw new Error('Respuesta del servidor no válida (formato no reconocido).');
-    }
 
-    if (!response.ok) {
-      const descriptiveError =
-        result?.error ||
-        result?.details ||
-        `Error al procesar la Orden de Compra (HTTP ${response.status})`;
-      const enrichedErr: any = new Error(descriptiveError);
-      enrichedErr.statusCode = response.status;
-      enrichedErr.details = result?.details;
-      enrichedErr.code = result?.code;
-      throw enrichedErr;
-    }
+      if (!result?.success || !result?.data) {
+        throw new parserMod.AlkostoOcrStageError(
+          '3-Parseo JSON',
+          result?.error || 'Respuesta incompleta del servidor OCR al analizar la Orden de Compra.'
+        );
+      }
 
-    if (!result?.success || !result?.data) {
-      throw new Error(result?.error || 'Respuesta incompleta del servidor OCR al analizar la Orden de Compra.');
+      return parserMod.normalizeOrderForCodizulca(result.data);
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        backendError = new parserMod.AlkostoOcrStageError(
+          '2-Conexión Gemini-Render',
+          'El lector OCR excedió el tiempo límite de conexión (95s en Render). Reintentando o usando respaldo...'
+        );
+        if (attempt < maxAttempts) {
+          continue;
+        }
+      } else {
+        backendError = err;
+        const isNetworkTransient = /Failed to fetch|NetworkError|Load failed|502|504/i.test(String(err?.message || ''));
+        if (isNetworkTransient && attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+      }
+      break;
+    } finally {
+      clearTimeout(timeoutId);
     }
-
-    return result.data;
-  } catch (err: any) {
-    if (err.name === 'AbortError') {
-      backendError = new Error('El lector OCR excedió el tiempo límite (90s). Por favor reintenta con una imagen más nítida o liviana.');
-    } else {
-      backendError = err;
-    }
-  } finally {
-    clearTimeout(timeoutId);
   }
 
-  // Respaldo directo en cascada con Gemini si existe API Key en entorno cliente
-  const clientApiKey = String(
-    (import.meta as any).env?.VITE_GEMINI_API_KEY ||
-    (typeof process !== 'undefined' && (process.env?.GEMINI_API_KEY || process.env?.API_KEY)) ||
-    ''
-  ).trim();
+  // Si el archivo era un PDF digital con renglones extraídos en el navegador, devolverlo como respaldo inmediato
+  if (clientDeterministicPdfOrder && clientDeterministicPdfOrder.items.length > 0) {
+    return clientDeterministicPdfOrder;
+  }
 
-  if (clientApiKey && clientApiKey !== 'undefined' && clientApiKey !== 'null' && clientApiKey.length >= 20) {
+  // Respaldo directo en cascada con Gemini (1º gemini-2.5-flash -> 2º gemini-2.5-pro -> 3º gemini-2.0-flash) si existe API Key en entorno cliente
+  const clientApiKeys = [
+    (import.meta as any).env?.VITE_GEMINI_API_KEY,
+    (import.meta as any).env?.VITE_GOOGLE_API_KEY,
+    typeof process !== 'undefined' ? process.env?.GEMINI_API_KEY : '',
+    typeof process !== 'undefined' ? process.env?.GOOGLE_API_KEY : '',
+    typeof process !== 'undefined' ? process.env?.VITE_GEMINI_API_KEY : '',
+    typeof process !== 'undefined' ? process.env?.API_KEY : ''
+  ]
+    .filter(Boolean)
+    .flatMap((k) => String(k).split(','))
+    .map((k) => k.trim().replace(/^["']+|["']+$/g, '').trim())
+    .filter((k) => k.length >= 15 && k !== 'undefined' && k !== 'null');
+
+  if (clientApiKeys.length > 0) {
     try {
-      const [{ GoogleGenAI }, parserMod] = await Promise.all([
-        import('@google/genai'),
-        import('./alkostoOcParser')
-      ]);
-      const ai = new GoogleGenAI({ apiKey: clientApiKey });
       const systemInstruction = parserMod.buildAlkostoOcSystemPrompt(
         CADENAS_ABREVIATURAS.ALKOSTO,
         CADENAS_ABREVIATURAS.FAMILIA_CENTER
       );
-      const prompt = `Analiza minuciosamente la imagen, captura o documento PDF adjunto correspondiente a una Orden de Compra de ALKOSTO en todas sus páginas y devuelve ÚNICAMENTE el objeto JSON válido con cabecera_orden, renglones (incluyendo distribucion_tiendas con códigos ${CADENAS_ABREVIATURAS.ALKOSTO.join(', ')} o ${CADENAS_ABREVIATURAS.FAMILIA_CENTER.join(', ')}, códigos separados y validación aritmética) y resumen_totales.`;
+      const prompt = `Analiza minuciosamente la imagen, captura o documento PDF adjunto correspondiente a una Orden de Compra de ALKOSTO y FAMILIA CENTER en todas sus páginas. Devuelve ÚNICAMENTE el objeto JSON válido consolidando las cantidades por tienda en las 17 tiendas válidas (${CADENAS_ABREVIATURAS.ALKOSTO.join(', ')} y ${CADENAS_ABREVIATURAS.FAMILIA_CENTER.join(', ')}, ignorando AKOP y CI) y normalizando los montos numéricos sin comas de miles.`;
 
-      const modelsCascade = [...parserMod.ALKOSTO_OCR_MODEL_CASCADE];
-      let lastClientErr: any = null;
+      const geminiOut = await parserMod.callGeminiWithFallback({
+        base64Data,
+        mimeType: safeMimeType,
+        fileName,
+        apiKeys: clientApiKeys,
+        systemInstruction,
+        prompt
+      });
 
-      for (const modelName of modelsCascade) {
-        try {
-          const genRes = await ai.models.generateContent({
-            model: modelName,
-            contents: [
-              {
-                role: 'user',
-                parts: [
-                  { inlineData: { data: base64Data, mimeType: safeMimeType } },
-                  { text: prompt }
-                ]
-              }
-            ],
-            config: {
-              systemInstruction,
-              responseMimeType: 'application/json',
-              temperature: 0.1
-            }
-          });
-          const rawText = genRes?.text || '';
-          const parsedJson = parserMod.parseSafeJson(rawText);
-          if (!parsedJson) {
-            throw new Error(`El modelo ${modelName} devolvió una respuesta no JSON.`);
-          }
-          return parserMod.validateAndNormalizeAlkostoOC(parsedJson, {
-            strictMath: false,
-            requireOrdenNro: false
-          });
-        } catch (mErr: any) {
-          lastClientErr = mErr;
-          console.warn(`[alkostoService] Reintentando siguiente modelo tras fallo en ${modelName}:`, mErr?.message);
-        }
-      }
-
-      if (lastClientErr) {
-        throw lastClientErr;
-      }
+      const validated = parserMod.validateAndNormalizeAlkostoOC(geminiOut.parsedJson, {
+        strictMath: false,
+        requireOrdenNro: false
+      });
+      return parserMod.normalizeOrderForCodizulca(validated);
     } catch (fallbackErr: any) {
       if (!backendError) {
         throw fallbackErr;
       }
     }
+  } else if (!backendError) {
+    throw new parserMod.AlkostoOcrStageError(
+      '2-Conexión Gemini-Render',
+      'No se encontró la clave GEMINI_API_KEY / VITE_GEMINI_API_KEY configurada en el entorno local ni en Render.'
+    );
   }
 
-  throw backendError || new Error('Error desconocido al procesar la Orden de Compra.');
+  if (backendError instanceof parserMod.AlkostoOcrStageError) {
+    throw backendError;
+  }
+
+  const rawMsg = String(backendError?.message || 'Error desconocido al procesar la Orden de Compra.');
+  if (/^Error en Etapa \[/i.test(rawMsg)) {
+    throw new Error(rawMsg);
+  }
+  throw new parserMod.AlkostoOcrStageError('2-Conexión Gemini-Render', rawMsg);
 }
 
 export const SAMPLE_ALKOSTO_OC: ParsedOrdenCompraAlkosto | null = null;

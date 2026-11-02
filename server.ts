@@ -10,7 +10,10 @@ import {
   parseAlkostoRawText,
   parseAlkostoFlexibleOcrText,
   validateAndNormalizeAlkostoOC,
+  normalizeOrderForCodizulca,
   AlkostoParseValidationError,
+  AlkostoOcrStageError,
+  AlkostoOcrStage,
   normalizarCadenaEstricta,
   construirObservacionFormateada,
   parseNumeroEstricto,
@@ -20,9 +23,11 @@ import {
   generarIdDeterministaPedidoAlkosto,
   sanitizeBase64Payload,
   detectAlkostoFileMimeType,
+  extractCleanJson,
   parseSafeJson,
   sanitizeAndParseOcJson,
   ALKOSTO_OCR_MODEL_CASCADE,
+  callGeminiWithFallback,
   buildAlkostoOcSystemPrompt,
   ALKOSTO_OC_EXTRACTION_SYSTEM_PROMPT,
   toCanonicalAlkostoOcJson
@@ -2269,11 +2274,16 @@ async function startServer() {
 
   // LECTOR OCR INTELIGENTE Y DETERMINISTA DE ÓRDENES DE COMPRA ALKOSTO Y FAMILIA CENTER
   app.post("/api/alkosto/ocr-orden", authenticateToken, rateLimiter(10 * 60000, 30, 'OCR Orden Alkosto'), async (req: any, res: any) => {
+    req.setTimeout?.(120000);
+    res.setTimeout?.(120000);
+    let currentStage: AlkostoOcrStage = "1-Archivo";
+
     try {
       const { imageBase64, mimeType = "image/jpeg", fileName = "" } = req.body || {};
       if (!imageBase64) {
         return res.status(400).json({
-          error: "Falta la imagen (JPG, PNG, WEBP) o el archivo PDF de la Orden de Compra.",
+          error: "Error en Etapa [1-Archivo]: Falta la imagen (JPG, PNG, WEBP) o el archivo PDF de la Orden de Compra.",
+          stage: "1-Archivo",
           code: "MISSING_FILE_PAYLOAD"
         });
       }
@@ -2281,7 +2291,8 @@ async function startServer() {
       const cleanBase64 = sanitizeBase64Payload(String(imageBase64));
       if (!cleanBase64) {
         return res.status(400).json({
-          error: "El contenido Base64 del archivo está vacío o tiene un formato inválido.",
+          error: "Error en Etapa [1-Archivo]: El contenido Base64 del archivo está vacío o tiene un formato inválido.",
+          stage: "1-Archivo",
           code: "EMPTY_BASE64_PAYLOAD"
         });
       }
@@ -2289,7 +2300,8 @@ async function startServer() {
       const binaryBuffer = Buffer.from(cleanBase64, "base64");
       if (!binaryBuffer || binaryBuffer.length < 32) {
         return res.status(400).json({
-          error: "El archivo de la Orden de Compra está vacío o corrupto.",
+          error: "Error en Etapa [1-Archivo]: El archivo de la Orden de Compra está vacío o corrupto.",
+          stage: "1-Archivo",
           code: "CORRUPTED_FILE_BUFFER"
         });
       }
@@ -2310,9 +2322,9 @@ async function startServer() {
           if (positionedText) {
             const parsedDet = parseAlkostoRawText(positionedText);
             if (parsedDet && parsedDet.items.length > 0) {
-              deterministicOrder = parsedDet;
+              deterministicOrder = normalizeOrderForCodizulca(parsedDet);
               console.log(
-                `[ALKOSTO OCR] Extracción PDF determinista exitosa (coordenadas X,Y): OC=${parsedDet.ordenNro}, renglones=${parsedDet.items.length}`
+                `[ALKOSTO OCR] Extracción PDF determinista exitosa (coordenadas X,Y): OC=${deterministicOrder.ordenNro}, renglones=${deterministicOrder.items.length}`
               );
             }
           }
@@ -2331,9 +2343,9 @@ async function startServer() {
               if (rawPdfText.length >= 30) {
                 const parsedFlexible = parseAlkostoFlexibleOcrText(rawPdfText);
                 if (parsedFlexible && parsedFlexible.items.length > 0) {
-                  deterministicOrder = parsedFlexible;
+                  deterministicOrder = normalizeOrderForCodizulca(parsedFlexible);
                   console.log(
-                    `[ALKOSTO OCR] Extracción PDF vía pdf-parse exitosa: OC=${parsedFlexible.ordenNro}, renglones=${parsedFlexible.items.length}`
+                    `[ALKOSTO OCR] Extracción PDF vía pdf-parse exitosa: OC=${deterministicOrder.ordenNro}, renglones=${deterministicOrder.items.length}`
                   );
                 }
               }
@@ -2346,121 +2358,71 @@ async function startServer() {
         }
       }
 
-      // Si el PDF digital ya cuadró matemáticamente al 100%, podemos devolverlo como referencia verificada si no hay API keys activas
       const rawKeyCandidates = [
         process.env.GEMINI_API_KEY,
         process.env.GOOGLE_API_KEY,
-        process.env.VITE_GEMINI_API_KEY
+        process.env.VITE_GEMINI_API_KEY,
+        process.env.API_KEY
       ]
         .filter(Boolean)
         .flatMap((k) => String(k).split(","))
         .map((k) => k.trim().replace(/^["']+|["']+$/g, "").trim())
-        .filter((k) => k.length > 10);
+        .filter((k) => k.length > 10 && k !== "undefined" && k !== "null");
       const apiKeys = Array.from(new Set(rawKeyCandidates));
 
-      if (apiKeys.length === 0 && deterministicOrder) {
-        return res.json({
-          success: true,
-          parserMode: "DETERMINISTIC_PDF",
-          data: deterministicOrder,
-          canonical: toCanonicalAlkostoOcJson(deterministicOrder)
-        });
+      // Si el PDF digital ya cuadró matemáticamente al 100% o no hay API keys, devolver de inmediato sin latencia ni timeouts
+      if (deterministicOrder && Array.isArray(deterministicOrder.items) && deterministicOrder.items.length > 0) {
+        const detCuadre = calcularResumenCuadreOC(deterministicOrder);
+        if (detCuadre?.cuadreExacto || apiKeys.length === 0) {
+          return res.json({
+            success: true,
+            parserMode: "DETERMINISTIC_PDF",
+            data: deterministicOrder,
+            canonical: toCanonicalAlkostoOcJson(deterministicOrder)
+          });
+        }
       }
 
+      currentStage = "2-Conexión Gemini-Render";
       const systemInstruction = buildAlkostoOcSystemPrompt();
+      const prompt = `Analiza minuciosamente la imagen, captura o documento PDF adjunto correspondiente a una Orden de Compra de ALKOSTO y FAMILIA CENTER en todas sus páginas. Devuelve ÚNICAMENTE el objeto JSON válido consolidando las cantidades por tienda en las 17 tiendas válidas (AK01-AK10 y FC01-FC07, ignorando AKOP y CI) y normalizando los montos numéricos sin comas de miles.`;
 
-      const prompt = `Analiza minuciosamente la imagen, captura o documento PDF adjunto correspondiente a una Orden de Compra de ALKOSTO en todas sus páginas y devuelve ÚNICAMENTE el objeto JSON válido con cabecera_orden, renglones (incluyendo distribucion_tiendas con códigos AK01-AK10 o FC01-FC07, códigos separados y validación aritmética) y resumen_totales.`;
-
-      const candidateModels = [...ALKOSTO_OCR_MODEL_CASCADE];
       let lastModelError: any = null;
       let validatedOrder: any = null;
       let usedModel = "";
 
       if (apiKeys.length > 0) {
-        outerKeyLoop: for (let keyIdx = 0; keyIdx < apiKeys.length; keyIdx++) {
-          const apiKey = apiKeys[keyIdx];
-          const ai = new GoogleGenAI({
-            apiKey,
-            httpOptions: {
-              headers: {
-                "User-Agent": "aistudio-build"
-              }
-            }
+        try {
+          const geminiOut = await callGeminiWithFallback({
+            base64Data: cleanBase64,
+            mimeType: actualMime,
+            fileName,
+            apiKeys,
+            systemInstruction,
+            prompt
           });
 
-          for (const modelName of candidateModels) {
-            try {
-              const response = await ai.models.generateContent({
-                model: modelName,
-                contents: [
-                  {
-                    role: "user",
-                    parts: [
-                      { inlineData: { data: cleanBase64, mimeType: actualMime } },
-                      { text: prompt }
-                    ]
-                  }
-                ],
-                config: {
-                  systemInstruction,
-                  responseMimeType: "application/json",
-                  temperature: 0.1
-                }
-              });
-              const rawResponseText = response?.text || "";
+          currentStage = "4-Mapeo Nota de Pedido";
+          const candidateValidated = validateAndNormalizeAlkostoOC(geminiOut.parsedJson, {
+            strictMath: false,
+            requireOrdenNro: false
+          });
+          validatedOrder = normalizeOrderForCodizulca(candidateValidated);
+          usedModel = geminiOut.usedModel;
 
-              if (rawResponseText) {
-                const parsed = parseSafeJson(rawResponseText);
-                if (!parsed) {
-                  throw new Error(`El modelo ${modelName} no devolvió un JSON interpretable.`);
-                }
-                const candidateValidated = validateAndNormalizeAlkostoOC(parsed, {
-                  strictMath: false,
-                  requireOrdenNro: false
-                });
-                const resumenCuadre = calcularResumenCuadreOC(candidateValidated);
-
-                const hasRowMismatch = (candidateValidated.items || []).some((it: any) => {
-                  const storeVals = Object.entries(it.tiendas || {})
-                    .filter(([tk]) => tk !== "AKOP" && tk !== "FCOP" && tk !== "CI")
-                    .map(([, v]) => Number(v) || 0);
-                  if (storeVals.length === 0) return false;
-                  const sumStores = Number(storeVals.reduce((a, b) => a + b, 0).toFixed(2));
-                  return Math.abs(sumStores - Number(it.totalCantidad || 0)) > 0.05;
-                });
-
-                validatedOrder = candidateValidated;
-                usedModel = modelName;
-
-                if (!resumenCuadre?.cuadreExacto || hasRowMismatch) {
-                  console.warn(
-                    `[ALKOSTO OCR] Descuadre matemático parcial en ${modelName} (calculado=${resumenCuadre?.totalCalculado ?? 0} vs esperado=${resumenCuadre?.totalEsperadoPDF ?? 0}), verificando siguiente modelo...`
-                  );
-                  continue;
-                }
-
-                console.log(
-                  `[ALKOSTO OCR] Extracción IA exitosa con ${modelName}: OC=${candidateValidated.ordenNro}, renglones=${candidateValidated.items.length}`
-                );
-                break outerKeyLoop;
-              }
-            } catch (mErr: any) {
-              lastModelError = mErr;
-              const errStatus = mErr?.status || mErr?.statusCode || mErr?.code || "UNKNOWN";
-              const errMsg = String(mErr?.message || mErr).slice(0, 300);
-              console.warn(
-                `[ALKOSTO OCR] Fallo en key#${keyIdx + 1} / modelo ${modelName} (status=${errStatus}): ${errMsg}`
-              );
-              // Si la clave de API es inválida o revocada, pasar de inmediato a la siguiente clave
-              if (/API_KEY_INVALID|API key not valid|reported as leaked|PERMISSION_DENIED/i.test(errMsg)) {
-                break;
-              }
-            }
+          console.log(
+            `[ALKOSTO OCR] Extracción IA exitosa con ${usedModel}: OC=${validatedOrder.ordenNro}, renglones=${validatedOrder.items.length}`
+          );
+        } catch (mErr: any) {
+          lastModelError = mErr;
+          if (mErr instanceof AlkostoOcrStageError) {
+            currentStage = mErr.stage;
           }
+          console.warn(`[ALKOSTO OCR] Fallo en cascada Gemini (${currentStage}):`, mErr?.message);
         }
       }
 
-      // 2. Si el documento es un PDF digital y el motor determinista obtuvo cuadre exacto mientras Gemini falló o tuvo menos renglones, usar el determinista
+      // 2. Si el documento es un PDF digital y el motor determinista obtuvo renglones válidos mientras Gemini falló o tuvo menos renglones, usar el determinista
       if (deterministicOrder) {
         const detCuadre = calcularResumenCuadreOC(deterministicOrder);
         const aiCuadre = validatedOrder ? calcularResumenCuadreOC(validatedOrder) : null;
@@ -2490,7 +2452,7 @@ async function startServer() {
               if (ocrText) {
                 const localParsed = parseAlkostoFlexibleOcrText(ocrText);
                 if (localParsed && localParsed.items.length > 0) {
-                  validatedOrder = localParsed;
+                  validatedOrder = normalizeOrderForCodizulca(localParsed);
                   usedModel = "LOCAL_TESSERACT_OCR";
                 }
               }
@@ -2510,7 +2472,7 @@ async function startServer() {
                   if (ocrText) {
                     const localParsed = parseAlkostoFlexibleOcrText(ocrText);
                     if (localParsed && localParsed.items.length > 0) {
-                      validatedOrder = localParsed;
+                      validatedOrder = normalizeOrderForCodizulca(localParsed);
                       usedModel = "LOCAL_PDF_TESSERACT_OCR";
                     }
                   }
@@ -2529,26 +2491,29 @@ async function startServer() {
         const lastMsg = String(lastModelError?.message || "");
         const isAuthOrKeyError =
           apiKeys.length === 0 ||
-          /API_KEY_INVALID|API key not valid|reported as leaked|PERMISSION_DENIED/i.test(lastMsg);
+          /API_KEY_INVALID|API key not valid|reported as leaked|PERMISSION_DENIED|GEMINI_API_KEY/i.test(lastMsg);
         const isQuotaError =
           /RESOURCE_EXHAUSTED|prepayment credits|quota|billing|429/i.test(lastMsg);
 
         if (isAuthOrKeyError) {
           console.error("[ALKOSTO OCR] Error de configuración de clave Gemini API:", lastMsg.slice(0, 200));
           return res.status(503).json({
-            error: "El servicio de IA no tiene una clave GEMINI_API_KEY activa para analizar imágenes. Sube el archivo en formato PDF digital original de Alkosto o verifica la configuración del servidor.",
+            error: "Error en Etapa [2-Conexión Gemini-Render]: El servicio de IA no tiene una clave GEMINI_API_KEY activa para analizar imágenes. Sube el archivo en formato PDF digital original de Alkosto o configura GEMINI_API_KEY en Render.",
+            stage: "2-Conexión Gemini-Render",
             code: "AI_API_KEY_UNAVAILABLE"
           });
         }
         if (isQuotaError) {
           console.error("[ALKOSTO OCR] Cuota agotada en Gemini API:", lastMsg.slice(0, 200));
           return res.status(503).json({
-            error: "El servicio de lectura con IA alcanzó su límite temporal de solicitudes. Intenta nuevamente en unos segundos o sube el PDF digital de la Orden de Compra.",
+            error: "Error en Etapa [2-Conexión Gemini-Render]: El servicio de lectura con IA alcanzó su límite temporal de solicitudes. Intenta nuevamente en unos segundos o sube el PDF digital de la Orden de Compra.",
+            stage: "2-Conexión Gemini-Render",
             code: "AI_QUOTA_EXCEEDED"
           });
         }
 
-        throw new Error(
+        throw new AlkostoOcrStageError(
+          currentStage,
           lastMsg || "No fue posible extraer renglones válidos de la Orden de Compra. Asegúrate de que la imagen o PDF sea legible."
         );
       }
@@ -2556,22 +2521,37 @@ async function startServer() {
       return res.json({
         success: true,
         parserMode: `AI_VALIDATED_${usedModel}`,
-        data: validatedOrder,
+        data: normalizeOrderForCodizulca(validatedOrder),
         canonical: toCanonicalAlkostoOcJson(validatedOrder)
       });
     } catch (err: any) {
       const errStatus = err?.status || err?.statusCode || 500;
       const errMessage = String(err?.message || "Error desconocido");
+      const stage: AlkostoOcrStage =
+        err instanceof AlkostoOcrStageError
+          ? err.stage
+          : err instanceof AlkostoParseValidationError
+            ? "4-Mapeo Nota de Pedido"
+            : /JSON|parse|llave/i.test(errMessage)
+              ? "3-Parseo JSON"
+              : currentStage || "2-Conexión Gemini-Render";
+
+      const formattedStageError = /^Error en Etapa \[/i.test(errMessage)
+        ? errMessage
+        : `Error en Etapa [${stage}]: ${errMessage}`;
+
       console.error("[ALKOSTO OCR] Error detallado procesando Orden de Compra:", {
+        stage,
         statusCode: errStatus,
         name: err?.name,
         code: err?.code,
-        message: errMessage.slice(0, 500)
+        message: formattedStageError.slice(0, 500)
       });
 
       if (err instanceof AlkostoParseValidationError) {
         return res.status(422).json({
-          error: err.message,
+          error: formattedStageError,
+          stage: "4-Mapeo Nota de Pedido",
           code: err.code,
           issues: err.issues
         });
@@ -2584,21 +2564,24 @@ async function startServer() {
       if (isQuota || isKey) {
         return res.status(503).json({
           error: isKey
-            ? "El motor de IA requiere actualizar la credencial GEMINI_API_KEY en el servidor. Puedes subir el PDF digital original de Alkosto o ingresar los datos manualmente."
-            : "El lector automático (IA) está temporalmente saturado. Por favor reintenta en unos segundos o sube el PDF digital.",
+            ? "Error en Etapa [2-Conexión Gemini-Render]: El motor de IA requiere actualizar la credencial GEMINI_API_KEY en el servidor. Puedes subir el PDF digital original de Alkosto o ingresar los datos manualmente."
+            : "Error en Etapa [2-Conexión Gemini-Render]: El lector automático (IA) está temporalmente saturado. Por favor reintenta en unos segundos o sube el PDF digital.",
+          stage: "2-Conexión Gemini-Render",
           code: isKey ? "AI_KEY_INVALID" : "AI_QUOTA_EXCEEDED"
         });
       }
 
       if (isParse) {
         return res.status(422).json({
-          error: `No se pudo estructurar la Orden de Compra: ${errMessage}`,
+          error: formattedStageError,
+          stage: "3-Parseo JSON",
           code: "OC_PARSE_ERROR"
         });
       }
 
       return res.status(500).json({
-        error: `No se pudo procesar la Orden de Compra (${errMessage.slice(0, 140)}). Verifica que el archivo sea un JPG, PNG, WEBP o PDF válido.`,
+        error: formattedStageError,
+        stage,
         code: "OC_PROCESSING_ERROR"
       });
     }
@@ -2719,46 +2702,8 @@ async function startServer() {
         .filter((k) => k.length > 10);
       const apiKeys = Array.from(new Set(rawKeyCandidates));
 
-      const auditedReceiptSchema = {
-        type: Type.OBJECT,
-        properties: {
-          metodo_pago: { type: Type.STRING },
-          banco: { type: Type.STRING, nullable: true },
-          monto_bs: { type: Type.NUMBER, nullable: true },
-          monto_bs_formateado: { type: Type.STRING, nullable: true },
-          referencia: { type: Type.STRING, nullable: true },
-          codigo_autorizacion: { type: Type.STRING, nullable: true },
-          fecha_pago: { type: Type.STRING, nullable: true },
-          cuenta_enmascarada: { type: Type.STRING, nullable: true },
-          titular: { type: Type.STRING, nullable: true },
-          rif_ci: { type: Type.STRING, nullable: true },
-          confianza_lectura: { type: Type.STRING },
-          observacion_auditoria: { type: Type.STRING },
-          legible: { type: Type.BOOLEAN },
-          confianza: { type: Type.NUMBER },
-          banco_origen: { type: Type.STRING, nullable: true },
-          banco_destino: { type: Type.STRING, nullable: true },
-          monto_texto_original: { type: Type.STRING, nullable: true },
-          nro_referencia: { type: Type.STRING, nullable: true },
-          fecha_iso: { type: Type.STRING, nullable: true },
-          titular_remitente: { type: Type.STRING, nullable: true },
-          rif_ci_titular: { type: Type.STRING, nullable: true },
-          beneficiario_detectado: { type: Type.STRING, nullable: true },
-          observacion_ia: { type: Type.STRING }
-        },
-        required: [
-          "metodo_pago",
-          "banco",
-          "monto_bs",
-          "referencia",
-          "fecha_pago",
-          "confianza_lectura",
-          "observacion_auditoria"
-        ]
-      };
-
       const userInstruction =
-        "Analiza este comprobante de pago venezolano (imagen o PDF) y extrae con precisión quirúrgica los datos exactos cumpliendo estrictamente las 6 reglas de extracción visual (anti-alucinación). Responde únicamente con el objeto JSON válido del formato de salida.";
+        "Analiza este comprobante o soporte de pago venezolano (imagen o PDF), incluyendo soportes recortados sin etiquetas visibles o fotos a monitores. Cumple estrictamente las reglas anti-alucinación y devuelve únicamente el objeto JSON válido con lectura_exitosa, nivel_confianza, requiere_revision_manual, motivo_revision, datos_extraidos y evidencia_visual.";
 
       let aiResult: AuditedReceiptResult | null = null;
       let lastAiError: any = null;
@@ -2766,9 +2711,9 @@ async function startServer() {
       if (apiKeys.length > 0) {
         const candidateModels = [
           "gemini-2.5-flash",
-          "gemini-2.5-flash-lite",
+          "gemini-2.5-pro",
           "gemini-2.0-flash",
-          "gemini-2.5-pro"
+          "gemini-2.5-flash-lite"
         ];
 
         outerLoop: for (const apiKey of apiKeys) {
@@ -2776,58 +2721,29 @@ async function startServer() {
 
           for (const modelName of candidateModels) {
             try {
-              let rawText = "";
-              try {
-                const response = await ai.models.generateContent({
-                  model: modelName,
-                  contents: [
-                    {
-                      role: "user",
-                      parts: [
-                        { inlineData: { mimeType: actualMime, data: cleanBase64 } },
-                        { text: userInstruction }
-                      ]
-                    }
-                  ],
-                  config: {
-                    systemInstruction: VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT,
-                    responseMimeType: "application/json",
-                    responseSchema: auditedReceiptSchema,
-                    temperature: 0.0
+              const response = await ai.models.generateContent({
+                model: modelName,
+                contents: [
+                  {
+                    role: "user",
+                    parts: [
+                      { inlineData: { mimeType: actualMime, data: cleanBase64 } },
+                      { text: userInstruction }
+                    ]
                   }
-                });
-                rawText = response.text || "";
-              } catch (schemaErr: any) {
-                const sMsg = String(schemaErr?.message || "");
-                // Si el modelo rechaza responseSchema por compatibilidad OpenAPI, reintentar forzando JSON vía responseMimeType
-                if (/schema|INVALID_ARGUMENT|400/i.test(sMsg) && !/API_KEY_INVALID|API key not valid/i.test(sMsg)) {
-                  const fallbackRes = await ai.models.generateContent({
-                    model: modelName,
-                    contents: [
-                      {
-                        role: "user",
-                        parts: [
-                          { inlineData: { mimeType: actualMime, data: cleanBase64 } },
-                          { text: userInstruction }
-                        ]
-                      }
-                    ],
-                    config: {
-                      systemInstruction: VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT,
-                      responseMimeType: "application/json",
-                      temperature: 0.0
-                    }
-                  });
-                  rawText = fallbackRes.text || "";
-                } else {
-                  throw schemaErr;
+                ],
+                config: {
+                  systemInstruction: VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT,
+                  responseMimeType: "application/json",
+                  temperature: 0.0
                 }
-              }
+              });
+              const rawText = response.text || "";
 
               if (rawText) {
                 const parsedJson = safeExtractReceiptJson(rawText);
                 const audited = auditAndNormalizeReceiptPayload(parsedJson);
-                if (audited.legible) {
+                if (audited.legible || audited.lectura_exitosa) {
                   return res.json(audited);
                 }
                 aiResult = audited;

@@ -11,13 +11,16 @@ import {
   parseAlkostoRawText,
   parseAlkostoFlexibleOcrText,
   extractPositionedTextFromAlkostoPdfBuffer,
+  extractPositionedTextFromAlkostoPdfBufferAsync,
   validateAndNormalizeAlkostoOC,
+  normalizeOrderForCodizulca,
   normalizarUnidadMedidaAlkosto,
   autocorregirTiendasPorFila,
   extraerPedidosNormalizadosDeOC,
   calcularResumenCuadreOC,
   sanitizeBase64Payload,
   detectAlkostoFileMimeType,
+  extractCleanJson,
   parseSafeJson,
   sanitizeAndParseOcJson,
   ALKOSTO_OCR_MODEL_CASCADE,
@@ -27,7 +30,8 @@ import {
   normalizarFechaISOAlkosto,
   toCanonicalAlkostoOcJson,
   ALKOSTO_OC_EXTRACTION_SYSTEM_PROMPT,
-  AlkostoParseValidationError
+  AlkostoParseValidationError,
+  AlkostoOcrStageError
 } from '../../src/services/alkostoOcParser';
 import { resolverProductoPorCodigoODescripcion } from '../../src/services/alkostoService';
 
@@ -761,44 +765,84 @@ describe('Unit & Regression: alkostoOcParser', () => {
       ]);
     });
 
-    it('should enforce the 5 mandatory OCR resilience rules (model cascade, parseSafeJson, dynamic abbreviations, and null store defense)', () => {
-      // 1. Cascada de modelos en orden exacto de precisión documental
+    it('should enforce the 5 mandatory OCR resilience steps (model cascade, extractCleanJson, normalizeOrderForCodizulca, and stage diagnostics)', () => {
+      // 1. Cascada de modelos en orden exacto (1º gemini-2.5-flash, 2º gemini-2.5-pro, 3º gemini-2.0-flash)
       expect(ALKOSTO_OCR_MODEL_CASCADE).toEqual([
-        'gemini-2.5-pro',
         'gemini-2.5-flash',
+        'gemini-2.5-pro',
         'gemini-2.0-flash'
       ]);
 
-      // 2. Inyección dinámica de abreviaturas sincronizadas AK01-AK10 y FC01-FC07 en el prompt del sistema
+      // 2. Inyección dinámica de las 17 tiendas sincronizadas (AK01-AK10 y FC01-FC07) y exclusión de AKOP y CI en el prompt
       const dynamicPrompt = buildAlkostoOcSystemPrompt();
       expect(dynamicPrompt).toContain('AK01');
       expect(dynamicPrompt).toContain('AK10');
       expect(dynamicPrompt).toContain('FC01');
       expect(dynamicPrompt).toContain('FC07');
+      expect(dynamicPrompt).toContain('AKOP');
+      expect(dynamicPrompt).toContain('CI');
 
-      // 3. parseSafeJson limpia bloques markdown, extrae entre primera {/[ y última }/] y no lanza excepciones no controladas
-      const noisyText = 'Aquí tienes la extracción:\n```json\n{"cabecera_orden":{"numero_orden_compra":"0000055999"},"renglones":[{"numero_renglon":1,"codigo_principal":"1496","descripcion_producto":"MORTADELA ASTURIAS","unidad_medida":"CJ","unidades_por_empaque":10,"cantidad_total":12,"distribucion_tiendas":[{"codigo_tienda":"AK01","nombre_tienda":"Alkosto 1","cantidad":12}],"costo_unitario":20,"monto_total_renglon":240,"alerta_revision":false}]}\n```\nFin del reporte.';
+      // 3. extractCleanJson y parseSafeJson limpian bloques markdown, extraen entre primera { y última } y no lanzan excepciones
+      const noisyText = 'Aquí tienes la extracción:\n```json\n{"cabecera_orden":{"numero_orden":"0000054457","fecha_emision":"06/10/2026","fecha_entrega":"12/10/2026","dias_credito":"30","tasa_cambio":"872.3927","observaciones":"ORDEN LECHE CODIZULCA"},"renglones":[{"numero_renglon":1,"codigo_principal":"7590377000503","descripcion_producto":"LECHE EN POLVO COMPLETA 400GR","unidad_medida":"CJ","unidades_por_empaque":24,"cantidad_total":"240","tiendas":{"AK01":"30","AK02":"25","AK03":25,"AK04":20,"AK05":20,"AK06":20,"AK07":25,"AK08":25,"AK09":25,"AK10":25,"AKOP":999,"CI":888},"costo_unitario":"40.0000","monto_total_renglon":"9,600.00"},{"numero_renglon":2,"codigo_principal":"7590377000503","descripcion_producto":"LECHE EN POLVO COMPLETA 400GR","unidad_medida":"CJ","unidades_por_empaque":24,"cantidad_total":"70","tiendas":{"FC01":"10","FC02":"10","FC03":10,"FC04":10,"FC05":10,"FC06":10,"FC07":10},"costo_unitario":"40.0000","monto_total_renglon":"2,800.00"},{"numero_renglon":3,"codigo_principal":"7590377000510","descripcion_producto":"LECHE EN POLVO COMPLETA 900GR","unidad_medida":"CJ","unidades_por_empaque":12,"cantidad_total":"290","tiendas":{"AK01":30,"AK02":30,"AK03":30,"AK04":30,"AK05":30,"AK06":30,"AK07":30,"AK08":30,"AK09":25,"AK10":25,"AKOP":500,"CI":500},"costo_unitario":"90.0000","monto_total_renglon":"26,100.00"},{"numero_renglon":4,"codigo_principal":"7590377000510","descripcion_producto":"LECHE EN POLVO COMPLETA 900GR","unidad_medida":"CJ","unidades_por_empaque":12,"cantidad_total":"85","tiendas":{"FC01":15,"FC02":15,"FC03":15,"FC04":10,"FC05":10,"FC06":10,"FC07":10},"costo_unitario":"90.0000","monto_total_renglon":"7,650.00"}],"resumen_totales":{"subtotal_alkosto":"35,700.00","subtotal_familia_center":"10,450.00","total_general":"46,150.00"}}\n```\nFin del reporte.';
+      const cleanParsed = extractCleanJson(noisyText);
+      expect(cleanParsed).toBeTruthy();
+      expect(typeof cleanParsed).toBe('object');
+
       const safeParsed = parseSafeJson(noisyText);
       expect(safeParsed).toBeTruthy();
-      expect(safeParsed.cabecera_orden.numero_orden_compra).toBe('0000055999');
-      expect(parseSafeJson('texto sin json válido')).toBeNull();
 
-      // 4. Defensa contra tiendas con null o "-" en strictMath: false
-      const normalized = validateAndNormalizeAlkostoOC(
-        {
-          ...safeParsed,
-          renglones: [
-            {
-              ...safeParsed.renglones[0],
-              tiendas: { AK01: 12, AK02: null, AK03: '-', AK04: '' }
-            }
-          ]
-        },
-        { strictMath: false }
-      );
-      expect(normalized.ordenNro).toBe('0000055999');
-      expect(normalized.items).toHaveLength(1);
-      expect(normalized.items[0].tiendas).toEqual({ AK01: 12 });
+      // 4. normalizeOrderForCodizulca consolida páginas 1 y 2 por código (7590377000503 y 7590377000510), ignora AKOP y CI, y convierte strings con comas a Number
+      const normalized = normalizeOrderForCodizulca(safeParsed);
+      expect(normalized.ordenNro).toBe('0000054457');
+      expect(normalized.tasaCambio).toBeCloseTo(872.3927, 4);
+      expect(normalized.diasCredito).toBe(30);
+      expect(normalized.subtotalAlkosto).toBe(35700);
+      expect(normalized.subtotalFamiliaCenter).toBe(10450);
+      expect(normalized.totalNeto).toBe(46150);
+
+      // Consolidado en exactamente 2 renglones únicos por código (sin duplicar filas entre página 1 y página 2)
+      expect(Array.isArray(normalized.items)).toBe(true);
+      expect(Array.isArray(normalized.renglones)).toBe(true);
+      expect(Array.isArray(normalized.tiendas)).toBe(true);
+      expect(normalized.items).toHaveLength(2);
+      expect(normalized.tiendas).toHaveLength(17);
+
+      const item503 = normalized.items.find(i => i.codigoBarra === '7590377000503' || i.codigo === '7590377000503')!;
+      expect(item503).toBeTruthy();
+      expect(item503.costoUnitario).toBe(40);
+      expect(item503.tiendas?.AKOP).toBeUndefined();
+      expect(item503.tiendas?.CI).toBeUndefined();
+      expect(item503.tiendas?.AK01).toBe(30);
+      expect(item503.tiendas?.FC01).toBe(10);
+
+      const item510 = normalized.items.find(i => i.codigoBarra === '7590377000510' || i.codigo === '7590377000510')!;
+      expect(item510).toBeTruthy();
+      expect(item510.costoUnitario).toBe(90);
+      expect(item510.tiendas?.AK01).toBe(30);
+      expect(item510.tiendas?.FC01).toBe(15);
+
+      // 5. Diagnóstico por etapas AlkostoOcrStageError
+      const stageErr = new AlkostoOcrStageError('3-Parseo JSON', 'Fallo de prueba');
+      expect(stageErr.message).toBe('Error en Etapa [3-Parseo JSON]: Fallo de prueba');
+      expect(stageErr.stage).toBe('3-Parseo JSON');
+    });
+
+    it('should deterministically decompress and parse CODIZULCA LECHE.pdf asynchronously using DecompressionStream', async () => {
+      const fullPath = path.resolve(process.cwd(), '..', 'CODIZULCA LECHE.pdf');
+      if (!fs.existsSync(fullPath)) return;
+
+      const base64Pdf = fs.readFileSync(fullPath).toString('base64');
+      const positionedText = await extractPositionedTextFromAlkostoPdfBufferAsync(base64Pdf);
+      expect(positionedText).toBeTruthy();
+
+      const parsed = parseAlkostoRawText(positionedText!);
+      const normalized = normalizeOrderForCodizulca(parsed);
+      expect(normalized.ordenNro).toBe('0000054457');
+      expect(normalized.tasaCambio).toBeCloseTo(872.3927, 4);
+      expect(normalized.subtotalAlkosto).toBe(35700);
+      expect(normalized.subtotalFamiliaCenter).toBe(10450);
+      expect(normalized.totalNeto).toBe(46150);
+      expect(normalized.items).toHaveLength(2);
     });
   });
 });

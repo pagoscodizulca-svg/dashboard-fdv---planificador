@@ -317,6 +317,8 @@ export interface ParsedOrdenCompraAlkosto {
   subtotalAlkosto?: number;
   subtotalFamiliaCenter?: number;
   subtotalGeneral?: number;
+  totalNeto?: number;
+  tiendas?: string[];
   cabecera_orden?: AlkostoOcCabeceraOrden;
   renglones?: AlkostoOcRenglonExtraido[];
   resumen_totales?: AlkostoOcResumenTotales;
