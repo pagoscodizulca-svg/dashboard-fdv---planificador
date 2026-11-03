@@ -29,6 +29,7 @@ import {
   normalizeReferenciaBancaria,
   parseVenezuelanMonto,
   parseMontoVenezolano,
+  inferirBancoVenezolano,
   prepareImageForGemini,
   extractSupportWithGemini,
   extractNumeroCuentaVenezolana,
@@ -426,9 +427,11 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
     if (val.trim()) {
       setMissingFields((prev) => ({ ...prev, cuenta: false }));
       // Deducción automática del banco por prefijo de cuenta (ej. 0108*****40*****7396 -> BBVA Provincial) o plataforma (Provinet, BanescOnline)
+      const inferred = inferirBancoVenezolano(banco, val, extractNumeroCuentaVenezolana(val) || val);
       const deduced = resolveVenezuelanBankDetails(null, val, extractNumeroCuentaVenezolana(val) || val);
-      if (deduced.banco_identificado && !banco.trim()) {
-        setBanco(deduced.banco_identificado);
+      const targetBank = inferred || deduced.banco_identificado || '';
+      if (targetBank && !banco.trim()) {
+        setBanco(targetBank);
         setMissingFields((prev) => ({ ...prev, banco: false }));
       }
     }
@@ -754,6 +757,7 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
         datosExtraidos.numero_cuenta ??
         data.cuenta_origen_o_destino ??
         data.numero_cuenta ??
+        data.cuenta ??
         null;
       const rawCanal =
         data.canal ??
@@ -771,30 +775,53 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
         setCuentaCanal('');
       }
 
-      // 3. Banco normalizado (priorizando banco_identificado o deducción por código de cuenta 0108 / plataforma Provinet)
-      const deducedBankInfo = resolveVenezuelanBankDetails(
-        data.banco ??
-          datosExtraidos.banco_identificado ??
-          data.banco_identificado ??
-          data.banco_origen ??
-          data.banco_destino ??
-          datosExtraidos.codigo_banco ??
-          data.codigo_banco,
-        rawCanal,
-        rawCuentaMask
-      );
-      const resolvedBanco =
-        deducedBankInfo.banco_identificado ??
+      // Contexto textual completo del comprobante para inferencia de respaldo
+      const lineasEvidencia = Array.isArray(data?.evidencia_visual?.lineas_crudas_detectadas)
+        ? data.evidencia_visual.lineas_crudas_detectadas.join(' ')
+        : '';
+      const textoCompletoSoporte = [
+        data.texto_completo || '',
+         data.textoCompleto || '',
+        lineasEvidencia,
+        rawCanal || '',
+        rawCuentaMask || '',
+        data.observacion_auditoria || '',
+        data.observacion_ia || ''
+      ]
+        .filter(Boolean)
+        .join(' ');
+
+      // 3. Banco normalizado con inferirBancoVenezolano (inferencia obligatoria por Provinet / 0108 / códigos SUDEBAN)
+      const rawBancoExtraido =
         data.banco ??
         datosExtraidos.banco_identificado ??
         data.banco_identificado ??
         data.banco_origen ??
         data.banco_destino ??
+        datosExtraidos.codigo_banco ??
+        data.codigo_banco ??
         null;
+
+      const bancoInferido = inferirBancoVenezolano(
+        rawBancoExtraido && rawBancoExtraido !== 'null' ? String(rawBancoExtraido) : '',
+        textoCompletoSoporte,
+        resolvedCuentaCanal
+      );
+      const deducedBankInfo = resolveVenezuelanBankDetails(
+        rawBancoExtraido,
+        rawCanal,
+        rawCuentaMask,
+        textoCompletoSoporte
+      );
+      const resolvedBanco =
+        bancoInferido ||
+        deducedBankInfo.banco_identificado ||
+        (rawBancoExtraido && rawBancoExtraido !== 'null' ? String(rawBancoExtraido).trim() : null);
 
       if (resolvedBanco && resolvedBanco !== 'null') {
         const cleanBanco = String(resolvedBanco).trim();
         setBanco(cleanBanco);
+        nextMissing.banco = false;
         if (cleanBanco) camposCargados.push(cleanBanco);
       } else {
         setBanco('');
@@ -802,26 +829,53 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
         camposFaltantes.push('Banco');
       }
 
-      // 4. Monto en Bolívares usando parseMontoVenezolano ("576.599,07" -> 576599.07) y validación de coherencia
-      const rawMontoTexto =
-        datosExtraidos.monto_texto ??
-        data.monto_texto ??
-        data.monto_texto_original ??
-        datosExtraidos.monto_numerico ??
-        data.monto_numerico ??
-        data.monto_bs ??
-        data.monto;
-      const parsedByHelper = parseMontoVenezolano(rawMontoTexto);
-      const coherentMonto =
-        parseVenezuelanMonto(rawMontoTexto) ?? (parsedByHelper > 0 ? parsedByHelper : null);
+      // 4. Monto en Bolívares usando parseMontoVenezolano ("48.742,49" -> 48742.49) sobre montoRaw y montoNumerico
+      const candidateMontos = [
+        data.montoRaw,
+        datosExtraidos.montoRaw,
+        datosExtraidos.monto_texto,
+        data.monto_texto,
+        data.monto_texto_original,
+        data.montoNumerico,
+        datosExtraidos.montoNumerico,
+        datosExtraidos.monto_numerico,
+        data.monto_numerico,
+        data.monto_bs,
+        data.monto
+      ];
 
-      if (coherentMonto !== null && coherentMonto > 0) {
+      let coherentMonto = 0;
+      const parsedFromRawStr = parseMontoVenezolano(
+        data.montoRaw ?? datosExtraidos.montoRaw ?? datosExtraidos.monto_texto ?? data.monto_texto ?? data.monto_texto_original
+      );
+      const parsedFromNumeric = parseMontoVenezolano(
+        data.montoNumerico ?? datosExtraidos.montoNumerico ?? datosExtraidos.monto_numerico ?? data.monto_numerico ?? data.monto_bs ?? data.monto
+      );
+
+      if (parsedFromRawStr > 0 && parsedFromNumeric > 0) {
+        // Si montoRaw ("48.742,49" -> 48742.49) difiere por factor ~1000 de montoNumerico (48.74), priorizar montoRaw
+        coherentMonto =
+          parsedFromRawStr > parsedFromNumeric && Math.abs(parsedFromRawStr / parsedFromNumeric - 1000) < 15
+            ? parsedFromRawStr
+            : parsedFromNumeric;
+      } else {
+        for (const cand of candidateMontos) {
+          const val = parseMontoVenezolano(cand);
+          if (val > 0) {
+            coherentMonto = val;
+            break;
+          }
+        }
+      }
+
+      if (coherentMonto > 0) {
         const formattedMonto = new Intl.NumberFormat('es-VE', {
           minimumFractionDigits: 2,
           maximumFractionDigits: 2
         }).format(coherentMonto);
         setMontoNumerico(coherentMonto);
         setMontoDisplay(formattedMonto);
+        nextMissing.monto = false;
         camposCargados.push(`Bs. ${formattedMonto}`);
       } else {
         setMontoNumerico(0);

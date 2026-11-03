@@ -4,6 +4,7 @@ import {
   parseVenezuelanReceiptText,
   parseVenezuelanMonto,
   parseMontoVenezolano,
+  inferirBancoVenezolano,
   detectReceiptMimeType,
   VENEZUELAN_RECEIPT_RESPONSE_SCHEMA,
   VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT,
@@ -436,19 +437,46 @@ describe('Agente Experto en Auditoría Bancaria Venezolana (venezuelanReceiptAud
       'es_legible',
       'fecha_pago',
       'referencia',
+      'montoRaw',
+      'montoNumerico',
       'monto_bs',
       'banco',
-      'canal'
+      'canal',
+      'numero_cuenta'
     ]);
     expect(VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT).toContain('23/10/2026');
     expect(VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT).toContain('000012723');
     expect(VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT).toContain('48.742,49');
     expect(VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT).toContain('Provinet');
+    expect(VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT).toContain('montoRaw');
+    expect(VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT).toContain('montoNumerico');
+
+    // Validaciones de parseMontoVenezolano e inferirBancoVenezolano
+    expect(parseMontoVenezolano(48742.49)).toBe(48742.49);
+    expect(parseMontoVenezolano('Bs. 48.742,49')).toBe(48742.49);
+    expect(parseMontoVenezolano('48.742,49')).toBe(48742.49);
+    expect(parseMontoVenezolano('48,742.49')).toBe(48742.49);
+    expect(parseMontoVenezolano('48742,49')).toBe(48742.49);
+    expect(parseMontoVenezolano('48.742.49')).toBe(48742.49);
+
+    expect(inferirBancoVenezolano('', 'Provinet', '')).toBe('BBVA Provincial');
+    expect(inferirBancoVenezolano('', '', '0108*****40*****7396')).toBe('BBVA Provincial');
+    expect(inferirBancoVenezolano('', 'BanescOnline', '0134123456')).toBe('Banesco');
+    expect(inferirBancoVenezolano('', 'BDVenlínea', '0102123456')).toBe('Banco de Venezuela');
+    expect(inferirBancoVenezolano('', 'TPago', '0105123456')).toBe('Mercantil');
+    expect(inferirBancoVenezolano('', '', '0172123456')).toBe('Bancamiga');
+    expect(inferirBancoVenezolano('', '', '0191123456')).toBe('BNC (Banco Nacional de Crédito)');
+    expect(inferirBancoVenezolano('', '', '0114123456')).toBe('Bancaribe');
+    expect(inferirBancoVenezolano('', '', '0174123456')).toBe('Banplus');
+    expect(inferirBancoVenezolano('', '', '0175123456')).toBe('Banco Bicentenario');
+    expect(inferirBancoVenezolano('', '', '0163123456')).toBe('Banco del Tesoro');
 
     const auditedFlatOutput = auditAndNormalizeReceiptPayload({
       es_legible: true,
       fecha_pago: '2026-10-23',
       referencia: '000012723',
+      montoRaw: '48.742,49',
+      montoNumerico: 48742.49,
       monto_bs: 48742.49,
       banco: 'BBVA Provincial',
       canal: 'Provinet',
@@ -461,18 +489,23 @@ describe('Agente Experto en Auditoría Bancaria Venezolana (venezuelanReceiptAud
     expect(auditedFlatOutput.banco).toBe('BBVA Provincial');
     expect(auditedFlatOutput.canal).toBe('Provinet');
     expect(auditedFlatOutput.monto_bs).toBe(48742.49);
+    expect(auditedFlatOutput.montoRaw).toBe('48.742,49');
+    expect(auditedFlatOutput.montoNumerico).toBe(48742.49);
     expect(auditedFlatOutput.referencia).toBe('000012723');
     expect(auditedFlatOutput.fecha_iso).toBe('2026-10-23');
     expect(auditedFlatOutput.datos_extraidos?.numero_cuenta).toBe('0108*****40*****7396');
 
-    // Lectura parcial con un campo nulo (ej. sin fecha en recorte) no bloquea es_legible
+    // Lectura parcial con un campo nulo (ej. sin fecha en recorte) no bloquea es_legible e infiere banco por canal/cuenta
     const partialCropOutput = auditAndNormalizeReceiptPayload({
       es_legible: false,
       fecha_pago: null,
       referencia: '000012723',
-      monto_bs: '48.742,49',
+      montoRaw: '48.742,49',
+      montoNumerico: null,
+      monto_bs: null,
       banco: null,
-      canal: 'Provinet'
+      canal: 'Provinet',
+      numero_cuenta: '0108*****40*****7396'
     });
     expect(partialCropOutput.es_legible).toBe(true);
     expect(partialCropOutput.legible).toBe(true);

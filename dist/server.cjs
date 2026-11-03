@@ -3786,37 +3786,52 @@ var VENEZUELAN_RECEIPT_RESPONSE_SCHEMA = {
   properties: {
     es_legible: {
       type: import_genai.Type.BOOLEAN,
-      description: "true siempre que se pueda leer con certeza al menos uno de monto_bs, referencia o fecha_pago; false solo si toda la imagen est\xE1 borrosa, en negro o sin datos financieros"
+      description: "true siempre que se pueda leer al menos uno de los campos del comprobante; false solo si la imagen est\xE1 totalmente en negro o sin ning\xFAn texto ni n\xFAmero"
     },
     fecha_pago: {
       type: import_genai.Type.STRING,
       nullable: true,
-      description: 'Fecha en formato DD/MM/YYYY o DD-MM-YYYY (ejemplo: "23/10/2026") o null'
+      description: 'Fecha en formato DD/MM/AAAA o DD-MM-AAAA (ej. "23/10/2026") o YYYY-MM-DD'
     },
     referencia: {
       type: import_genai.Type.STRING,
       nullable: true,
-      description: 'Secuencia num\xE9rica entera de 6 a 12 d\xEDgitos conservando ceros a la izquierda (ejemplo: "000012723") o null'
+      description: 'Secuencia num\xE9rica entera de 6 a 12 d\xEDgitos conservando ceros a la izquierda (ej. "000012723"). NUNCA confundir con el monto.'
+    },
+    montoRaw: {
+      type: import_genai.Type.STRING,
+      nullable: true,
+      description: 'Texto original del monto tal como aparece en la imagen con punto de miles y coma decimal (ej. "48.742,49" o "1.250,00")'
+    },
+    montoNumerico: {
+      type: import_genai.Type.NUMBER,
+      nullable: true,
+      description: "Valor num\xE9rico flotante est\xE1ndar con punto decimal y sin separador de miles (ej. 48742.49)"
     },
     monto_bs: {
       type: import_genai.Type.NUMBER,
       nullable: true,
-      description: "Valor num\xE9rico en formato est\xE1ndar (ejemplo: 48742.49) o null"
+      description: "Mismo valor num\xE9rico flotante est\xE1ndar en Bol\xEDvares (ej. 48742.49)"
     },
     banco: {
       type: import_genai.Type.STRING,
       nullable: true,
-      description: "Nombre del banco (BBVA Provincial, Banco de Venezuela, Banesco, Mercantil, Bancamiga, Banplus, BNC) o null"
+      description: 'Nombre del banco inferido por texto, plataforma o primeros 4 d\xEDgitos de la cuenta: "BBVA Provincial" (si dice Provinet o empieza por 0108), "Banesco" (0134), "Banco de Venezuela" (0102), "Mercantil" (0105), "Bancamiga" (0172), "BNC (Banco Nacional de Cr\xE9dito)" (0191), "Bancaribe" (0114), "Banplus" (0174), "Banco Bicentenario" (0175), "Banco del Tesoro" (0163)'
     },
     canal: {
       type: import_genai.Type.STRING,
       nullable: true,
-      description: 'Canal o plataforma (ejemplo: "Provinet", "Pago M\xF3vil", "Transferencia") o null'
+      description: 'Nombre de la plataforma o canal visible (ej. "Provinet", "BanescOnline", "BDVenl\xEDnea", "TPago", "Pago M\xF3vil", "Transferencia")'
     },
     numero_cuenta: {
       type: import_genai.Type.STRING,
       nullable: true,
-      description: 'Cuenta de 20 d\xEDgitos o enmascarada con asteriscos (ejemplo: "0108*****40*****7396") o null'
+      description: 'Secuencia de 20 d\xEDgitos o cuenta enmascarada con asteriscos (ej. "0108*****40*****7396")'
+    },
+    texto_completo: {
+      type: import_genai.Type.STRING,
+      nullable: true,
+      description: "Transcripci\xF3n literal de todas las l\xEDneas o valores visibles en la imagen separadas por espacios"
     },
     metodo_pago: {
       type: import_genai.Type.STRING,
@@ -3828,28 +3843,42 @@ var VENEZUELAN_RECEIPT_RESPONSE_SCHEMA = {
     beneficiario_detectado: { type: import_genai.Type.STRING, nullable: true },
     codigo_autorizacion: { type: import_genai.Type.STRING, nullable: true }
   },
-  required: ["es_legible", "fecha_pago", "referencia", "monto_bs", "banco", "canal"]
+  required: [
+    "es_legible",
+    "fecha_pago",
+    "referencia",
+    "montoRaw",
+    "montoNumerico",
+    "monto_bs",
+    "banco",
+    "canal",
+    "numero_cuenta"
+  ]
 };
-var VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT = `Eres un extractor experto de datos bancarios de Venezuela de alta precisi\xF3n. Tu \xFAnica tarea es extraer los datos visibles en la imagen del comprobante de pago sin inventar, adivinar ni alucinar ning\xFAn car\xE1cter.
+var VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT = `Eres un sistema experto en extracci\xF3n de datos de comprobantes bancarios de Venezuela (Pago M\xF3vil, Transferencias, Provinet, Banesco, Banco de Venezuela, Mercantil, etc.).
 
-REGLAS ESTRICTAS DE EXTRACCI\xD3N:
-1. TOLERANCIA A RECORTES Y FOTOS DE PANTALLA: NO rechaces la imagen ni la marques como ilegible si est\xE1 recortada (sin los nombres de las columnas a la izquierda) o si es una foto tomada a un monitor (con l\xEDneas de p\xEDxeles/moir\xE9), SIEMPRE Y CUANDO los n\xFAmeros y textos sean visualmente legibles.
-2. RECONOCIMIENTO POR PATRONES DETERMIN\xCDSTICOS (cuando no hay etiquetas a la izquierda):
-   - FECHA DE PAGO (fecha_pago): Identifica cualquier cadena con formato de fecha DD/MM/YYYY o DD-MM-YYYY (ejemplo: "23/10/2026").
-   - NRO. DE REFERENCIA (referencia): Identifica la secuencia num\xE9rica entera de 6 a 12 d\xEDgitos, frecuentemente precedida por ceros a la izquierda (ejemplo: "000012723") que NO tenga decimales ni asteriscos.
-   - MONTO EN BS (monto_bs): Identifica el valor num\xE9rico con formato monetario (separador de miles con punto y decimales con coma, o viceversa, ejemplo: "48.742,49"). Convi\xE9rtelo al formato num\xE9rico est\xE1ndar que espera el formulario sin alterar sus d\xEDgitos.
-   - BANCO Y CANAL (banco / canal): 
-     * Si aparece un n\xFAmero de cuenta enmascarado de 20 d\xEDgitos o parcial, extrae los primeros 4 d\xEDgitos (c\xF3digo Sudeban):
-       - "0108" o texto "Provinet" -> Banco: "BBVA Provincial", Canal: "Provinet".
-       - "0102" -> Banco: "Banco de Venezuela".
-       - "0134" -> Banco: "Banesco".
-       - "0105" -> Banco: "Mercantil".
-       - "0172" -> Banco: "Bancamiga".
-       - "0174" -> Banco: "Banplus".
-       - "0191" -> Banco: "BNC".
-     * Si se lee expl\xEDcitamente "Provinet", asigna canal = "Provinet" y banco = "BBVA Provincial".
-3. PROHIBICI\xD3N DE INVENTAR: Si un dato espec\xEDfico realmente no aparece en la imagen o los d\xEDgitos est\xE1n borrosos al punto de no distinguirse, devuelve null \xFAnicamente en ese campo, pero NUNCA invalides ni descartes los dem\xE1s campos que s\xED se leen con claridad.
-4. Marca "es_legible": true siempre que puedas leer con certeza al menos UNO de estos campos clave (monto_bs, referencia o fecha_pago). Solo devuelve "es_legible": false si toda la imagen est\xE1 completamente borrosa, en negro o no contiene ning\xFAn dato financiero.`;
+REGLAS CR\xCDTICAS DE EXTRACCI\xD3N (TOLERANCIA A RECORTES SIN ETIQUETAS):
+1. COMPROBANTES SIN ETIQUETAS: Muchas im\xE1genes son recortes que muestran \xDANICAMENTE la columna de valores sin los t\xEDtulos ("Fecha", "Referencia", "Monto", "Cuenta", "Banco"). Debes deducir cada campo por el formato del texto:
+   - FECHA: Patr\xF3n DD/MM/AAAA o DD-MM-AAAA (ej. "23/10/2026").
+   - REFERENCIA / NRO OPERACI\xD3N: Secuencia num\xE9rica entera de 6 a 12 d\xEDgitos, a menudo con ceros a la izquierda (ej. "000012723"). NUNCA confundas la referencia con el monto.
+   - MONTO (BS.): N\xFAmero con separador decimal (coma o punto) y dos decimales (ej. "48.742,49" o "1.250,00"). En Venezuela el punto (.) separa miles y la coma (,) separa c\xE9ntimos.
+   - CUENTA / TEL\xC9FONO ENMASCARADO: Secuencia de 20 d\xEDgitos (o enmascarada con asteriscos como "0108*****40*****7396").
+
+2. IDENTIFICACI\xD3N DEL BANCO (INFERENCIA OBLIGATORIA):
+   Si el nombre del banco no aparece expl\xEDcito como "Banco...", infi\xE9relo por el nombre de la plataforma o por los primeros 4 d\xEDgitos del n\xFAmero de cuenta/origen:
+   - Si dice "Provinet" o la cuenta empieza por "0108" -> Devuelve "BBVA Provincial"
+   - Si dice "BanescoM\xF3vil" / "BanescOnline" o empieza por "0134" -> Devuelve "Banesco"
+   - Si dice "BDVenl\xEDnea" / "BDV" o empieza por "0102" -> Devuelve "Banco de Venezuela"
+   - Si dice "Mercantil" / "TPago" o empieza por "0105" -> Devuelve "Mercantil"
+   - Si empieza por "0172" -> Devuelve "Bancamiga"
+   - Si empieza por "0191" -> Devuelve "BNC (Banco Nacional de Cr\xE9dito)"
+   - Si empieza por "0114" -> Devuelve "Bancaribe"
+   - Si empieza por "0174" -> Devuelve "Banplus"
+   - Si empieza por "0175" -> Devuelve "Banco Bicentenario"
+   - Si empieza por "0163" -> Devuelve "Banco del Tesoro"
+
+3. FORMATO DE SALIDA DEL MONTO:
+   - Devuelve tanto el texto original (\`montoRaw\`: "48.742,49") como el valor num\xE9rico flotante est\xE1ndar con punto decimal y sin separador de miles (\`montoNumerico\`: 48742.49 y \`monto_bs\`: 48742.49).`;
 var BENEFICIARY_NAME_PATTERNS = [
   /CODIZULCA/i,
   /COMERCIALIZADORA\s+ZULIANA/i,
@@ -4063,10 +4092,20 @@ function detectReceiptMimeType(base64OrDataUrl, declaredMime, fileName) {
   if (lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg")) return "image/jpeg";
   return "image/jpeg";
 }
+function parseMontoVenezolano(valor) {
+  if (typeof valor === "number") {
+    if (!Number.isNaN(valor) && Number.isFinite(valor) && valor > 0 && valor <= MAX_COHERENT_MONTO_BS) {
+      return Number(valor.toFixed(2));
+    }
+    return 0;
+  }
+  const parsed = parseVenezuelanMonto(valor);
+  return parsed !== null && !Number.isNaN(parsed) && Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
 function parseVenezuelanMonto(val) {
   if (val === null || val === void 0 || val === "") return null;
   if (typeof val === "number") {
-    if (!Number.isFinite(val) || val <= 0) return null;
+    if (Number.isNaN(val) || !Number.isFinite(val) || val <= 0) return null;
     if (val > MAX_COHERENT_MONTO_BS || Math.trunc(val).toString().length > 10) {
       return null;
     }
@@ -4082,7 +4121,7 @@ function parseVenezuelanMonto(val) {
       return null;
     }
   }
-  s = s.replace(/(\d)\s*([.,])\s*(\d)/g, "$1$2$3");
+  s = s.replace(/\b(?:bol[ií]vares|bs\.?\s*s?\.?|ves)\b/gi, " ").replace(/\$/g, " ").replace(/(\d)\s*([.,])\s*(\d)/g, "$1$2$3").trim();
   const moneyMatch = s.match(/(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)/);
   if (!moneyMatch) return null;
   s = moneyMatch[1];
@@ -4090,7 +4129,7 @@ function parseVenezuelanMonto(val) {
   const hasComma = s.includes(",");
   let parsed = NaN;
   if (hasDot && hasComma) {
-    if (s.lastIndexOf(",") > s.lastIndexOf(".")) {
+    if (/,\d{1,2}$/.test(s) || s.lastIndexOf(",") > s.lastIndexOf(".")) {
       parsed = parseFloat(s.replace(/\./g, "").replace(",", "."));
     } else {
       parsed = parseFloat(s.replace(/,/g, ""));
@@ -4099,6 +4138,9 @@ function parseVenezuelanMonto(val) {
     const parts = s.split(",");
     if (parts.length === 2 && parts[1].length <= 2) {
       parsed = parseFloat(s.replace(",", "."));
+    } else if (parts.length > 2 && parts[parts.length - 1].length <= 2) {
+      const decimals = parts.pop();
+      parsed = parseFloat(`${parts.join("")}.${decimals}`);
     } else {
       parsed = parseFloat(s.replace(/,/g, ""));
     }
@@ -4106,13 +4148,16 @@ function parseVenezuelanMonto(val) {
     const parts = s.split(".");
     if (parts.length === 2 && parts[1].length <= 2) {
       parsed = parseFloat(s);
+    } else if (parts.length > 2 && parts[parts.length - 1].length <= 2) {
+      const decimals = parts.pop();
+      parsed = parseFloat(`${parts.join("")}.${decimals}`);
     } else {
       parsed = parseFloat(s.replace(/\./g, ""));
     }
   } else {
     parsed = parseFloat(s);
   }
-  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  if (Number.isNaN(parsed) || !Number.isFinite(parsed) || parsed <= 0) return null;
   if (parsed > MAX_COHERENT_MONTO_BS || Math.trunc(parsed).toString().length > 10) {
     return null;
   }
@@ -4153,7 +4198,13 @@ function matchCatalogVenezuelanBank(val) {
 function extractNumeroCuentaVenezolana(val) {
   const clean = cleanNullableString(val);
   if (!clean) return null;
-  const match = clean.match(/\b(01(?:02|04|05|08|14|15|28|34|37|38|51|56|63|68|69|71|72|74|75|77|91)[*•xX\d-]{8,22})\b/);
+  const compactMasks = clean.replace(
+    /\b(01(?:02|04|05|08|14|15|28|34|37|38|51|56|63|68|69|71|72|74|75|77|91))((?:[\s]*[*•xX#.\d-]){8,24})/g,
+    (_full, prefix, rest) => `${prefix}${String(rest).replace(/\s+/g, "")}`
+  );
+  const match = compactMasks.match(
+    /\b(01(?:02|04|05|08|14|15|28|34|37|38|51|56|63|68|69|71|72|74|75|77|91)[*•xX#.\d-]{8,22})\b/
+  );
   if (!match) return null;
   const candidate = match[1].trim();
   const digitsAndMasks = candidate.replace(/-/g, "");
@@ -4161,6 +4212,53 @@ function extractNumeroCuentaVenezolana(val) {
     return null;
   }
   return candidate;
+}
+function inferirBancoVenezolano(bancoExtraido, textoCompleto, cuenta) {
+  const cleanExtraido = cleanNullableString(bancoExtraido);
+  const cleanTexto = cleanNullableString(textoCompleto) || "";
+  const cleanCuenta = cleanNullableString(cuenta) || "";
+  const combined = [cleanExtraido || "", cleanCuenta, cleanTexto].filter(Boolean).join(" ");
+  if (!combined) return "";
+  const hasCode = (code) => new RegExp(`(?:^|\\b|[^0-9])${code}(?:[*\u2022xX#.-]|\\d|\\b)`).test(cleanCuenta) || new RegExp(`(?:^|\\b)${code}(?:[*\u2022xX#.-]|\\d{2,}|\\b)`).test(combined);
+  if (/\bprovinet\b|\bprovlnet\b|\bprovinel\b|\bprovincial\b|\bbbva\b|dinero\s+r[aá]pido/i.test(combined) || hasCode("0108")) {
+    return "BBVA Provincial";
+  }
+  if (/\bbanescom[oó]vil\b|\bbanesconline\b|\bbanesco\b/i.test(combined) || hasCode("0134")) {
+    return "Banesco";
+  }
+  if (/\bbdvenl[ií]nea\b|\npagom[oó]vilbdv\b|\bbdv\b|banco\s+de\s+venezuela/i.test(combined) || hasCode("0102")) {
+    return "Banco de Venezuela";
+  }
+  if (/\bmercantil\b|\btpago\b/i.test(combined) || hasCode("0105")) {
+    return "Mercantil";
+  }
+  if (/\bbancamiga\b/i.test(combined) || hasCode("0172")) {
+    return "Bancamiga";
+  }
+  if (/\bbnc\b|nacional\s+de\s+cr[eé]dito/i.test(combined) || hasCode("0191")) {
+    return "BNC (Banco Nacional de Cr\xE9dito)";
+  }
+  if (/\bbancaribe\b/i.test(combined) || hasCode("0114")) {
+    return "Bancaribe";
+  }
+  if (/\bbanplus\b/i.test(combined) || hasCode("0174")) {
+    return "Banplus";
+  }
+  if (/\bbicentenario\b/i.test(combined) || hasCode("0175")) {
+    return "Banco Bicentenario";
+  }
+  if (/banco\s+del\s+tesoro|\btesoro\b/i.test(combined) || hasCode("0163")) {
+    return "Banco del Tesoro";
+  }
+  for (const bank of VENEZUELAN_BANKS) {
+    if (bank.patterns.some((rx) => rx.test(combined)) || bank.codes.some((code) => hasCode(code))) {
+      return bank.canonical;
+    }
+  }
+  if (cleanExtraido && !/^(origen|destino|emisor|receptor|beneficiario|banco|cuenta|null|n\/a)$/i.test(cleanExtraido)) {
+    return cleanExtraido;
+  }
+  return "";
 }
 function extractMontoTextoExacto(val) {
   const clean = cleanNullableString(val);
@@ -4395,14 +4493,21 @@ function auditAndNormalizeReceiptPayload(rawInput) {
     rif = null;
   }
   const rawMontoTextoInput = cleanNullableString(
-    datosSub.monto_texto ?? raw.monto_texto ?? raw.monto_texto_original ?? raw.monto_bs_formateado
+    raw.montoRaw ?? datosSub.montoRaw ?? datosSub.monto_texto ?? raw.monto_texto ?? raw.monto_texto_original ?? raw.monto_bs_formateado
   );
-  const rawMontoNumInput = datosSub.monto_numerico ?? raw.monto_numerico ?? raw.monto_bs ?? raw.monto;
-  const montoBs = parseVenezuelanMonto(rawMontoNumInput) ?? parseVenezuelanMonto(rawMontoTextoInput);
-  const exactMontoTexto = montoBs !== null ? extractMontoTextoExacto(rawMontoTextoInput) ?? extractMontoTextoExacto(typeof rawMontoNumInput === "string" ? rawMontoNumInput : null) ?? new Intl.NumberFormat("es-VE", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2
-  }).format(montoBs) : null;
+  const rawMontoNumInput = raw.montoNumerico ?? datosSub.montoNumerico ?? datosSub.monto_numerico ?? raw.monto_numerico ?? raw.monto_bs ?? raw.monto;
+  const parsedFromTexto = parseVenezuelanMonto(rawMontoTextoInput);
+  const parsedFromNum = parseVenezuelanMonto(rawMontoNumInput);
+  let montoBs = null;
+  if (parsedFromTexto !== null && parsedFromNum !== null) {
+    if (parsedFromTexto > parsedFromNum && Math.abs(parsedFromTexto / parsedFromNum - 1e3) < 15) {
+      montoBs = parsedFromTexto;
+    } else {
+      montoBs = parsedFromNum;
+    }
+  } else {
+    montoBs = parsedFromTexto ?? parsedFromNum ?? null;
+  }
   const codigoAutorizacion = normalizeReferenciaBancaria(
     raw.codigo_autorizacion ?? raw.codigoAutorizacion ?? datosSub.codigo_autorizacion
   );
@@ -4410,9 +4515,30 @@ function auditAndNormalizeReceiptPayload(rawInput) {
     datosSub.numero_referencia ?? raw.numero_referencia ?? raw.referencia ?? raw.nro_referencia
   );
   const nroReferencia = primaryReferencia ?? codigoAutorizacion ?? null;
-  const rawCuentaInput = datosSub.numero_cuenta ?? datosSub.cuenta_origen_o_destino ?? raw.numero_cuenta ?? raw.cuenta_origen_o_destino ?? raw.cuenta_enmascarada ?? raw.cuenta_origen ?? raw.cuenta_destino;
-  const numeroCuenta = extractNumeroCuentaVenezolana(rawCuentaInput) ?? cleanNullableString(rawCuentaInput);
+  const rawCuentaInput = datosSub.numero_cuenta ?? datosSub.cuenta_origen_o_destino ?? raw.numero_cuenta ?? raw.cuenta ?? raw.cuenta_origen_o_destino ?? raw.cuenta_enmascarada ?? raw.cuenta_origen ?? raw.cuenta_destino;
   const rawLineasCrudas = Array.isArray(evidenciaSub.lineas_crudas_detectadas) ? evidenciaSub.lineas_crudas_detectadas.map((l) => String(l ?? "").trim()).filter(Boolean) : Array.isArray(raw.lineas_crudas_detectadas) ? raw.lineas_crudas_detectadas.map((l) => String(l ?? "").trim()).filter(Boolean) : [];
+  const rawTextoCompleto = cleanNullableString(
+    raw.texto_completo ?? raw.textoCompleto ?? datosSub.texto_completo
+  );
+  const fullContextString = [
+    rawTextoCompleto || "",
+    rawLineasCrudas.join(" "),
+    cleanNullableString(raw.canal) || "",
+    cleanNullableString(raw.plataforma_canal) || "",
+    cleanNullableString(datosSub.plataforma_canal) || "",
+    cleanNullableString(rawCuentaInput) || ""
+  ].filter(Boolean).join(" ");
+  const numeroCuenta = extractNumeroCuentaVenezolana(rawCuentaInput) ?? extractNumeroCuentaVenezolana(fullContextString) ?? cleanNullableString(rawCuentaInput);
+  if (montoBs === null && fullContextString) {
+    const fallbackMoneyMatch = fullContextString.replace(/(\d)\s*([.,])\s*(\d)/g, "$1$2$3").match(/\b(\d{1,3}(?:\.\d{3})+,\d{2}|\d{1,3}(?:,\d{3})+\.\d{2}|\d{2,10},\d{2})\b/);
+    if (fallbackMoneyMatch) {
+      montoBs = parseVenezuelanMonto(fallbackMoneyMatch[1]);
+    }
+  }
+  const exactMontoTexto = montoBs !== null ? extractMontoTextoExacto(rawMontoTextoInput) ?? extractMontoTextoExacto(typeof rawMontoNumInput === "string" ? rawMontoNumInput : null) ?? new Intl.NumberFormat("es-VE", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(montoBs) : null;
   const rawCanalInput = cleanNullableString(
     datosSub.plataforma_canal ?? raw.plataforma_canal ?? raw.canal ?? datosSub.canal
   );
@@ -4420,11 +4546,18 @@ function auditAndNormalizeReceiptPayload(rawInput) {
     datosSub.banco_identificado ?? raw.banco_identificado ?? raw.banco ?? raw.banco_origen ?? raw.banco_destino,
     numeroCuenta || datosSub.codigo_banco || raw.codigo_banco,
     rawCanalInput ?? raw.metodo_pago,
-    rawLineasCrudas.join(" ")
+    fullContextString
+  );
+  const inferredBank = inferirBancoVenezolano(
+    cleanNullableString(
+      datosSub.banco_identificado ?? raw.banco_identificado ?? raw.banco ?? raw.banco_origen ?? raw.banco_destino
+    ),
+    fullContextString,
+    numeroCuenta
   );
   const bancoOrigen = normalizeVenezuelanBank(raw.banco_origen);
   const bancoDestino = normalizeVenezuelanBank(raw.banco_destino);
-  const bancoPrincipal = normalizeVenezuelanBank(raw.banco) || bancoOrigen || bancoDestino || bankDetails.legacy_banco || bankDetails.banco_identificado || null;
+  const bancoPrincipal = inferredBank || normalizeVenezuelanBank(raw.banco) || bancoOrigen || bancoDestino || bankDetails.legacy_banco || bankDetails.banco_identificado || null;
   const rawObservacion = cleanNullableString(
     raw.observacion_auditoria ?? raw.observacion_ia ?? raw.motivo_revision
   );
@@ -4507,6 +4640,8 @@ function auditAndNormalizeReceiptPayload(rawInput) {
     banco_origen: bancoOrigen,
     banco_destino: bancoDestino,
     monto_bs: montoBs,
+    montoRaw: exactMontoTexto,
+    montoNumerico: montoBs,
     monto_texto_original: rawMontoTextoInput || (montoBs !== null ? `Bs. ${new Intl.NumberFormat("es-VE", {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2
@@ -4516,6 +4651,8 @@ function auditAndNormalizeReceiptPayload(rawInput) {
     codigo_autorizacion: codigoAutorizacion,
     fecha_pago,
     fecha_iso,
+    numero_cuenta: numeroCuenta,
+    texto_completo: fullContextString || null,
     titular_remitente: titular,
     rif_ci_titular: rif,
     beneficiario_detectado: beneficiario,
@@ -4623,7 +4760,7 @@ function parseVenezuelanReceiptText(rawText) {
       const line = lines[i].replace(/(\d)\s*([.,])\s*(\d)/g, "$1$2$3");
       if (/comisi[oó]n|iva\b|tasa\b/i.test(line)) continue;
       const standaloneMoneyMatch = line.match(
-        /\b(\d{1,3}(?:\.\d{3})+,\d{2}|\d{1,3}(?:,\d{3})+\.\d{2}|\d{2,10},\d{2})\b/
+        /\b(\d{1,3}(?:\.\d{3})+[.,]\d{2}|\d{1,3}(?:,\d{3})+[.,]\d{2}|\d{2,10},\d{2})\b/
       );
       if (standaloneMoneyMatch) {
         const candidate = parseVenezuelanMonto(standaloneMoneyMatch[1]);
@@ -4750,19 +4887,24 @@ function parseVenezuelanReceiptText(rawText) {
   }
   const metodoPago = normalizeMetodoPago("", fullText);
   const resolvedRef = nroReferencia ?? codigoAutorizacion ?? null;
-  const canalDetectado = /\bprovinet\b/i.test(fullText) || numeroCuentaDetectada && numeroCuentaDetectada.startsWith("0108") ? "Provinet" : null;
-  const esLegible = Boolean(montoBs && montoBs > 0 || resolvedRef || fechaPago || banco || canalDetectado || numeroCuentaDetectada);
+  const inferredBanco = inferirBancoVenezolano(banco, fullText, numeroCuentaDetectada) || banco;
+  const canalDetectado = /\bprovinet\b|\bprovlnet\b|\bprovinel\b/i.test(fullText) || numeroCuentaDetectada && numeroCuentaDetectada.startsWith("0108") || inferredBanco === "BBVA Provincial" ? "Provinet" : null;
+  const esLegible = Boolean(
+    montoBs && montoBs > 0 || resolvedRef || fechaPago || inferredBanco || canalDetectado || numeroCuentaDetectada
+  );
   return auditAndNormalizeReceiptPayload({
     es_legible: esLegible,
     legible: esLegible,
     confianza: montoBs && resolvedRef ? 0.9 : 0.65,
     confianza_lectura: montoBs && resolvedRef ? "alta" : "media",
     metodo_pago: metodoPago,
-    banco,
+    banco: inferredBanco,
     canal: canalDetectado,
     banco_origen: bancoOrigen,
     banco_destino: bancoDestino,
     monto_bs: montoBs,
+    montoRaw: montoTextoExacto,
+    montoNumerico: montoBs,
     monto_texto: montoTextoExacto,
     monto_texto_original: montoTextoOriginal,
     referencia: resolvedRef,
@@ -4771,6 +4913,7 @@ function parseVenezuelanReceiptText(rawText) {
     fecha_pago: fechaPago,
     fecha_iso: fechaIso,
     numero_cuenta: numeroCuentaDetectada,
+    texto_completo: fullText,
     titular_remitente: titularRemitente,
     rif_ci_titular: rifCiTitular,
     beneficiario_detectado: beneficiarioDetectado,
@@ -8558,10 +8701,10 @@ async function startServer() {
           fileName
         });
         const audited = geminiExtraction.audited;
-        const hasAnyAiField = Boolean(
-          audited && (audited.es_legible || audited.legible || audited.lectura_exitosa || audited.monto_bs || audited.referencia || audited.fecha_pago || audited.fecha_iso || audited.banco || audited.canal)
+        const hasCompleteAiFields = Boolean(
+          audited && audited.banco && audited.monto_bs && audited.monto_bs > 0 && audited.referencia
         );
-        if (audited && hasAnyAiField) {
+        if (audited && hasCompleteAiFields) {
           return res.json({
             ...audited,
             es_legible: true,
@@ -8618,16 +8761,47 @@ async function startServer() {
       } catch (localOcrErr) {
         console.warn("[OCR COBROS LOCAL] Advertencia en motor local PDF/Tesseract:", localOcrErr?.message);
       }
-      const hasAnyFallbackField = Boolean(
-        fallbackResult && (fallbackResult.es_legible || fallbackResult.legible || fallbackResult.lectura_exitosa || fallbackResult.monto_bs || fallbackResult.referencia || fallbackResult.fecha_pago || fallbackResult.fecha_iso || fallbackResult.banco || fallbackResult.canal)
-      );
-      if (fallbackResult && hasAnyFallbackField) {
-        return res.json({
+      if (aiResult || fallbackResult) {
+        const mergedTexto = [
+          aiResult?.texto_completo || "",
+          fallbackResult?.texto_completo || "",
+          aiResult?.canal || "",
+          fallbackResult?.canal || ""
+        ].filter(Boolean).join(" ");
+        const mergedCuenta = aiResult?.numero_cuenta || aiResult?.datos_extraidos?.numero_cuenta || fallbackResult?.numero_cuenta || fallbackResult?.datos_extraidos?.numero_cuenta || null;
+        const mergedBanco = inferirBancoVenezolano(
+          aiResult?.banco || fallbackResult?.banco || null,
+          mergedTexto,
+          mergedCuenta
+        ) || aiResult?.banco || fallbackResult?.banco || null;
+        const mergedMontoNum = parseMontoVenezolano(aiResult?.montoRaw ?? aiResult?.montoNumerico ?? aiResult?.monto_bs) || parseMontoVenezolano(fallbackResult?.montoRaw ?? fallbackResult?.montoNumerico ?? fallbackResult?.monto_bs) || null;
+        const mergedMontoRaw = aiResult?.montoRaw || fallbackResult?.montoRaw || (mergedMontoNum ? new Intl.NumberFormat("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(mergedMontoNum) : null);
+        const baseObj = aiResult || fallbackResult;
+        const combined = auditAndNormalizeReceiptPayload({
           ...fallbackResult,
-          es_legible: true,
-          legible: true,
-          lectura_exitosa: true
+          ...aiResult,
+          banco: mergedBanco,
+          canal: aiResult?.canal || fallbackResult?.canal || (mergedBanco === "BBVA Provincial" ? "Provinet" : null),
+          monto_bs: mergedMontoNum,
+          montoNumerico: mergedMontoNum,
+          montoRaw: mergedMontoRaw,
+          referencia: aiResult?.referencia || fallbackResult?.referencia || null,
+          fecha_pago: aiResult?.fecha_pago || fallbackResult?.fecha_pago || null,
+          fecha_iso: aiResult?.fecha_iso || fallbackResult?.fecha_iso || null,
+          numero_cuenta: mergedCuenta,
+          texto_completo: mergedTexto || baseObj.texto_completo || null
         });
+        const hasAnyCombinedField = Boolean(
+          combined.es_legible || combined.legible || combined.lectura_exitosa || combined.monto_bs || combined.referencia || combined.fecha_pago || combined.fecha_iso || combined.banco || combined.canal
+        );
+        if (hasAnyCombinedField) {
+          return res.json({
+            ...combined,
+            es_legible: true,
+            legible: true,
+            lectura_exitosa: true
+          });
+        }
       }
       if (aiResult) {
         return res.status(422).json({

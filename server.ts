@@ -43,6 +43,8 @@ import {
   safeExtractReceiptJson,
   auditAndNormalizeReceiptPayload,
   parseVenezuelanReceiptText,
+  parseMontoVenezolano,
+  inferirBancoVenezolano,
   AuditedReceiptResult
 } from "./src/services/venezuelanReceiptAuditor";
 
@@ -2819,19 +2821,14 @@ async function startServer() {
         });
 
         const audited = geminiExtraction.audited;
-        const hasAnyAiField = Boolean(
+        const hasCompleteAiFields = Boolean(
           audited &&
-            (audited.es_legible ||
-              audited.legible ||
-              audited.lectura_exitosa ||
-              audited.monto_bs ||
-              audited.referencia ||
-              audited.fecha_pago ||
-              audited.fecha_iso ||
-              audited.banco ||
-              audited.canal)
+            audited.banco &&
+            audited.monto_bs &&
+            audited.monto_bs > 0 &&
+            audited.referencia
         );
-        if (audited && hasAnyAiField) {
+        if (audited && hasCompleteAiFields) {
           return res.json({
             ...audited,
             es_legible: true,
@@ -2846,7 +2843,7 @@ async function startServer() {
       }
 
       // MOTOR SECUNDARIO DETERMINISTA / OCR LOCAL (PDF Digital + Tesseract.js en Español)
-      // Garantiza extracción continua incluso sin GEMINI_API_KEY o ante caída/cuota de API externa
+      // Garantiza extracción continua o complementa campos faltantes (ej. banco o monto en recortes sin etiquetas)
       let fallbackResult: AuditedReceiptResult | null = null;
       try {
         if (actualMime === "application/pdf") {
@@ -2892,25 +2889,77 @@ async function startServer() {
         console.warn("[OCR COBROS LOCAL] Advertencia en motor local PDF/Tesseract:", localOcrErr?.message);
       }
 
-      const hasAnyFallbackField = Boolean(
-        fallbackResult &&
-          (fallbackResult.es_legible ||
-            fallbackResult.legible ||
-            fallbackResult.lectura_exitosa ||
-            fallbackResult.monto_bs ||
-            fallbackResult.referencia ||
-            fallbackResult.fecha_pago ||
-            fallbackResult.fecha_iso ||
-            fallbackResult.banco ||
-            fallbackResult.canal)
-      );
-      if (fallbackResult && hasAnyFallbackField) {
-        return res.json({
+      if (aiResult || fallbackResult) {
+        const mergedTexto = [
+          aiResult?.texto_completo || "",
+          fallbackResult?.texto_completo || "",
+          aiResult?.canal || "",
+          fallbackResult?.canal || ""
+        ]
+          .filter(Boolean)
+          .join(" ");
+        const mergedCuenta =
+          aiResult?.numero_cuenta ||
+          aiResult?.datos_extraidos?.numero_cuenta ||
+          fallbackResult?.numero_cuenta ||
+          fallbackResult?.datos_extraidos?.numero_cuenta ||
+          null;
+        const mergedBanco =
+          inferirBancoVenezolano(
+            aiResult?.banco || fallbackResult?.banco || null,
+            mergedTexto,
+            mergedCuenta
+          ) ||
+          aiResult?.banco ||
+          fallbackResult?.banco ||
+          null;
+        const mergedMontoNum =
+          parseMontoVenezolano(aiResult?.montoRaw ?? aiResult?.montoNumerico ?? aiResult?.monto_bs) ||
+          parseMontoVenezolano(fallbackResult?.montoRaw ?? fallbackResult?.montoNumerico ?? fallbackResult?.monto_bs) ||
+          null;
+        const mergedMontoRaw =
+          aiResult?.montoRaw ||
+          fallbackResult?.montoRaw ||
+          (mergedMontoNum
+            ? new Intl.NumberFormat("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(mergedMontoNum)
+            : null);
+
+        const baseObj = aiResult || fallbackResult!;
+        const combined = auditAndNormalizeReceiptPayload({
           ...fallbackResult,
-          es_legible: true,
-          legible: true,
-          lectura_exitosa: true
+          ...aiResult,
+          banco: mergedBanco,
+          canal: aiResult?.canal || fallbackResult?.canal || (mergedBanco === "BBVA Provincial" ? "Provinet" : null),
+          monto_bs: mergedMontoNum,
+          montoNumerico: mergedMontoNum,
+          montoRaw: mergedMontoRaw,
+          referencia: aiResult?.referencia || fallbackResult?.referencia || null,
+          fecha_pago: aiResult?.fecha_pago || fallbackResult?.fecha_pago || null,
+          fecha_iso: aiResult?.fecha_iso || fallbackResult?.fecha_iso || null,
+          numero_cuenta: mergedCuenta,
+          texto_completo: mergedTexto || baseObj.texto_completo || null
         });
+
+        const hasAnyCombinedField = Boolean(
+          combined.es_legible ||
+            combined.legible ||
+            combined.lectura_exitosa ||
+            combined.monto_bs ||
+            combined.referencia ||
+            combined.fecha_pago ||
+            combined.fecha_iso ||
+            combined.banco ||
+            combined.canal
+        );
+
+        if (hasAnyCombinedField) {
+          return res.json({
+            ...combined,
+            es_legible: true,
+            legible: true,
+            lectura_exitosa: true
+          });
+        }
       }
 
       if (aiResult) {
