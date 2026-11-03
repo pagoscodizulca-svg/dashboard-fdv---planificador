@@ -645,11 +645,13 @@ export function parseVenezuelanMonto(val: unknown): number | null {
     }
   }
 
-  // Eliminar símbolos de moneda (Bs., Bs, VES, $, Bolívares) y compactar espacios junto a separadores
+  // Eliminar símbolos de moneda (Bs., Bs, VES, VEB, $, Bolívares), normalizar montos espaciados por OCR ("48 742 49") y compactar espacios junto a separadores
   s = s
-    .replace(/\b(?:bol[ií]vares|bs\.?\s*s?\.?|ves)\b/gi, ' ')
+    .replace(/\b(?:bol[ií]vares|bs\.?\s*s?\.?|ves|veb)\b/gi, ' ')
     .replace(/\$/g, ' ')
     .replace(/(\d)\s*([.,])\s*(\d)/g, '$1$2$3')
+    .replace(/\b(\d{1,3}(?:[\s.]\d{3})+)\s+(\d{2})\b/g, (_m, intP, decP) => `${String(intP).replace(/\s+/g, '.')},${decP}`)
+    .replace(/\b(\d{1,3})\s+(\d{3})([.,]\d{2})\b/g, '$1.$2$3')
     .trim();
 
   // Aislar el primer token numérico monetario válido (evitando capturar otros textos)
@@ -772,11 +774,33 @@ function matchCatalogVenezuelanBank(val: unknown): string | null {
  * (ej. `0108*****40*****7396`) que inicia con un código bancario SUDEBAN de 4 dígitos (`0102`, `0105`, `0108`, `0134`, etc.),
  * conservando exactamente los asteriscos sin adivinar dígitos ocultos (Regla 3).
  */
-export function extractNumeroCuentaVenezolana(val: unknown): string | null {
+export function extractNumeroCuentaVenezolana(val: unknown, contextText?: string): string | null {
   const clean = cleanNullableString(val);
   if (!clean) return null;
 
-  // Compactar espacios accidentales dentro de cuentas enmascaradas (ej. "0108 ***** 40 ***** 7396" -> "0108*****40*****7396")
+  const fullContext = `${clean} ${contextText || ''}`;
+
+  // 1. Reconstruir cuentas enmascaradas de Provinet/Banca en línea donde el OCR de monitor con moiré leyó '*' como '-', ':', '"' o '+'
+  const moireMaskMatch = clean.match(
+    /\b(01\d{2})\s*([*•xX#.\-:"'+~_=]{3,8})\s*(\d{2,4})\s*([*•xX#.\-:"'+~_=]{3,8})\s*(\d{4})\b/
+  );
+  if (moireMaskMatch) {
+    let prefix = moireMaskMatch[1];
+    const midDigits = moireMaskMatch[3];
+    const endDigits = moireMaskMatch[5];
+    const isProvinetCtx = /provinet|provmet|provlnet|provinel|provincial|bbva/i.test(fullContext);
+    if (
+      prefix === '0103' ||
+      prefix === '0100' ||
+      prefix === '0106' ||
+      (isProvinetCtx && /^010\d$/.test(prefix))
+    ) {
+      prefix = '0108';
+    }
+    return `${prefix}*****${midDigits}*****${endDigits}`;
+  }
+
+  // 2. Compactar espacios accidentales dentro de cuentas enmascaradas (ej. "0108 ***** 40 ***** 7396" -> "0108*****40*****7396")
   const compactMasks = clean.replace(
     /\b(01(?:02|04|05|08|14|15|28|34|37|38|51|56|63|68|69|71|72|74|75|77|91))((?:[\s]*[*•xX#.\d-]){8,24})/g,
     (_full, prefix, rest) => `${prefix}${String(rest).replace(/\s+/g, '')}`
@@ -816,10 +840,10 @@ export function inferirBancoVenezolano(
 
   // Reglas explícitas de inferencia obligatoria por plataforma o primeros 4 dígitos SUDEBAN
   const hasCode = (code: string) =>
-    new RegExp(`(?:^|\\b|[^0-9])${code}(?:[*•xX#.-]|\\d|\\b)`).test(cleanCuenta) ||
-    new RegExp(`(?:^|\\b)${code}(?:[*•xX#.-]|\\d{2,}|\\b)`).test(combined);
+    new RegExp(`(?:^|\\b|[^0-9])${code}(?:[*•xX#.:\\-"'+~_=]|\\d|\\b)`).test(cleanCuenta) ||
+    new RegExp(`(?:^|\\b)${code}(?:[*•xX#.:\\-"'+~_=]|\\d{2,}|\\b)`).test(combined);
 
-  if (/\bprovinet\b|\bprovlnet\b|\bprovinel\b|\bprovincial\b|\bbbva\b|dinero\s+r[aá]pido/i.test(combined) || hasCode('0108')) {
+  if (/\bprovinet\b|\bprovmet\b|\bprovlnet\b|\bprovinel\b|\bprovincial\b|\bbbva\b|dinero\s+r[aá]pido/i.test(combined) || hasCode('0108')) {
     return 'BBVA Provincial';
   }
   if (/\bbanescom[oó]vil\b|\bbanesconline\b|\bbanesco\b/i.test(combined) || hasCode('0134')) {
@@ -1308,15 +1332,19 @@ export function auditAndNormalizeReceiptPayload(rawInput: any): AuditedReceiptRe
     .join(' ');
 
   const numeroCuenta =
-    extractNumeroCuentaVenezolana(rawCuentaInput) ??
-    extractNumeroCuentaVenezolana(fullContextString) ??
+    extractNumeroCuentaVenezolana(rawCuentaInput, fullContextString) ??
+    extractNumeroCuentaVenezolana(fullContextString, fullContextString) ??
     cleanNullableString(rawCuentaInput);
 
-  // Si montoBs aún es null pero en texto_completo o lineas_crudas aparece un monto con formato venezolano (ej. "48.742,49"), extraerlo
+  // Si montoBs aún es null pero en texto_completo o lineas_crudas aparece un monto con formato venezolano (ej. "48.742,49" o "48 742 49"), extraerlo
   if (montoBs === null && fullContextString) {
-    const fallbackMoneyMatch = fullContextString
+    const normalizedCtx = fullContextString
       .replace(/(\d)\s*([.,])\s*(\d)/g, '$1$2$3')
-      .match(/\b(\d{1,3}(?:\.\d{3})+,\d{2}|\d{1,3}(?:,\d{3})+\.\d{2}|\d{2,10},\d{2})\b/);
+      .replace(/\b(\d{1,3}(?:[\s.]\d{3})+)\s+(\d{2})\b/g, (_m, intP, decP) => `${String(intP).replace(/\s+/g, '.')},${decP}`)
+      .replace(/\b(\d{1,3})\s+(\d{3})([.,]\d{2})\b/g, '$1.$2$3');
+    const fallbackMoneyMatch = normalizedCtx.match(
+      /\b(\d{1,3}(?:\.\d{3})+,\d{2}|\d{1,3}(?:,\d{3})+\.\d{2}|\d{2,10},\d{2})\b/
+    );
     if (fallbackMoneyMatch) {
       montoBs = parseVenezuelanMonto(fallbackMoneyMatch[1]);
     }
@@ -1386,14 +1414,21 @@ export function auditAndNormalizeReceiptPayload(rawInput: any): AuditedReceiptRe
         : null;
 
   // Regla 4 de Extracción: Marca es_legible / legible = true siempre que exista al menos UNO de los campos
-  // clave (monto_bs, referencia, fecha_pago, banco, canal, cuenta o titular), sin bloquear recortes parciales.
+  // financieros reales (monto_bs, referencia, fecha_pago, banco, plataforma bancaria específica, cuenta o titular),
+  // sin considerar falsos positivos donde solo exista el método genérico "Pago Móvil".
+  const isSpecificPlatformCanal = Boolean(
+    bankDetails.plataforma_canal &&
+      !/^(pago\s*m[oó]vil|transferencia|efectivo|divisas|divisas\s+efectivo|zelle|biopago)$/i.test(
+        bankDetails.plataforma_canal.trim()
+      )
+  );
   const hasCoreOrPartialData = Boolean(
     (montoBs && montoBs > 0) ||
       nroReferencia ||
       fecha_iso ||
       fecha_pago ||
       bancoPrincipal ||
-      bankDetails.plataforma_canal ||
+      isSpecificPlatformCanal ||
       numeroCuenta ||
       titular
   );
@@ -1470,7 +1505,13 @@ export function auditAndNormalizeReceiptPayload(rawInput: any): AuditedReceiptRe
         : 'Lectura parcial completada; se autocompletaron los datos detectados en el comprobante.'
       : 'No se lograron identificar con claridad el monto o la referencia del comprobante.');
 
-  const resolvedCanal = rawCanalInput ?? bankDetails.plataforma_canal ?? null;
+  const rawResolvedCanal = rawCanalInput ?? bankDetails.plataforma_canal ?? null;
+  const resolvedCanal =
+    !legible &&
+    rawResolvedCanal &&
+    /^(pago\s*m[oó]vil|transferencia)$/i.test(rawResolvedCanal.trim())
+      ? null
+      : rawResolvedCanal;
 
   const datosExtraidos: DatosExtraidosSoporte = {
     fecha_operacion: fecha_iso,
@@ -1568,7 +1609,7 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
   // 0. Detectar cuenta bancaria de 20 dígitos o enmascarada con asteriscos (ej. 0108*****40*****7396) y evidencia de etiquetas
   let numeroCuentaDetectada: string | null = null;
   for (const line of lines) {
-    const acc = extractNumeroCuentaVenezolana(line);
+    const acc = extractNumeroCuentaVenezolana(line, fullText);
     if (acc) {
       numeroCuentaDetectada = acc;
       break;
@@ -1637,30 +1678,30 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
       continue;
     }
 
-    // Buscar patrones con símbolo Bs / Bolívares / VES
+    // Buscar patrones con símbolo Bs / Bolívares / VES / VEB
     const bsMatch = line.match(
-      /(?:Bs\.?\s*S?\.?|Bol[ií]vares)\s*[-:]?\s*(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2}|\d{1,3}(?:,\d{3})*\.\d{2})/i
+      /(?:Bs\.?\s*S?\.?|Bol[ií]vares|VE[BS])\s*[-:]?\s*(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2}|\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})/i
     );
     if (bsMatch) {
       const candidate = parseVenezuelanMonto(bsMatch[1]);
       if (candidate && (!montoBs || candidate > montoBs)) {
         montoBs = candidate;
         montoTextoOriginal = bsMatch[0].trim();
-        montoTextoExacto = bsMatch[1].trim();
+        montoTextoExacto = new Intl.NumberFormat('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(candidate);
         montoLineIndex = i;
       }
       continue;
     }
 
     const trailingBsMatch = line.match(
-      /(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})\s*(?:Bs\.?\s*S?\.?|VES)\b/i
+      /(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2}|\d{1,3}(?:,\d{3})*\.\d{2})\s*(?:Bs\.?\s*S?\.?|VE[BS])\b/i
     );
     if (trailingBsMatch) {
       const candidate = parseVenezuelanMonto(trailingBsMatch[1]);
       if (candidate && (!montoBs || candidate > montoBs)) {
         montoBs = candidate;
         montoTextoOriginal = trailingBsMatch[0].trim();
-        montoTextoExacto = trailingBsMatch[1].trim();
+        montoTextoExacto = new Intl.NumberFormat('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(candidate);
         montoLineIndex = i;
       }
       continue;
@@ -1676,17 +1717,22 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
       if (picked && (!montoBs || picked > montoBs)) {
         montoBs = picked;
         montoTextoOriginal = sameLine ? line : lines[i + 1];
-        montoTextoExacto = extractMontoTextoExacto(montoTextoOriginal);
+        montoTextoExacto =
+          extractMontoTextoExacto(montoTextoOriginal) ||
+          new Intl.NumberFormat('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(picked);
         montoLineIndex = sameLine ? i : i + 1;
       }
     }
   }
 
   // Inferencia por patrón (Regla morfológica para soportes recortados sin etiquetas como Provinet):
-  // Si no apareció "Bs." ni "Monto", detectar cifra en formato moneda venezolana con coma o punto y 2 decimales (ej. "48.742,49", "48.742.49" o "576.599,07")
+  // Si no apareció "Bs." ni "Monto", detectar cifra en formato moneda venezolana con coma, punto o espacio por moiré y 2 decimales (ej. "48.742,49", "48 742 49" o "576.599,07")
   if (montoBs === null) {
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].replace(/(\d)\s*([.,])\s*(\d)/g, '$1$2$3');
+      const line = lines[i]
+        .replace(/(\d)\s*([.,])\s*(\d)/g, '$1$2$3')
+        .replace(/\b(\d{1,3}(?:[\s.]\d{3})+)\s+(\d{2})\b/g, (_m, intP, decP) => `${String(intP).replace(/\s+/g, '.')},${decP}`)
+        .replace(/\b(\d{1,3})\s+(\d{3})([.,]\d{2})\b/g, '$1.$2$3');
       if (/comisi[oó]n|iva\b|tasa\b/i.test(line)) continue;
       const standaloneMoneyMatch = line.match(
         /\b(\d{1,3}(?:\.\d{3})+[.,]\d{2}|\d{1,3}(?:,\d{3})+[.,]\d{2}|\d{2,10},\d{2})\b/
@@ -1696,38 +1742,60 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
         if (candidate && (!montoBs || candidate > montoBs)) {
           montoBs = candidate;
           montoTextoOriginal = standaloneMoneyMatch[1];
-          montoTextoExacto = standaloneMoneyMatch[1];
+          montoTextoExacto = new Intl.NumberFormat('es-VE', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+          }).format(candidate);
           montoLineIndex = i;
         }
       }
     }
   }
 
-  // 3. Extraer Fecha Impresa (antes de inferir referencia por posición para conocer la fila de la fecha)
+  // 3. Extraer Fecha Impresa (priorizando "Fecha de la Operación" / "Fecha de Pago" sobre encabezados de impresión)
   let fechaPago: string | null = null;
   let fechaIso: string | null = null;
   let fechaLineIndex = -1;
   for (let i = 0; i < lines.length; i++) {
-    const parsedDates = normalizeReceiptDates(lines[i]);
-    if (parsedDates.fecha_pago && parsedDates.fecha_iso) {
-      fechaPago = parsedDates.fecha_pago;
-      fechaIso = parsedDates.fecha_iso;
-      fechaLineIndex = i;
-      break;
+    if (/fecha\s*(?:de\s*(?:la\s*)?)?(?:operaci[oó]n|pago|transacci[oó]n|valor)/i.test(lines[i])) {
+      const sameLineDates = normalizeReceiptDates(lines[i]);
+      const nextLineDates = lines[i + 1] ? normalizeReceiptDates(lines[i + 1]) : { fecha_pago: null, fecha_iso: null };
+      const chosen = sameLineDates.fecha_pago ? sameLineDates : nextLineDates;
+      if (chosen.fecha_pago && chosen.fecha_iso) {
+        fechaPago = chosen.fecha_pago;
+        fechaIso = chosen.fecha_iso;
+        fechaLineIndex = sameLineDates.fecha_pago ? i : i + 1;
+        break;
+      }
+    }
+  }
+  if (!fechaPago) {
+    for (let i = 0; i < lines.length; i++) {
+      const parsedDates = normalizeReceiptDates(lines[i]);
+      if (parsedDates.fecha_pago && parsedDates.fecha_iso) {
+        fechaPago = parsedDates.fecha_pago;
+        fechaIso = parsedDates.fecha_iso;
+        fechaLineIndex = i;
+        break;
+      }
     }
   }
 
   // 4. Extraer Número de Referencia y Código de Autorización (sin confundir ambos ni con cuentas enmascaradas)
   let nroReferencia: string | null = null;
   let codigoAutorizacion: string | null = null;
-  const authCodeLabelRegex = /c[oó]digo\s*(?:de\s*)?autorizaci[oó]n/i;
+  const authCodeLabelRegex = /c[oó]digo\s*(?:de\s*)?(?:autorizaci[oó]n|autorizador)/i;
   const refLabelRegex =
-    /(n[uú]mero\s+de\s+referencia|nro\.?\s*(?:de\s*)?referencia|referencia|nro\.?\s*(?:de\s*)?operaci[oó]n|n[uú]mero\s+de\s+operaci[oó]n|operaci[oó]n|secuencia|comprobante|c[oó]digo\s+de\s+operaci[oó]n|recibo|folio|control|id\s*(?:de\s*)?transacci[oó]n|aprobaci[oó]n)/i;
+    /(n[uú]mero\s+de\s+referencia|nro\.?\s*(?:de\s*)?referencia|referencia|ref\.?\s*(?:n[°º*o.]?)?|nro\.?\s*(?:de\s*)?operaci[oó]n|n[uú]mero\s+de\s+operaci[oó]n|secuencia|comprobante|c[oó]digo\s+de\s+operaci[oó]n|recibo|folio|control|id\s*(?:de\s*)?transacci[oó]n|aprobaci[oó]n)/i;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (authCodeLabelRegex.test(line)) {
-      const afterAuth = line.replace(authCodeLabelRegex, '').replace(/^[\s:.-]+/, '');
+      const authMatch = line.match(authCodeLabelRegex);
+      const afterAuth =
+        authMatch && authMatch.index !== undefined
+          ? line.slice(authMatch.index + authMatch[0].length).replace(/^[\s:.-]+/, '')
+          : line.replace(authCodeLabelRegex, '').replace(/^[\s:.-]+/, '');
       const sameLineAuth = normalizeReferenciaBancaria(afterAuth);
       if (sameLineAuth) {
         codigoAutorizacion = sameLineAuth;
@@ -1740,9 +1808,14 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
       continue;
     }
 
-    if (!nroReferencia && refLabelRegex.test(line)) {
-      const afterLabel = line.replace(refLabelRegex, '').replace(/^[\s:.-]+/, '');
-      const sameLineDigits = normalizeReferenciaBancaria(afterLabel);
+    if (!nroReferencia && refLabelRegex.test(line) && !/(?:tipo|fecha)\s+de\s+(?:la\s+)?operaci[oó]n/i.test(line)) {
+      const refMatch = line.match(refLabelRegex);
+      const afterLabel =
+        refMatch && refMatch.index !== undefined
+          ? line.slice(refMatch.index + refMatch[0].length).replace(/^[\s:.,*-]+/, '')
+          : line.replace(refLabelRegex, '').replace(/^[\s:.,*-]+/, '');
+      const firstRefToken = afterLabel.match(/^(\d{4,15})\b/);
+      const sameLineDigits = normalizeReferenciaBancaria(firstRefToken ? firstRefToken[1] : afterLabel);
       if (sameLineDigits) {
         nroReferencia = sameLineDigits;
         continue;
@@ -1773,9 +1846,10 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
       // Limpiar fechas, cuentas enmascaradas y montos con decimales de la línea antes de buscar la referencia entera
       const strippedLine = lines[i]
         .replace(/(\d)\s*([.,])\s*(\d)/g, '$1$2$3')
+        .replace(/\b(\d{1,3}(?:[\s.]\d{3})+)\s+(\d{2})\b/g, ' ')
         .replace(/\b\d{1,2}[/-]\d{1,2}[/-](?:20\d{2}|\d{2})\b/g, ' ')
         .replace(/\b20\d{2}[/-]\d{1,2}[/-]\d{1,2}\b/g, ' ')
-        .replace(/\b01\d{2}[*•xX\d-]{8,22}\b/g, ' ')
+        .replace(/\b01\d{2}[*•xX#.\-:"'+~_=\d]{8,24}\b/g, ' ')
         .replace(/\b\d{1,3}(?:[.,]\d{3})+[.,]\d{1,2}\b/g, ' ')
         .replace(/\b\d+[.,]\d{1,2}\b/g, ' ');
 
@@ -1850,11 +1924,10 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
     }
   }
 
-  const metodoPago = normalizeMetodoPago('', fullText);
   const resolvedRef = nroReferencia ?? codigoAutorizacion ?? null;
   const inferredBanco = inferirBancoVenezolano(banco, fullText, numeroCuentaDetectada) || banco;
   const canalDetectado =
-    /\bprovinet\b|\bprovlnet\b|\bprovinel\b/i.test(fullText) ||
+    /\bprovinet\b|\bprovmet\b|\bprovlnet\b|\bprovinel\b/i.test(fullText) ||
     (numeroCuentaDetectada && numeroCuentaDetectada.startsWith('0108')) ||
     inferredBanco === 'BBVA Provincial'
       ? 'Provinet'
@@ -1867,12 +1940,13 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
       canalDetectado ||
       numeroCuentaDetectada
   );
+  const metodoPago = esLegible ? normalizeMetodoPago('', fullText) : null;
 
   return auditAndNormalizeReceiptPayload({
     es_legible: esLegible,
     legible: esLegible,
-    confianza: montoBs && resolvedRef ? 0.9 : 0.65,
-    confianza_lectura: montoBs && resolvedRef ? 'alta' : 'media',
+    confianza: montoBs && resolvedRef ? 0.9 : esLegible ? 0.65 : 0.0,
+    confianza_lectura: montoBs && resolvedRef ? 'alta' : esLegible ? 'media' : 'baja',
     metodo_pago: metodoPago,
     banco: inferredBanco,
     canal: canalDetectado,

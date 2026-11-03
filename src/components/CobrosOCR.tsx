@@ -24,18 +24,19 @@ import {
 import {
   isBeneficiaryName,
   isBeneficiaryRif,
-  normalizeReceiptDates,
-  normalizeMetodoPago,
-  normalizeReferenciaBancaria,
-  parseVenezuelanMonto,
-  parseMontoVenezolano,
-  inferirBancoVenezolano,
   prepareImageForGemini,
   extractSupportWithGemini,
   extractNumeroCuentaVenezolana,
   resolveVenezuelanBankDetails,
   safeExtractReceiptJson
 } from '../services/venezuelanReceiptAuditor';
+import {
+  parseMontoVenezolano,
+  inferirBancoVenezolano,
+  normalizeExtractedReceipt,
+  fileToFullBase64,
+  formatMontoVenezolano
+} from '../services/venezuelanReceiptParser';
 
 // Error Boundary específico para CobrosOCR para evitar que cualquier fallo deje la pantalla en blanco
 interface ErrorBoundaryProps {
@@ -575,11 +576,21 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
     }
 
     try {
-      const prepared = await prepareImageForGemini(finalFile, {
-        minDimension: 1280,
-        maxDimension: 2048,
-        quality: 0.92
-      });
+      // Convertir el archivo original (ej. 93 KB de WhatsApp) íntegro a Base64 sin recortes de canvas ni dependencia del zoom/scroll
+      const rawFileData = await fileToFullBase64(finalFile);
+      const prepared =
+        finalFile.size > 4 * 1024 * 1024
+          ? await prepareImageForGemini(finalFile, {
+              minDimension: 1280,
+              maxDimension: 2048,
+              quality: 0.92
+            })
+          : {
+              base64Data: rawFileData.base64Data,
+              mimeType: rawFileData.mimeType,
+              dataUrl: rawFileData.dataUrl,
+              wasResized: false
+            };
       const isPdfFile = prepared.mimeType === 'application/pdf' || validation.isPdf;
       const resolvedFileName =
         finalFile.name || (isPdfFile ? `comprobante_${Date.now()}.pdf` : `soporte_whatsapp.jpg`);
@@ -614,7 +625,7 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
 
       await processOCR(prepared.base64Data, prepared.mimeType, fallbackFileDateIso);
     } catch (prepErr: any) {
-      console.error('Error en prepareImageForGemini:', prepErr);
+      console.error('Error preparando soporte Base64:', prepErr);
       setIsProcessing(false);
       notifyUser('error', prepErr?.message || 'Error al preparar el archivo de comprobante.', 6000);
     }
@@ -634,7 +645,7 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
     }
   };
 
-  // Auditoría Bancaria y Extracción Financiera Determinista (soporta imágenes JPEG/PNG/WEBP y documentos PDF)
+  // Auditoría Bancaria y Extracción Financiera Determinista usando venezuelanReceiptParser.ts
   const processOCR = async (
     base64: string,
     mimeType: string = 'image/jpeg',
@@ -652,7 +663,6 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
     setProcessingLabel('Analizando soporte de pago...');
     try {
       let data: any = null;
-      let resOk = false;
 
       const clientApiKey =
         (import.meta as any).env?.VITE_GEMINI_API_KEY ||
@@ -668,40 +678,36 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
           },
           body: JSON.stringify({ imageBase64: pureBase64, mimeType })
         });
-        resOk = res.ok;
         const rawBodyText = await res.text();
         data = safeExtractReceiptJson(rawBodyText);
 
-        // Si el backend no logró extraer datos (ej. clave no configurada en servidor) pero hay clave en cliente, reintentar con Gemini directo
+        const serverPreview = normalizeExtractedReceipt(data, fallbackDateIso);
         const hasExtractedServerData = Boolean(
-          data &&
-            (data.es_legible ||
-              data.legible ||
-              data.lectura_exitosa ||
-              data.monto_bs ||
-              data.referencia ||
-              data.fecha_pago ||
-              data.banco ||
-              data.canal)
+          serverPreview.montoNumerico > 0 ||
+            serverPreview.referencia ||
+            serverPreview.banco ||
+            serverPreview.fechaExplicita
         );
+
         if (!hasExtractedServerData && clientApiKey) {
           const directRes = await extractSupportWithGemini({
             apiKeys: [clientApiKey],
             base64Data: pureBase64,
             mimeType
           });
-          if (
-            directRes.audited &&
-            (directRes.audited.es_legible ||
-              directRes.audited.legible ||
-              directRes.audited.lectura_exitosa)
-          ) {
-            data = directRes.audited;
-            resOk = true;
+          if (directRes.audited) {
+            const directPreview = normalizeExtractedReceipt(directRes.audited, fallbackDateIso);
+            if (
+              directPreview.montoNumerico > 0 ||
+              directPreview.referencia ||
+              directPreview.banco ||
+              directPreview.fechaExplicita
+            ) {
+              data = directRes.audited;
+            }
           }
         }
       } catch (networkErr) {
-        // Fallback directo en cliente si el endpoint /api/ocr no responde y existe clave configurada
         if (clientApiKey) {
           const directRes = await extractSupportWithGemini({
             apiKeys: [clientApiKey],
@@ -709,15 +715,17 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
             mimeType
           });
           data = directRes.audited;
-          resOk = Boolean(data?.es_legible || data?.legible || data?.lectura_exitosa);
         } else {
           throw networkErr;
         }
       }
 
       if (!data || typeof data !== 'object') {
-        throw new Error("El servidor devolvió un formato no válido.");
+        throw new Error('El servidor devolvió un formato no válido.');
       }
+
+      // Normalización infalible a través de venezuelanReceiptParser.ts
+      const parsed = normalizeExtractedReceipt(data, fallbackDateIso);
 
       const camposCargados: string[] = [];
       const camposFaltantes: string[] = [];
@@ -729,151 +737,32 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
         cuenta?: boolean;
       } = {};
 
-      const datosExtraidos =
-        data && typeof data.datos_extraidos === 'object' && data.datos_extraidos !== null
-          ? data.datos_extraidos
-          : {};
+      // 1. Método de Pago
+      setMetodoPago(parsed.metodoPago);
 
-      // 1. Método de Pago estricto (seleccionado automáticamente en el selector)
-      const rawMetodoCandidate =
-        data.metodo_pago ??
-        data.canal ??
-        datosExtraidos.plataforma_canal ??
-        data.plataforma_canal ??
-        null;
-      if (rawMetodoCandidate && rawMetodoCandidate !== 'null') {
-        const normalizedMetodo = normalizeMetodoPago(
-          rawMetodoCandidate,
-          `${data.observacion_auditoria || ''} ${data.observacion_ia || ''} ${data.motivo_revision || ''}`
-        );
-        setMetodoPago(normalizedMetodo);
-        if (resOk || (data.es_legible !== false && data.legible !== false && data.lectura_exitosa !== false)) {
-          camposCargados.push(normalizedMetodo);
-        }
-      }
-
-      // 2. Cuenta / Canal (conserva asteriscos exactos como 0108*****40*****7396 o canal como Provinet / BanescOnline)
-      const rawCuentaMask =
-        datosExtraidos.numero_cuenta ??
-        data.cuenta_origen_o_destino ??
-        data.numero_cuenta ??
-        data.cuenta ??
-        null;
-      const rawCanal =
-        data.canal ??
-        datosExtraidos.plataforma_canal ??
-        data.plataforma_canal ??
-        null;
-      const resolvedCuentaCanal =
-        (rawCuentaMask && rawCuentaMask !== 'null' ? String(rawCuentaMask).trim() : '') ||
-        (rawCanal && rawCanal !== 'null' ? String(rawCanal).trim() : '');
-
-      if (resolvedCuentaCanal) {
-        setCuentaCanal(resolvedCuentaCanal);
-        camposCargados.push(`Cuenta/Canal: ${resolvedCuentaCanal}`);
+      // 2. Cuenta / Canal (solo si existe cuenta enmascarada o canal real distinto de "Pago Móvil")
+      if (parsed.cuentaEnmascarada) {
+        setCuentaCanal(parsed.cuentaEnmascarada);
+        camposCargados.push(`Cuenta/Canal: ${parsed.cuentaEnmascarada}`);
       } else {
         setCuentaCanal('');
       }
 
-      // Contexto textual completo del comprobante para inferencia de respaldo
-      const lineasEvidencia = Array.isArray(data?.evidencia_visual?.lineas_crudas_detectadas)
-        ? data.evidencia_visual.lineas_crudas_detectadas.join(' ')
-        : '';
-      const textoCompletoSoporte = [
-        data.texto_completo || '',
-         data.textoCompleto || '',
-        lineasEvidencia,
-        rawCanal || '',
-        rawCuentaMask || '',
-        data.observacion_auditoria || '',
-        data.observacion_ia || ''
-      ]
-        .filter(Boolean)
-        .join(' ');
-
-      // 3. Banco normalizado con inferirBancoVenezolano (inferencia obligatoria por Provinet / 0108 / códigos SUDEBAN)
-      const rawBancoExtraido =
-        data.banco ??
-        datosExtraidos.banco_identificado ??
-        data.banco_identificado ??
-        data.banco_origen ??
-        data.banco_destino ??
-        datosExtraidos.codigo_banco ??
-        data.codigo_banco ??
-        null;
-
-      const bancoInferido = inferirBancoVenezolano(
-        rawBancoExtraido && rawBancoExtraido !== 'null' ? String(rawBancoExtraido) : '',
-        textoCompletoSoporte,
-        resolvedCuentaCanal
-      );
-      const deducedBankInfo = resolveVenezuelanBankDetails(
-        rawBancoExtraido,
-        rawCanal,
-        rawCuentaMask,
-        textoCompletoSoporte
-      );
-      const resolvedBanco =
-        bancoInferido ||
-        deducedBankInfo.banco_identificado ||
-        (rawBancoExtraido && rawBancoExtraido !== 'null' ? String(rawBancoExtraido).trim() : null);
-
-      if (resolvedBanco && resolvedBanco !== 'null') {
-        const cleanBanco = String(resolvedBanco).trim();
-        setBanco(cleanBanco);
+      // 3. Banco normalizado (ej. "BBVA Provincial" inferido por "Provinet" o "0108*****40*****7396")
+      if (parsed.banco) {
+        setBanco(parsed.banco);
         nextMissing.banco = false;
-        if (cleanBanco) camposCargados.push(cleanBanco);
+        camposCargados.push(parsed.banco);
       } else {
         setBanco('');
         nextMissing.banco = true;
         camposFaltantes.push('Banco');
       }
 
-      // 4. Monto en Bolívares usando parseMontoVenezolano ("48.742,49" -> 48742.49) sobre montoRaw y montoNumerico
-      const candidateMontos = [
-        data.montoRaw,
-        datosExtraidos.montoRaw,
-        datosExtraidos.monto_texto,
-        data.monto_texto,
-        data.monto_texto_original,
-        data.montoNumerico,
-        datosExtraidos.montoNumerico,
-        datosExtraidos.monto_numerico,
-        data.monto_numerico,
-        data.monto_bs,
-        data.monto
-      ];
-
-      let coherentMonto = 0;
-      const parsedFromRawStr = parseMontoVenezolano(
-        data.montoRaw ?? datosExtraidos.montoRaw ?? datosExtraidos.monto_texto ?? data.monto_texto ?? data.monto_texto_original
-      );
-      const parsedFromNumeric = parseMontoVenezolano(
-        data.montoNumerico ?? datosExtraidos.montoNumerico ?? datosExtraidos.monto_numerico ?? data.monto_numerico ?? data.monto_bs ?? data.monto
-      );
-
-      if (parsedFromRawStr > 0 && parsedFromNumeric > 0) {
-        // Si montoRaw ("48.742,49" -> 48742.49) difiere por factor ~1000 de montoNumerico (48.74), priorizar montoRaw
-        coherentMonto =
-          parsedFromRawStr > parsedFromNumeric && Math.abs(parsedFromRawStr / parsedFromNumeric - 1000) < 15
-            ? parsedFromRawStr
-            : parsedFromNumeric;
-      } else {
-        for (const cand of candidateMontos) {
-          const val = parseMontoVenezolano(cand);
-          if (val > 0) {
-            coherentMonto = val;
-            break;
-          }
-        }
-      }
-
-      if (coherentMonto > 0) {
-        const formattedMonto = new Intl.NumberFormat('es-VE', {
-          minimumFractionDigits: 2,
-          maximumFractionDigits: 2
-        }).format(coherentMonto);
-        setMontoNumerico(coherentMonto);
+      // 4. Monto en Bolívares ("48.742,49" -> 48742.49)
+      if (parsed.montoNumerico > 0) {
+        const formattedMonto = formatMontoVenezolano(parsed.montoNumerico);
+        setMontoNumerico(parsed.montoNumerico);
         setMontoDisplay(formattedMonto);
         nextMissing.monto = false;
         camposCargados.push(`Bs. ${formattedMonto}`);
@@ -884,50 +773,29 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
         camposFaltantes.push('Monto');
       }
 
-      // 5. Número de Referencia (conservando TODOS los ceros a la izquierda, ej. "000019111")
-      const resolvedRef =
-        normalizeReferenciaBancaria(
-          datosExtraidos.numero_referencia ??
-            data.numero_referencia ??
-            data.referencia ??
-            data.nro_referencia
-        ) ?? normalizeReferenciaBancaria(data.codigo_autorizacion);
-
-      if (resolvedRef) {
-        setReferencia(resolvedRef);
-        camposCargados.push(`Ref: ${resolvedRef}`);
+      // 5. Número de Referencia (ej. "000012723" conservando ceros a la izquierda)
+      if (parsed.referencia) {
+        setReferencia(parsed.referencia);
+        nextMissing.referencia = false;
+        camposCargados.push(`Ref: ${parsed.referencia}`);
       } else {
         setReferencia('');
         nextMissing.referencia = true;
         camposFaltantes.push('Referencia');
       }
 
-      // 6. Fecha del comprobante (si viene null porque fue recortada en la foto, marca aviso en Fecha sin bloquear)
-      const rawFechaOriginal =
-        datosExtraidos.fecha_original ?? data.fecha_original ?? data.fecha_pago;
-      const rawFechaOperacionIso =
-        datosExtraidos.fecha_operacion ?? data.fecha_operacion ?? data.fecha_iso;
-      const normalizedDates = normalizeReceiptDates(rawFechaOriginal, rawFechaOperacionIso);
-      const explicitIsoDate =
-        rawFechaOperacionIso && /^\d{4}-\d{2}-\d{2}$/.test(String(rawFechaOperacionIso).trim())
-          ? String(rawFechaOperacionIso).trim()
-          : normalizedDates.fecha_iso;
-      const effectiveIsoDate =
-        explicitIsoDate || fallbackDateIso || new Date().toISOString().split('T')[0];
-
-      if (explicitIsoDate) {
-        setFechaPago(explicitIsoDate);
-        camposCargados.push(`Fecha: ${normalizedDates.fecha_pago || explicitIsoDate}`);
+      // 6. Fecha del comprobante (ej. "23/10/2026" -> "2026-10-23")
+      setFechaPago(parsed.fecha);
+      if (parsed.fechaExplicita) {
+        nextMissing.fecha = false;
+        camposCargados.push(`Fecha: ${parsed.fechaDisplay}`);
       } else {
-        setFechaPago(effectiveIsoDate);
-        nextMissing.fecha = true;
-        camposFaltantes.push('Fecha (no visible en recorte)');
+        nextMissing.fecha = false;
       }
 
-      if (effectiveIsoDate) {
-        // Consultar tasa oficial BCV correspondiente a la fecha del comprobante
+      if (parsed.fecha) {
         try {
-          const rateRes = await fetch(`/api/tasa-bcv?date=${effectiveIsoDate}`);
+          const rateRes = await fetch(`/api/tasa-bcv?date=${parsed.fecha}`);
           if (rateRes.ok) {
             const rateText = await rateRes.text();
             if (rateText.trim().startsWith('{') || rateText.includes('```')) {
@@ -938,18 +806,17 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
             }
           }
         } catch (rErr) {
-          console.warn("No se pudo autocompletar la tasa:", rErr);
+          console.warn('No se pudo autocompletar la tasa:', rErr);
         }
       }
 
       // 7. Distinción estricta Emisor vs. Beneficiario (NUNCA colocar CODIZULCA en Titular / RIF)
-      const resolvedTitular = data.titular_remitente ?? data.titular ?? null;
+      const resolvedTitular = parsed.titular ?? data.titular_remitente ?? data.titular ?? null;
       if (resolvedTitular && resolvedTitular !== 'null' && !isBeneficiaryName(String(resolvedTitular))) {
         const titularStr = String(resolvedTitular).trim();
         setTitular(titularStr);
         if (titularStr) camposCargados.push(`Remitente: ${titularStr}`);
 
-        // Auto-vincular cliente si no se ha seleccionado y coincide con el emisor real
         if (!codigoCliente && titularStr.length > 3) {
           const tClean = titularStr.toLowerCase();
           const match = clientes.find(c => {
@@ -968,7 +835,7 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
         setTitular('');
       }
 
-      const resolvedRif = data.rif_ci_titular ?? data.rif ?? null;
+      const resolvedRif = parsed.rif ?? data.rif_ci_titular ?? data.rif ?? null;
       if (resolvedRif && resolvedRif !== 'null' && !isBeneficiaryRif(String(resolvedRif))) {
         const cleanRif = String(resolvedRif).trim();
         setRifTitular(cleanRif);
@@ -979,32 +846,24 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
 
       setMissingFields(nextMissing);
 
-      // Verificar si se extrajo al menos un campo financiero real (permitiendo lecturas parciales sin lanzar error general)
       const tieneDatosFinancierosExtraidos = Boolean(
-        (resolvedBanco && resolvedBanco !== 'null') ||
-          (coherentMonto !== null && coherentMonto > 0) ||
-          resolvedRef ||
-          explicitIsoDate ||
-          resolvedCuentaCanal ||
+        parsed.banco ||
+          parsed.montoNumerico > 0 ||
+          parsed.referencia ||
+          parsed.fechaExplicita ||
+          parsed.cuentaEnmascarada ||
           (resolvedTitular && resolvedTitular !== 'null' && !isBeneficiaryName(String(resolvedTitular)))
       );
 
       if (!tieneDatosFinancierosExtraidos) {
         setMissingFields({
-          fecha: true,
           referencia: true,
           monto: true,
           banco: true
         });
-        const reason =
-          data.motivo_revision ||
-          data.observacion_auditoria ||
-          data.observacion_ia ||
-          data.error ||
-          'No se detectaron datos legibles en la imagen.';
         notifyUser(
           'info',
-          `Lectura asistida: ${reason} Completa los campos resaltados en ámbar o presiona "Reintentar lectura".`,
+          'No se detectaron datos legibles en la imagen. Completa los campos resaltados o presiona "Reintentar lectura".',
           6500
         );
         return;
@@ -1013,8 +872,8 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
       if (camposFaltantes.length > 0) {
         notifyUser(
           'info',
-          `Datos extraídos (${camposCargados.join(' • ')}). Completa manualmente: ${camposFaltantes.join(', ')}.`,
-          6500
+          `Datos cargados (${camposCargados.join(' • ')}). Verifica: ${camposFaltantes.join(', ')}.`,
+          6000
         );
       } else {
         notifyUser(

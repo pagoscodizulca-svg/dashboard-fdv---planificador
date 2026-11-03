@@ -4121,7 +4121,7 @@ function parseVenezuelanMonto(val) {
       return null;
     }
   }
-  s = s.replace(/\b(?:bol[ií]vares|bs\.?\s*s?\.?|ves)\b/gi, " ").replace(/\$/g, " ").replace(/(\d)\s*([.,])\s*(\d)/g, "$1$2$3").trim();
+  s = s.replace(/\b(?:bol[ií]vares|bs\.?\s*s?\.?|ves|veb)\b/gi, " ").replace(/\$/g, " ").replace(/(\d)\s*([.,])\s*(\d)/g, "$1$2$3").replace(/\b(\d{1,3}(?:[\s.]\d{3})+)\s+(\d{2})\b/g, (_m, intP, decP) => `${String(intP).replace(/\s+/g, ".")},${decP}`).replace(/\b(\d{1,3})\s+(\d{3})([.,]\d{2})\b/g, "$1.$2$3").trim();
   const moneyMatch = s.match(/(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)/);
   if (!moneyMatch) return null;
   s = moneyMatch[1];
@@ -4195,9 +4195,23 @@ function matchCatalogVenezuelanBank(val) {
   if (/\bchase\b/i.test(clean)) return "Chase";
   return null;
 }
-function extractNumeroCuentaVenezolana(val) {
+function extractNumeroCuentaVenezolana(val, contextText) {
   const clean = cleanNullableString(val);
   if (!clean) return null;
+  const fullContext = `${clean} ${contextText || ""}`;
+  const moireMaskMatch = clean.match(
+    /\b(01\d{2})\s*([*•xX#.\-:"'+~_=]{3,8})\s*(\d{2,4})\s*([*•xX#.\-:"'+~_=]{3,8})\s*(\d{4})\b/
+  );
+  if (moireMaskMatch) {
+    let prefix = moireMaskMatch[1];
+    const midDigits = moireMaskMatch[3];
+    const endDigits = moireMaskMatch[5];
+    const isProvinetCtx = /provinet|provmet|provlnet|provinel|provincial|bbva/i.test(fullContext);
+    if (prefix === "0103" || prefix === "0100" || prefix === "0106" || isProvinetCtx && /^010\d$/.test(prefix)) {
+      prefix = "0108";
+    }
+    return `${prefix}*****${midDigits}*****${endDigits}`;
+  }
   const compactMasks = clean.replace(
     /\b(01(?:02|04|05|08|14|15|28|34|37|38|51|56|63|68|69|71|72|74|75|77|91))((?:[\s]*[*•xX#.\d-]){8,24})/g,
     (_full, prefix, rest) => `${prefix}${String(rest).replace(/\s+/g, "")}`
@@ -4219,8 +4233,8 @@ function inferirBancoVenezolano(bancoExtraido, textoCompleto, cuenta) {
   const cleanCuenta = cleanNullableString(cuenta) || "";
   const combined = [cleanExtraido || "", cleanCuenta, cleanTexto].filter(Boolean).join(" ");
   if (!combined) return "";
-  const hasCode = (code) => new RegExp(`(?:^|\\b|[^0-9])${code}(?:[*\u2022xX#.-]|\\d|\\b)`).test(cleanCuenta) || new RegExp(`(?:^|\\b)${code}(?:[*\u2022xX#.-]|\\d{2,}|\\b)`).test(combined);
-  if (/\bprovinet\b|\bprovlnet\b|\bprovinel\b|\bprovincial\b|\bbbva\b|dinero\s+r[aá]pido/i.test(combined) || hasCode("0108")) {
+  const hasCode = (code) => new RegExp(`(?:^|\\b|[^0-9])${code}(?:[*\u2022xX#.:\\-"'+~_=]|\\d|\\b)`).test(cleanCuenta) || new RegExp(`(?:^|\\b)${code}(?:[*\u2022xX#.:\\-"'+~_=]|\\d{2,}|\\b)`).test(combined);
+  if (/\bprovinet\b|\bprovmet\b|\bprovlnet\b|\bprovinel\b|\bprovincial\b|\bbbva\b|dinero\s+r[aá]pido/i.test(combined) || hasCode("0108")) {
     return "BBVA Provincial";
   }
   if (/\bbanescom[oó]vil\b|\bbanesconline\b|\bbanesco\b/i.test(combined) || hasCode("0134")) {
@@ -4528,9 +4542,12 @@ function auditAndNormalizeReceiptPayload(rawInput) {
     cleanNullableString(datosSub.plataforma_canal) || "",
     cleanNullableString(rawCuentaInput) || ""
   ].filter(Boolean).join(" ");
-  const numeroCuenta = extractNumeroCuentaVenezolana(rawCuentaInput) ?? extractNumeroCuentaVenezolana(fullContextString) ?? cleanNullableString(rawCuentaInput);
+  const numeroCuenta = extractNumeroCuentaVenezolana(rawCuentaInput, fullContextString) ?? extractNumeroCuentaVenezolana(fullContextString, fullContextString) ?? cleanNullableString(rawCuentaInput);
   if (montoBs === null && fullContextString) {
-    const fallbackMoneyMatch = fullContextString.replace(/(\d)\s*([.,])\s*(\d)/g, "$1$2$3").match(/\b(\d{1,3}(?:\.\d{3})+,\d{2}|\d{1,3}(?:,\d{3})+\.\d{2}|\d{2,10},\d{2})\b/);
+    const normalizedCtx = fullContextString.replace(/(\d)\s*([.,])\s*(\d)/g, "$1$2$3").replace(/\b(\d{1,3}(?:[\s.]\d{3})+)\s+(\d{2})\b/g, (_m, intP, decP) => `${String(intP).replace(/\s+/g, ".")},${decP}`).replace(/\b(\d{1,3})\s+(\d{3})([.,]\d{2})\b/g, "$1.$2$3");
+    const fallbackMoneyMatch = normalizedCtx.match(
+      /\b(\d{1,3}(?:\.\d{3})+,\d{2}|\d{1,3}(?:,\d{3})+\.\d{2}|\d{2,10},\d{2})\b/
+    );
     if (fallbackMoneyMatch) {
       montoBs = parseVenezuelanMonto(fallbackMoneyMatch[1]);
     }
@@ -4571,8 +4588,13 @@ function auditAndNormalizeReceiptPayload(rawInput) {
   );
   const rawMonedaInput = cleanNullableString(datosSub.moneda ?? raw.moneda)?.toUpperCase();
   const monedaDetectada = rawMonedaInput === "USD" || metodoPago === "Zelle" || metodoPago === "Divisas" || metodoPago === "Divisas Efectivo" ? "USD" : rawMonedaInput === "VES" || rawMonedaInput === "BS" || montoBs !== null || Boolean(bankDetails.codigo_banco) ? "VES" : null;
+  const isSpecificPlatformCanal = Boolean(
+    bankDetails.plataforma_canal && !/^(pago\s*m[oó]vil|transferencia|efectivo|divisas|divisas\s+efectivo|zelle|biopago)$/i.test(
+      bankDetails.plataforma_canal.trim()
+    )
+  );
   const hasCoreOrPartialData = Boolean(
-    montoBs && montoBs > 0 || nroReferencia || fecha_iso || fecha_pago || bancoPrincipal || bankDetails.plataforma_canal || numeroCuenta || titular
+    montoBs && montoBs > 0 || nroReferencia || fecha_iso || fecha_pago || bancoPrincipal || isSpecificPlatformCanal || numeroCuenta || titular
   );
   const legible = hasCoreOrPartialData;
   const isCompleteCore = Boolean(montoBs && montoBs > 0 && nroReferencia);
@@ -4605,7 +4627,8 @@ function auditAndNormalizeReceiptPayload(rawInput) {
   const requiereRevisionManual = typeof raw.requiere_revision_manual === "boolean" ? raw.requiere_revision_manual : !legible || !isCompleteCore || nivelConfianza === "BAJO";
   const motivoRevision = requiereRevisionManual ? cleanNullableString(raw.motivo_revision) || (!legible ? "No se lograron identificar con claridad el monto o la referencia del comprobante." : !montoBs ? "Monto de la operaci\xF3n no visible o ilegible en el soporte." : !nroReferencia ? "N\xFAmero de referencia no visible o ilegible en el soporte." : "Soporte con lectura parcial o sin etiquetas completas; verificar datos antes de conciliar.") : cleanNullableString(raw.motivo_revision);
   const observacion = rawObservacion || (legible ? isCompleteCore ? "Comprobante de operaci\xF3n exitosa le\xEDdo correctamente." : "Lectura parcial completada; se autocompletaron los datos detectados en el comprobante." : "No se lograron identificar con claridad el monto o la referencia del comprobante.");
-  const resolvedCanal = rawCanalInput ?? bankDetails.plataforma_canal ?? null;
+  const rawResolvedCanal = rawCanalInput ?? bankDetails.plataforma_canal ?? null;
+  const resolvedCanal = !legible && rawResolvedCanal && /^(pago\s*m[oó]vil|transferencia)$/i.test(rawResolvedCanal.trim()) ? null : rawResolvedCanal;
   const datosExtraidos = {
     fecha_operacion: fecha_iso,
     fecha_original: fecha_pago,
@@ -4666,7 +4689,7 @@ function parseVenezuelanReceiptText(rawText) {
   const fullText = lines.join("\n");
   let numeroCuentaDetectada = null;
   for (const line of lines) {
-    const acc = extractNumeroCuentaVenezolana(line);
+    const acc = extractNumeroCuentaVenezolana(line, fullText);
     if (acc) {
       numeroCuentaDetectada = acc;
       break;
@@ -4718,27 +4741,27 @@ function parseVenezuelanReceiptText(rawText) {
       continue;
     }
     const bsMatch = line.match(
-      /(?:Bs\.?\s*S?\.?|Bol[ií]vares)\s*[-:]?\s*(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2}|\d{1,3}(?:,\d{3})*\.\d{2})/i
+      /(?:Bs\.?\s*S?\.?|Bol[ií]vares|VE[BS])\s*[-:]?\s*(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2}|\d{1,3}(?:,\d{3})*\.\d{2}|\d+\.\d{2})/i
     );
     if (bsMatch) {
       const candidate = parseVenezuelanMonto(bsMatch[1]);
       if (candidate && (!montoBs || candidate > montoBs)) {
         montoBs = candidate;
         montoTextoOriginal = bsMatch[0].trim();
-        montoTextoExacto = bsMatch[1].trim();
+        montoTextoExacto = new Intl.NumberFormat("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(candidate);
         montoLineIndex = i;
       }
       continue;
     }
     const trailingBsMatch = line.match(
-      /(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})\s*(?:Bs\.?\s*S?\.?|VES)\b/i
+      /(\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2}|\d{1,3}(?:,\d{3})*\.\d{2})\s*(?:Bs\.?\s*S?\.?|VE[BS])\b/i
     );
     if (trailingBsMatch) {
       const candidate = parseVenezuelanMonto(trailingBsMatch[1]);
       if (candidate && (!montoBs || candidate > montoBs)) {
         montoBs = candidate;
         montoTextoOriginal = trailingBsMatch[0].trim();
-        montoTextoExacto = trailingBsMatch[1].trim();
+        montoTextoExacto = new Intl.NumberFormat("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(candidate);
         montoLineIndex = i;
       }
       continue;
@@ -4750,14 +4773,14 @@ function parseVenezuelanReceiptText(rawText) {
       if (picked && (!montoBs || picked > montoBs)) {
         montoBs = picked;
         montoTextoOriginal = sameLine ? line : lines[i + 1];
-        montoTextoExacto = extractMontoTextoExacto(montoTextoOriginal);
+        montoTextoExacto = extractMontoTextoExacto(montoTextoOriginal) || new Intl.NumberFormat("es-VE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(picked);
         montoLineIndex = sameLine ? i : i + 1;
       }
     }
   }
   if (montoBs === null) {
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].replace(/(\d)\s*([.,])\s*(\d)/g, "$1$2$3");
+      const line = lines[i].replace(/(\d)\s*([.,])\s*(\d)/g, "$1$2$3").replace(/\b(\d{1,3}(?:[\s.]\d{3})+)\s+(\d{2})\b/g, (_m, intP, decP) => `${String(intP).replace(/\s+/g, ".")},${decP}`).replace(/\b(\d{1,3})\s+(\d{3})([.,]\d{2})\b/g, "$1.$2$3");
       if (/comisi[oó]n|iva\b|tasa\b/i.test(line)) continue;
       const standaloneMoneyMatch = line.match(
         /\b(\d{1,3}(?:\.\d{3})+[.,]\d{2}|\d{1,3}(?:,\d{3})+[.,]\d{2}|\d{2,10},\d{2})\b/
@@ -4767,7 +4790,10 @@ function parseVenezuelanReceiptText(rawText) {
         if (candidate && (!montoBs || candidate > montoBs)) {
           montoBs = candidate;
           montoTextoOriginal = standaloneMoneyMatch[1];
-          montoTextoExacto = standaloneMoneyMatch[1];
+          montoTextoExacto = new Intl.NumberFormat("es-VE", {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+          }).format(candidate);
           montoLineIndex = i;
         }
       }
@@ -4777,22 +4803,38 @@ function parseVenezuelanReceiptText(rawText) {
   let fechaIso = null;
   let fechaLineIndex = -1;
   for (let i = 0; i < lines.length; i++) {
-    const parsedDates = normalizeReceiptDates(lines[i]);
-    if (parsedDates.fecha_pago && parsedDates.fecha_iso) {
-      fechaPago = parsedDates.fecha_pago;
-      fechaIso = parsedDates.fecha_iso;
-      fechaLineIndex = i;
-      break;
+    if (/fecha\s*(?:de\s*(?:la\s*)?)?(?:operaci[oó]n|pago|transacci[oó]n|valor)/i.test(lines[i])) {
+      const sameLineDates = normalizeReceiptDates(lines[i]);
+      const nextLineDates = lines[i + 1] ? normalizeReceiptDates(lines[i + 1]) : { fecha_pago: null, fecha_iso: null };
+      const chosen = sameLineDates.fecha_pago ? sameLineDates : nextLineDates;
+      if (chosen.fecha_pago && chosen.fecha_iso) {
+        fechaPago = chosen.fecha_pago;
+        fechaIso = chosen.fecha_iso;
+        fechaLineIndex = sameLineDates.fecha_pago ? i : i + 1;
+        break;
+      }
+    }
+  }
+  if (!fechaPago) {
+    for (let i = 0; i < lines.length; i++) {
+      const parsedDates = normalizeReceiptDates(lines[i]);
+      if (parsedDates.fecha_pago && parsedDates.fecha_iso) {
+        fechaPago = parsedDates.fecha_pago;
+        fechaIso = parsedDates.fecha_iso;
+        fechaLineIndex = i;
+        break;
+      }
     }
   }
   let nroReferencia = null;
   let codigoAutorizacion = null;
-  const authCodeLabelRegex = /c[oó]digo\s*(?:de\s*)?autorizaci[oó]n/i;
-  const refLabelRegex = /(n[uú]mero\s+de\s+referencia|nro\.?\s*(?:de\s*)?referencia|referencia|nro\.?\s*(?:de\s*)?operaci[oó]n|n[uú]mero\s+de\s+operaci[oó]n|operaci[oó]n|secuencia|comprobante|c[oó]digo\s+de\s+operaci[oó]n|recibo|folio|control|id\s*(?:de\s*)?transacci[oó]n|aprobaci[oó]n)/i;
+  const authCodeLabelRegex = /c[oó]digo\s*(?:de\s*)?(?:autorizaci[oó]n|autorizador)/i;
+  const refLabelRegex = /(n[uú]mero\s+de\s+referencia|nro\.?\s*(?:de\s*)?referencia|referencia|ref\.?\s*(?:n[°º*o.]?)?|nro\.?\s*(?:de\s*)?operaci[oó]n|n[uú]mero\s+de\s+operaci[oó]n|secuencia|comprobante|c[oó]digo\s+de\s+operaci[oó]n|recibo|folio|control|id\s*(?:de\s*)?transacci[oó]n|aprobaci[oó]n)/i;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (authCodeLabelRegex.test(line)) {
-      const afterAuth = line.replace(authCodeLabelRegex, "").replace(/^[\s:.-]+/, "");
+      const authMatch = line.match(authCodeLabelRegex);
+      const afterAuth = authMatch && authMatch.index !== void 0 ? line.slice(authMatch.index + authMatch[0].length).replace(/^[\s:.-]+/, "") : line.replace(authCodeLabelRegex, "").replace(/^[\s:.-]+/, "");
       const sameLineAuth = normalizeReferenciaBancaria(afterAuth);
       if (sameLineAuth) {
         codigoAutorizacion = sameLineAuth;
@@ -4804,9 +4846,11 @@ function parseVenezuelanReceiptText(rawText) {
       }
       continue;
     }
-    if (!nroReferencia && refLabelRegex.test(line)) {
-      const afterLabel = line.replace(refLabelRegex, "").replace(/^[\s:.-]+/, "");
-      const sameLineDigits = normalizeReferenciaBancaria(afterLabel);
+    if (!nroReferencia && refLabelRegex.test(line) && !/(?:tipo|fecha)\s+de\s+(?:la\s+)?operaci[oó]n/i.test(line)) {
+      const refMatch = line.match(refLabelRegex);
+      const afterLabel = refMatch && refMatch.index !== void 0 ? line.slice(refMatch.index + refMatch[0].length).replace(/^[\s:.,*-]+/, "") : line.replace(refLabelRegex, "").replace(/^[\s:.,*-]+/, "");
+      const firstRefToken = afterLabel.match(/^(\d{4,15})\b/);
+      const sameLineDigits = normalizeReferenciaBancaria(firstRefToken ? firstRefToken[1] : afterLabel);
       if (sameLineDigits) {
         nroReferencia = sameLineDigits;
         continue;
@@ -4830,7 +4874,7 @@ function parseVenezuelanReceiptText(rawText) {
   if (!nroReferencia) {
     const candidateRefs = [];
     for (let i = 0; i < lines.length; i++) {
-      const strippedLine = lines[i].replace(/(\d)\s*([.,])\s*(\d)/g, "$1$2$3").replace(/\b\d{1,2}[/-]\d{1,2}[/-](?:20\d{2}|\d{2})\b/g, " ").replace(/\b20\d{2}[/-]\d{1,2}[/-]\d{1,2}\b/g, " ").replace(/\b01\d{2}[*•xX\d-]{8,22}\b/g, " ").replace(/\b\d{1,3}(?:[.,]\d{3})+[.,]\d{1,2}\b/g, " ").replace(/\b\d+[.,]\d{1,2}\b/g, " ");
+      const strippedLine = lines[i].replace(/(\d)\s*([.,])\s*(\d)/g, "$1$2$3").replace(/\b(\d{1,3}(?:[\s.]\d{3})+)\s+(\d{2})\b/g, " ").replace(/\b\d{1,2}[/-]\d{1,2}[/-](?:20\d{2}|\d{2})\b/g, " ").replace(/\b20\d{2}[/-]\d{1,2}[/-]\d{1,2}\b/g, " ").replace(/\b01\d{2}[*•xX#.\-:"'+~_=\d]{8,24}\b/g, " ").replace(/\b\d{1,3}(?:[.,]\d{3})+[.,]\d{1,2}\b/g, " ").replace(/\b\d+[.,]\d{1,2}\b/g, " ");
       const seqMatches = strippedLine.matchAll(/(?:^|[\s|#:-])(\d{6,15})(?=$|[\s|])/g);
       for (const m of seqMatches) {
         const rawCandidate = m[1];
@@ -4885,18 +4929,18 @@ function parseVenezuelanReceiptText(rawText) {
       }
     }
   }
-  const metodoPago = normalizeMetodoPago("", fullText);
   const resolvedRef = nroReferencia ?? codigoAutorizacion ?? null;
   const inferredBanco = inferirBancoVenezolano(banco, fullText, numeroCuentaDetectada) || banco;
-  const canalDetectado = /\bprovinet\b|\bprovlnet\b|\bprovinel\b/i.test(fullText) || numeroCuentaDetectada && numeroCuentaDetectada.startsWith("0108") || inferredBanco === "BBVA Provincial" ? "Provinet" : null;
+  const canalDetectado = /\bprovinet\b|\bprovmet\b|\bprovlnet\b|\bprovinel\b/i.test(fullText) || numeroCuentaDetectada && numeroCuentaDetectada.startsWith("0108") || inferredBanco === "BBVA Provincial" ? "Provinet" : null;
   const esLegible = Boolean(
     montoBs && montoBs > 0 || resolvedRef || fechaPago || inferredBanco || canalDetectado || numeroCuentaDetectada
   );
+  const metodoPago = esLegible ? normalizeMetodoPago("", fullText) : null;
   return auditAndNormalizeReceiptPayload({
     es_legible: esLegible,
     legible: esLegible,
-    confianza: montoBs && resolvedRef ? 0.9 : 0.65,
-    confianza_lectura: montoBs && resolvedRef ? "alta" : "media",
+    confianza: montoBs && resolvedRef ? 0.9 : esLegible ? 0.65 : 0,
+    confianza_lectura: montoBs && resolvedRef ? "alta" : esLegible ? "media" : "baja",
     metodo_pago: metodoPago,
     banco: inferredBanco,
     canal: canalDetectado,
@@ -8717,6 +8761,218 @@ async function startServer() {
           lastAiError = new Error(geminiExtraction.errorMessage);
         }
       }
+      const runSmartImageOcrWithAntiMoire = async (imgBuffer) => {
+        const TesseractMod = await import("tesseract.js");
+        const recognizeFn = TesseractMod.recognize || TesseractMod.default?.recognize;
+        const createWorkerFn = TesseractMod.createWorker || TesseractMod.default?.createWorker;
+        let pass1Result = null;
+        let pass2Result = null;
+        try {
+          const canvasMod = await import("@napi-rs/canvas");
+          const { createCanvas, loadImage } = canvasMod;
+          const img = await loadImage(imgBuffer);
+          const w = img.width;
+          const h = img.height;
+          const scale1 = w < 1e3 ? 2 : 1;
+          const c1 = createCanvas(w * scale1, h * scale1);
+          const ctx1 = c1.getContext("2d");
+          ctx1.imageSmoothingEnabled = true;
+          ctx1.drawImage(img, 0, 0, w * scale1, h * scale1);
+          const d1 = ctx1.getImageData(0, 0, w * scale1, h * scale1);
+          let meanLum = 0;
+          const totalPx1 = w * scale1 * h * scale1;
+          for (let i = 0; i < totalPx1; i++) {
+            meanLum += 0.299 * d1.data[i * 4] + 0.587 * d1.data[i * 4 + 1] + 0.114 * d1.data[i * 4 + 2];
+          }
+          meanLum /= Math.max(1, totalPx1);
+          if (meanLum < 90) {
+            for (let i = 0; i < totalPx1; i++) {
+              const g = 255 - (0.299 * d1.data[i * 4] + 0.587 * d1.data[i * 4 + 1] + 0.114 * d1.data[i * 4 + 2]);
+              d1.data[i * 4] = g;
+              d1.data[i * 4 + 1] = g;
+              d1.data[i * 4 + 2] = g;
+            }
+            ctx1.putImageData(d1, 0, 0);
+          }
+          if (typeof recognizeFn === "function") {
+            const out1 = await recognizeFn(c1.toBuffer("image/png"), "spa");
+            const txt1 = String(out1?.data?.text || "").trim();
+            if (txt1) {
+              pass1Result = parseVenezuelanReceiptText(txt1);
+            }
+          }
+          if (pass1Result && pass1Result.monto_bs && pass1Result.monto_bs > 0 && pass1Result.referencia && pass1Result.banco) {
+            return pass1Result;
+          }
+          const cOrig = createCanvas(w, h);
+          const ctxOrig = cOrig.getContext("2d");
+          ctxOrig.drawImage(img, 0, 0);
+          const src = ctxOrig.getImageData(0, 0, w, h).data;
+          const gray = new Float32Array(w * h);
+          for (let i = 0; i < w * h; i++) {
+            const g = 0.299 * src[i * 4] + 0.587 * src[i * 4 + 1] + 0.114 * src[i * 4 + 2];
+            gray[i] = meanLum < 90 ? 255 - g : g;
+          }
+          const weights = [0.15, 0.2, 0.3, 0.2, 0.15];
+          const hBlur = new Float32Array(w * h);
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              let s = 0;
+              let wSum = 0;
+              for (let dx = -2; dx <= 2; dx++) {
+                const nx = x + dx;
+                if (nx >= 0 && nx < w) {
+                  const wt = weights[dx + 2];
+                  s += gray[y * w + nx] * wt;
+                  wSum += wt;
+                }
+              }
+              hBlur[y * w + x] = s / wSum;
+            }
+          }
+          const integral = new Float64Array((w + 1) * (h + 1));
+          for (let y = 1; y <= h; y++) {
+            let rowSum = 0;
+            for (let x = 1; x <= w; x++) {
+              rowSum += hBlur[(y - 1) * w + (x - 1)];
+              integral[y * (w + 1) + x] = integral[(y - 1) * (w + 1) + x] + rowSum;
+            }
+          }
+          const getBoxMean = (x0, y0, x1, y1) => {
+            const cx0 = Math.max(0, x0);
+            const cy0 = Math.max(0, y0);
+            const cx1 = Math.min(w - 1, x1);
+            const cy1 = Math.min(h - 1, y1);
+            const area = (cx1 - cx0 + 1) * (cy1 - cy0 + 1);
+            return (integral[(cy1 + 1) * (w + 1) + (cx1 + 1)] - integral[cy0 * (w + 1) + (cx1 + 1)] - integral[(cy1 + 1) * (w + 1) + cx0] + integral[cy0 * (w + 1) + cx0]) / area;
+          };
+          const norm = new Float32Array(w * h);
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              const bg = getBoxMean(x - 25, y - 25, x + 25, y + 25);
+              norm[y * w + x] = Math.max(0, bg - hBlur[y * w + x]);
+            }
+          }
+          const isLine = new Uint8Array(w * h);
+          for (let y = 0; y < h; y++) {
+            let runStart = -1;
+            for (let x = 0; x <= w; x++) {
+              const val = x < w ? Math.max(
+                norm[y * w + x],
+                y > 0 ? norm[(y - 1) * w + x] * 0.8 : 0,
+                y + 1 < h ? norm[(y + 1) * w + x] * 0.8 : 0
+              ) : 0;
+              if (val > 7) {
+                if (runStart === -1) runStart = x;
+              } else {
+                if (runStart !== -1 && x - runStart >= 50) {
+                  for (let k = runStart; k < x; k++) {
+                    const above = y >= 5 ? norm[(y - 5) * w + k] : 0;
+                    const below = y + 5 < h ? norm[(y + 5) * w + k] : 0;
+                    if (above < 12 || below < 12) {
+                      isLine[y * w + k] = 1;
+                      if (y > 0 && above < 10) isLine[(y - 1) * w + k] = 1;
+                      if (y + 1 < h && below < 10) isLine[(y + 1) * w + k] = 1;
+                    }
+                  }
+                }
+                runStart = -1;
+              }
+            }
+          }
+          for (let x = 0; x < w; x++) {
+            let runStart = -1;
+            for (let y = 0; y <= h; y++) {
+              const val = y < h ? Math.max(
+                norm[y * w + x],
+                x > 0 ? norm[y * w + (x - 1)] * 0.8 : 0,
+                x + 1 < w ? norm[y * w + (x + 1)] * 0.8 : 0
+              ) : 0;
+              if (val > 7) {
+                if (runStart === -1) runStart = y;
+              } else {
+                if (runStart !== -1 && y - runStart >= 55) {
+                  for (let k = runStart; k < y; k++) {
+                    const left = x >= 5 ? norm[k * w + (x - 5)] : 0;
+                    const right = x + 5 < w ? norm[k * w + (x + 5)] : 0;
+                    if (left < 12 || right < 12) {
+                      isLine[k * w + x] = 1;
+                      if (x > 0 && left < 10) isLine[k * w + (x - 1)] = 1;
+                      if (x + 1 < w && right < 10) isLine[k * w + (x + 1)] = 1;
+                    }
+                  }
+                }
+                runStart = -1;
+              }
+            }
+          }
+          const outCanvas = createCanvas(w, h);
+          const outCtx = outCanvas.getContext("2d");
+          const outImg = outCtx.createImageData(w, h);
+          for (let i = 0; i < w * h; i++) {
+            const d = isLine[i] ? 0 : norm[i];
+            const v = d <= 4 ? 255 : Math.max(0, Math.min(255, Math.round(255 - (d - 4) * 8.5)));
+            outImg.data[i * 4] = v;
+            outImg.data[i * 4 + 1] = v;
+            outImg.data[i * 4 + 2] = v;
+            outImg.data[i * 4 + 3] = 255;
+          }
+          outCtx.putImageData(outImg, 0, 0);
+          const scale2 = w < 900 ? 2 : 1;
+          let finalPngBuffer;
+          if (scale2 === 1) {
+            finalPngBuffer = outCanvas.toBuffer("image/png");
+          } else {
+            const upCanvas = createCanvas(w * scale2, h * scale2);
+            const upCtx = upCanvas.getContext("2d");
+            upCtx.imageSmoothingEnabled = true;
+            upCtx.drawImage(outCanvas, 0, 0, w * scale2, h * scale2);
+            finalPngBuffer = upCanvas.toBuffer("image/png");
+          }
+          if (typeof createWorkerFn === "function") {
+            const worker = await createWorkerFn("spa");
+            try {
+              await worker.setParameters({ tessedit_pageseg_mode: "6" });
+              const out2 = await worker.recognize(finalPngBuffer);
+              const txt2 = String(out2?.data?.text || "").trim();
+              if (txt2) {
+                pass2Result = parseVenezuelanReceiptText(txt2);
+              }
+            } finally {
+              await worker.terminate().catch(() => {
+              });
+            }
+          } else if (typeof recognizeFn === "function") {
+            const out2 = await recognizeFn(finalPngBuffer, "spa");
+            const txt2 = String(out2?.data?.text || "").trim();
+            if (txt2) {
+              pass2Result = parseVenezuelanReceiptText(txt2);
+            }
+          }
+        } catch (canvasErr) {
+          if (typeof recognizeFn === "function" && !pass1Result) {
+            const rawOut = await recognizeFn(imgBuffer, "spa");
+            const rawTxt = String(rawOut?.data?.text || "").trim();
+            if (rawTxt) {
+              pass1Result = parseVenezuelanReceiptText(rawTxt);
+            }
+          }
+        }
+        const scoreAudited = (r) => {
+          if (!r) return 0;
+          let s = 0;
+          if (r.monto_bs && r.monto_bs > 0) s += 3;
+          if (r.referencia) s += 3;
+          if (r.banco) s += 2;
+          if (r.fecha_iso) s += 2;
+          if (r.numero_cuenta) s += 1;
+          return s;
+        };
+        if (scoreAudited(pass2Result) >= scoreAudited(pass1Result) && pass2Result) {
+          return pass2Result;
+        }
+        return pass1Result || pass2Result;
+      };
       let fallbackResult = null;
       try {
         if (actualMime === "application/pdf") {
@@ -8732,15 +8988,7 @@ async function startServer() {
               const imgRes = await pdfParser.getImage({ imageBuffer: true, first: 1 });
               const firstPageImgs = imgRes?.pages?.[0]?.images || [];
               if (firstPageImgs.length > 0 && firstPageImgs[0]?.data) {
-                const TesseractMod = await import("tesseract.js");
-                const recognizeFn = TesseractMod.recognize || TesseractMod.default?.recognize;
-                if (typeof recognizeFn === "function") {
-                  const ocrOut = await recognizeFn(Buffer.from(firstPageImgs[0].data), "spa");
-                  const ocrText = String(ocrOut?.data?.text || "").trim();
-                  if (ocrText) {
-                    fallbackResult = parseVenezuelanReceiptText(ocrText);
-                  }
-                }
+                fallbackResult = await runSmartImageOcrWithAntiMoire(Buffer.from(firstPageImgs[0].data));
               }
             }
           } finally {
@@ -8748,15 +8996,7 @@ async function startServer() {
             });
           }
         } else if (actualMime.startsWith("image/")) {
-          const TesseractMod = await import("tesseract.js");
-          const recognizeFn = TesseractMod.recognize || TesseractMod.default?.recognize;
-          if (typeof recognizeFn === "function") {
-            const ocrOut = await recognizeFn(binaryBuffer, "spa");
-            const ocrText = String(ocrOut?.data?.text || "").trim();
-            if (ocrText) {
-              fallbackResult = parseVenezuelanReceiptText(ocrText);
-            }
-          }
+          fallbackResult = await runSmartImageOcrWithAntiMoire(binaryBuffer);
         }
       } catch (localOcrErr) {
         console.warn("[OCR COBROS LOCAL] Advertencia en motor local PDF/Tesseract:", localOcrErr?.message);
@@ -8792,7 +9032,7 @@ async function startServer() {
           texto_completo: mergedTexto || baseObj.texto_completo || null
         });
         const hasAnyCombinedField = Boolean(
-          combined.es_legible || combined.legible || combined.lectura_exitosa || combined.monto_bs || combined.referencia || combined.fecha_pago || combined.fecha_iso || combined.banco || combined.canal
+          combined.monto_bs && combined.monto_bs > 0 || combined.referencia || combined.fecha_pago || combined.fecha_iso || combined.banco || combined.numero_cuenta
         );
         if (hasAnyCombinedField) {
           return res.json({

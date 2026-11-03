@@ -2842,8 +2842,252 @@ async function startServer() {
         }
       }
 
-      // MOTOR SECUNDARIO DETERMINISTA / OCR LOCAL (PDF Digital + Tesseract.js en Español)
-      // Garantiza extracción continua o complementa campos faltantes (ej. banco o monto en recortes sin etiquetas)
+      // MOTOR SECUNDARIO DETERMINISTA / OCR LOCAL (PDF Digital + Preprocesamiento Anti-Moiré + Tesseract.js en Español)
+      // Garantiza extracción continua en capturas oscuras y fotos a monitores con efecto moiré / tablas sin etiquetas
+      const runSmartImageOcrWithAntiMoire = async (imgBuffer: Buffer): Promise<AuditedReceiptResult | null> => {
+        const TesseractMod: any = await import("tesseract.js");
+        const recognizeFn = TesseractMod.recognize || TesseractMod.default?.recognize;
+        const createWorkerFn = TesseractMod.createWorker || TesseractMod.default?.createWorker;
+
+        let pass1Result: AuditedReceiptResult | null = null;
+        let pass2Result: AuditedReceiptResult | null = null;
+
+        try {
+          const canvasMod: any = await import("@napi-rs/canvas");
+          const { createCanvas, loadImage } = canvasMod;
+          const img = await loadImage(imgBuffer);
+          const w = img.width;
+          const h = img.height;
+
+          // PASADA 1: Escalado 2x + inversión automática para capturas en Modo Oscuro (ej. BNC Pago Móvil)
+          const scale1 = w < 1000 ? 2 : 1;
+          const c1 = createCanvas(w * scale1, h * scale1);
+          const ctx1 = c1.getContext("2d");
+          ctx1.imageSmoothingEnabled = true;
+          ctx1.drawImage(img, 0, 0, w * scale1, h * scale1);
+          const d1 = ctx1.getImageData(0, 0, w * scale1, h * scale1);
+          let meanLum = 0;
+          const totalPx1 = w * scale1 * h * scale1;
+          for (let i = 0; i < totalPx1; i++) {
+            meanLum += 0.299 * d1.data[i * 4] + 0.587 * d1.data[i * 4 + 1] + 0.114 * d1.data[i * 4 + 2];
+          }
+          meanLum /= Math.max(1, totalPx1);
+          if (meanLum < 90) {
+            for (let i = 0; i < totalPx1; i++) {
+              const g = 255 - (0.299 * d1.data[i * 4] + 0.587 * d1.data[i * 4 + 1] + 0.114 * d1.data[i * 4 + 2]);
+              d1.data[i * 4] = g;
+              d1.data[i * 4 + 1] = g;
+              d1.data[i * 4 + 2] = g;
+            }
+            ctx1.putImageData(d1, 0, 0);
+          }
+
+          if (typeof recognizeFn === "function") {
+            const out1 = await recognizeFn(c1.toBuffer("image/png"), "spa");
+            const txt1 = String(out1?.data?.text || "").trim();
+            if (txt1) {
+              pass1Result = parseVenezuelanReceiptText(txt1);
+            }
+          }
+
+          if (pass1Result && pass1Result.monto_bs && pass1Result.monto_bs > 0 && pass1Result.referencia && pass1Result.banco) {
+            return pass1Result;
+          }
+
+          // PASADA 2: Filtro Anti-Moiré Horizontal + Imagen Integral + Supresión de Bordes de Tabla + PSM 6
+          // Diseñado específicamente para fotos tomadas a monitores (ej. Provinet en columna sin etiquetas)
+          const cOrig = createCanvas(w, h);
+          const ctxOrig = cOrig.getContext("2d");
+          ctxOrig.drawImage(img, 0, 0);
+          const src = ctxOrig.getImageData(0, 0, w, h).data;
+
+          const gray = new Float32Array(w * h);
+          for (let i = 0; i < w * h; i++) {
+            const g = 0.299 * src[i * 4] + 0.587 * src[i * 4 + 1] + 0.114 * src[i * 4 + 2];
+            gray[i] = meanLum < 90 ? 255 - g : g;
+          }
+
+          const weights = [0.15, 0.2, 0.3, 0.2, 0.15];
+          const hBlur = new Float32Array(w * h);
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              let s = 0;
+              let wSum = 0;
+              for (let dx = -2; dx <= 2; dx++) {
+                const nx = x + dx;
+                if (nx >= 0 && nx < w) {
+                  const wt = weights[dx + 2];
+                  s += gray[y * w + nx] * wt;
+                  wSum += wt;
+                }
+              }
+              hBlur[y * w + x] = s / wSum;
+            }
+          }
+
+          const integral = new Float64Array((w + 1) * (h + 1));
+          for (let y = 1; y <= h; y++) {
+            let rowSum = 0;
+            for (let x = 1; x <= w; x++) {
+              rowSum += hBlur[(y - 1) * w + (x - 1)];
+              integral[y * (w + 1) + x] = integral[(y - 1) * (w + 1) + x] + rowSum;
+            }
+          }
+          const getBoxMean = (x0: number, y0: number, x1: number, y1: number) => {
+            const cx0 = Math.max(0, x0);
+            const cy0 = Math.max(0, y0);
+            const cx1 = Math.min(w - 1, x1);
+            const cy1 = Math.min(h - 1, y1);
+            const area = (cx1 - cx0 + 1) * (cy1 - cy0 + 1);
+            return (
+              (integral[(cy1 + 1) * (w + 1) + (cx1 + 1)] -
+                integral[cy0 * (w + 1) + (cx1 + 1)] -
+                integral[(cy1 + 1) * (w + 1) + cx0] +
+                integral[cy0 * (w + 1) + cx0]) /
+              area
+            );
+          };
+
+          const norm = new Float32Array(w * h);
+          for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+              const bg = getBoxMean(x - 25, y - 25, x + 25, y + 25);
+              norm[y * w + x] = Math.max(0, bg - hBlur[y * w + x]);
+            }
+          }
+
+          const isLine = new Uint8Array(w * h);
+          for (let y = 0; y < h; y++) {
+            let runStart = -1;
+            for (let x = 0; x <= w; x++) {
+              const val =
+                x < w
+                  ? Math.max(
+                      norm[y * w + x],
+                      y > 0 ? norm[(y - 1) * w + x] * 0.8 : 0,
+                      y + 1 < h ? norm[(y + 1) * w + x] * 0.8 : 0
+                    )
+                  : 0;
+              if (val > 7) {
+                if (runStart === -1) runStart = x;
+              } else {
+                if (runStart !== -1 && x - runStart >= 50) {
+                  for (let k = runStart; k < x; k++) {
+                    const above = y >= 5 ? norm[(y - 5) * w + k] : 0;
+                    const below = y + 5 < h ? norm[(y + 5) * w + k] : 0;
+                    if (above < 12 || below < 12) {
+                      isLine[y * w + k] = 1;
+                      if (y > 0 && above < 10) isLine[(y - 1) * w + k] = 1;
+                      if (y + 1 < h && below < 10) isLine[(y + 1) * w + k] = 1;
+                    }
+                  }
+                }
+                runStart = -1;
+              }
+            }
+          }
+
+          for (let x = 0; x < w; x++) {
+            let runStart = -1;
+            for (let y = 0; y <= h; y++) {
+              const val =
+                y < h
+                  ? Math.max(
+                      norm[y * w + x],
+                      x > 0 ? norm[y * w + (x - 1)] * 0.8 : 0,
+                      x + 1 < w ? norm[y * w + (x + 1)] * 0.8 : 0
+                    )
+                  : 0;
+              if (val > 7) {
+                if (runStart === -1) runStart = y;
+              } else {
+                if (runStart !== -1 && y - runStart >= 55) {
+                  for (let k = runStart; k < y; k++) {
+                    const left = x >= 5 ? norm[k * w + (x - 5)] : 0;
+                    const right = x + 5 < w ? norm[k * w + (x + 5)] : 0;
+                    if (left < 12 || right < 12) {
+                      isLine[k * w + x] = 1;
+                      if (x > 0 && left < 10) isLine[k * w + (x - 1)] = 1;
+                      if (x + 1 < w && right < 10) isLine[k * w + (x + 1)] = 1;
+                    }
+                  }
+                }
+                runStart = -1;
+              }
+            }
+          }
+
+          const outCanvas = createCanvas(w, h);
+          const outCtx = outCanvas.getContext("2d");
+          const outImg = outCtx.createImageData(w, h);
+          for (let i = 0; i < w * h; i++) {
+            const d = isLine[i] ? 0 : norm[i];
+            const v = d <= 4 ? 255 : Math.max(0, Math.min(255, Math.round(255 - (d - 4) * 8.5)));
+            outImg.data[i * 4] = v;
+            outImg.data[i * 4 + 1] = v;
+            outImg.data[i * 4 + 2] = v;
+            outImg.data[i * 4 + 3] = 255;
+          }
+          outCtx.putImageData(outImg, 0, 0);
+
+          const scale2 = w < 900 ? 2 : 1;
+          let finalPngBuffer: Buffer;
+          if (scale2 === 1) {
+            finalPngBuffer = outCanvas.toBuffer("image/png");
+          } else {
+            const upCanvas = createCanvas(w * scale2, h * scale2);
+            const upCtx = upCanvas.getContext("2d");
+            upCtx.imageSmoothingEnabled = true;
+            upCtx.drawImage(outCanvas, 0, 0, w * scale2, h * scale2);
+            finalPngBuffer = upCanvas.toBuffer("image/png");
+          }
+
+          if (typeof createWorkerFn === "function") {
+            const worker = await createWorkerFn("spa");
+            try {
+              await worker.setParameters({ tessedit_pageseg_mode: "6" });
+              const out2 = await worker.recognize(finalPngBuffer);
+              const txt2 = String(out2?.data?.text || "").trim();
+              if (txt2) {
+                pass2Result = parseVenezuelanReceiptText(txt2);
+              }
+            } finally {
+              await worker.terminate().catch(() => {});
+            }
+          } else if (typeof recognizeFn === "function") {
+            const out2 = await recognizeFn(finalPngBuffer, "spa");
+            const txt2 = String(out2?.data?.text || "").trim();
+            if (txt2) {
+              pass2Result = parseVenezuelanReceiptText(txt2);
+            }
+          }
+        } catch (canvasErr) {
+          if (typeof recognizeFn === "function" && !pass1Result) {
+            const rawOut = await recognizeFn(imgBuffer, "spa");
+            const rawTxt = String(rawOut?.data?.text || "").trim();
+            if (rawTxt) {
+              pass1Result = parseVenezuelanReceiptText(rawTxt);
+            }
+          }
+        }
+
+        const scoreAudited = (r: AuditedReceiptResult | null): number => {
+          if (!r) return 0;
+          let s = 0;
+          if (r.monto_bs && r.monto_bs > 0) s += 3;
+          if (r.referencia) s += 3;
+          if (r.banco) s += 2;
+          if (r.fecha_iso) s += 2;
+          if (r.numero_cuenta) s += 1;
+          return s;
+        };
+
+        if (scoreAudited(pass2Result) >= scoreAudited(pass1Result) && pass2Result) {
+          return pass2Result;
+        }
+        return pass1Result || pass2Result;
+      };
+
       let fallbackResult: AuditedReceiptResult | null = null;
       try {
         if (actualMime === "application/pdf") {
@@ -2860,30 +3104,14 @@ async function startServer() {
               const imgRes = await pdfParser.getImage({ imageBuffer: true, first: 1 });
               const firstPageImgs = imgRes?.pages?.[0]?.images || [];
               if (firstPageImgs.length > 0 && firstPageImgs[0]?.data) {
-                const TesseractMod: any = await import("tesseract.js");
-                const recognizeFn = TesseractMod.recognize || TesseractMod.default?.recognize;
-                if (typeof recognizeFn === "function") {
-                  const ocrOut = await recognizeFn(Buffer.from(firstPageImgs[0].data), "spa");
-                  const ocrText = String(ocrOut?.data?.text || "").trim();
-                  if (ocrText) {
-                    fallbackResult = parseVenezuelanReceiptText(ocrText);
-                  }
-                }
+                fallbackResult = await runSmartImageOcrWithAntiMoire(Buffer.from(firstPageImgs[0].data));
               }
             }
           } finally {
             await pdfParser.destroy().catch(() => {});
           }
         } else if (actualMime.startsWith("image/")) {
-          const TesseractMod: any = await import("tesseract.js");
-          const recognizeFn = TesseractMod.recognize || TesseractMod.default?.recognize;
-          if (typeof recognizeFn === "function") {
-            const ocrOut = await recognizeFn(binaryBuffer, "spa");
-            const ocrText = String(ocrOut?.data?.text || "").trim();
-            if (ocrText) {
-              fallbackResult = parseVenezuelanReceiptText(ocrText);
-            }
-          }
+          fallbackResult = await runSmartImageOcrWithAntiMoire(binaryBuffer);
         }
       } catch (localOcrErr: any) {
         console.warn("[OCR COBROS LOCAL] Advertencia en motor local PDF/Tesseract:", localOcrErr?.message);
@@ -2941,15 +3169,12 @@ async function startServer() {
         });
 
         const hasAnyCombinedField = Boolean(
-          combined.es_legible ||
-            combined.legible ||
-            combined.lectura_exitosa ||
-            combined.monto_bs ||
+          (combined.monto_bs && combined.monto_bs > 0) ||
             combined.referencia ||
             combined.fecha_pago ||
             combined.fecha_iso ||
             combined.banco ||
-            combined.canal
+            combined.numero_cuenta
         );
 
         if (hasAnyCombinedField) {
