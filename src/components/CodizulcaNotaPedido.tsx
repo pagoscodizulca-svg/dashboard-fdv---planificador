@@ -27,6 +27,11 @@ import {
   normalizarNombreVendedorSairu,
   normalizeOrderForCodizulca
 } from '../services/alkostoOcParser';
+import {
+  PRODUCTOS_CODIZULCA,
+  matchProductoCodizulca,
+  toSafeNumber
+} from '../services/productosCodizulca';
 
 interface CodizulcaNotaPedidoProps {
   initialData?: ParsedOrdenCompraAlkosto | null;
@@ -213,51 +218,65 @@ function buildFilasFromData(
       )
     );
     const match = resolverProductoPorCodigoODescripcion(rawCode, rawDesc);
+    const isForbiddenAlpha = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(rawCode);
+    const productoOficial = matchProductoCodizulca(isForbiddenAlpha ? '' : rawCode, rawDesc || (match ? match.producto : ''));
 
-    // FASE 2.2: Homologar a SKU interno o conservar el EAN completo sin truncar en UI
+    // FASE 2.2: Homologar al código numérico oficial del maestro de 158 productos (`Data de productos.csv`)
+    // sin permitir códigos alfabéticos inventados ('LPV')
     const finalSku =
-      (match ? match.sku : '') ||
-      (it.skuCodizulca ? String(it.skuCodizulca).trim() : '') ||
-      rawCode;
+      (productoOficial.codigo !== 'S/C' ? productoOficial.codigo : '') ||
+      (!isForbiddenAlpha && match && !/^(LPV|UTH|UHT|QS|JUGOS)$/i.test(match.sku) ? match.sku : '') ||
+      (!isForbiddenAlpha && it.skuCodizulca ? String(it.skuCodizulca).trim() : '') ||
+      (!isForbiddenAlpha ? rawCode : 'S/C');
     const finalBarcode = it.codigoBarra || (it as any).codigoEan || (it as any).codigo_ean || (it as any).barcode || match?.codigoBarra || '';
     const finalCodigoInternoAlkosto = (it as any).codigoInternoAlkosto || (it as any).codigo_interno_alkosto || null;
-    // Usar la descripción limpia homologada del catálogo o la limpia de la OC (sin sufijo /PVP)
-    const finalDesc = (match ? match.producto : '') || rawDesc;
+    // Usar la descripción oficial homologada del catálogo de 158 productos o la limpia de la OC (sin sufijo /PVP)
+    const finalDesc =
+      (productoOficial.codigo !== 'S/C' ? productoOficial.descripcion : '') ||
+      (match ? match.producto : '') ||
+      rawDesc;
     const finalUnid = normalizarUnidadMedidaAlkosto(
       it.unid || (it as any).unidad_medida || (it as any).unidad,
       finalDesc,
-      parseNumeroSeguro(it.emp ?? (it as any).unidades_por_empaque),
+      toSafeNumber(it.emp ?? (it as any).unidades_por_empaque),
       match?.unidadSugerida
     );
     
-    let finalPrecio = parseNumeroSeguro(it.costoUnitario) || 
-                      parseNumeroSeguro((it as any).costo_unitario) || 
-                      parseNumeroSeguro((it as any).costoBruto) || 
-                      parseNumeroSeguro((it as any).precio) || 
-                      parseNumeroSeguro((it as any).precioUnitario) || 
-                      (match ? match.precioSugeridoUSD : 0);
-    let sub = parseNumeroSeguro((it as any).totalRenglon) || 
-              parseNumeroSeguro((it as any).monto_total_renglon) || 
-              parseNumeroSeguro((it as any).total_renglon) || 
-              parseNumeroSeguro((it as any).subtotal) || 
-              parseNumeroSeguro((it as any).total);
-    if (!finalPrecio && sub > 0 && cant > 0) {
-      finalPrecio = Number((sub / cant).toFixed(2));
+    const cantidad = toSafeNumber(cant);
+    let precioUnitario = toSafeNumber(
+      (it as any).valorUnitarioOC ??
+      it.costoUnitario ??
+      (it as any).costo_unitario ??
+      (it as any).precioUnitario ??
+      (it as any).precio_unitario ??
+      (it as any).precio ??
+      (it as any).costoBruto
+    );
+    const rawSub = toSafeNumber(
+      (it as any).totalRenglon ??
+      (it as any).monto_total_renglon ??
+      (it as any).total_renglon ??
+      (it as any).subtotal ??
+      (it as any).total
+    );
+    if (precioUnitario <= 0 && rawSub > 0 && cantidad > 0) {
+      precioUnitario = Number((rawSub / cantidad).toFixed(4));
     }
-    if (finalPrecio > 0) {
-      sub = Number((cant * finalPrecio).toFixed(2));
-    }
+    // REGLA MATEMÁTICA OBLIGATORIA: SUB TOTAL = CANT * VALOR UNITARIO DE LA OC
+    const subtotalExacto = precioUnitario > 0
+      ? Number((cantidad * precioUnitario).toFixed(2))
+      : Number(rawSub.toFixed(2));
 
     const rawDespachada = (it as any).cantDespachada ?? (it as any).cantidadDespachada ?? '';
-    const rawPrecioBruto = parseNumeroSeguro((it as any).costoBruto ?? (it as any).precioBruto);
-    const rawDescuento = parseNumeroSeguro((it as any).descuento ?? (it as any).porcentaje_descuento ?? (it as any).porcentajeBonif);
+    const rawPrecioBruto = toSafeNumber((it as any).costoBruto ?? (it as any).precioBruto);
+    const rawDescuento = toSafeNumber((it as any).descuento ?? (it as any).porcentaje_descuento ?? (it as any).porcentajeBonif);
     const rawAlertaRevision = Boolean((it as any).alertaRevision || (it as any).alerta_revision);
     const rawNotaRevision = (it as any).notaRevision ?? (it as any).nota_revision ?? null;
 
     result.push({
       renglon: result.length + 1,
       unid: finalUnid,
-      cantSolicitada: Number(cant.toFixed(2)),
+      cantSolicitada: Number(cantidad.toFixed(2)),
       cantDespachada: rawDespachada !== '' && rawDespachada !== null && rawDespachada !== undefined ? String(rawDespachada) : '',
       codigo: finalSku,
       codigoPrincipal: finalSku,
@@ -266,10 +285,11 @@ function buildFilasFromData(
       codigoEan: finalBarcode || null,
       codigoInternoAlkosto: finalCodigoInternoAlkosto,
       descripcion: finalDesc,
-      precio: Number(finalPrecio.toFixed(4)),
+      precio: Number(precioUnitario.toFixed(4)),
+      valorUnitarioOC: Number(precioUnitario.toFixed(4)),
       ...(rawPrecioBruto > 0 ? { precioBruto: Number(rawPrecioBruto.toFixed(4)) } : {}),
       ...(rawDescuento > 0 ? { descuento: Number(rawDescuento.toFixed(2)) } : {}),
-      subtotal: Number(sub.toFixed(2)),
+      subtotal: Number(subtotalExacto.toFixed(2)),
       tiendas: Object.keys(tiendasMap).length > 0 ? tiendasMap : it.tiendas,
       ...(Array.isArray((it as any).distribucionPorTienda) ? { distribucionPorTienda: (it as any).distribucionPorTienda } : {}),
       ...(Array.isArray((it as any).distribucion_tiendas) ? { distribucion_tiendas: (it as any).distribucion_tiendas } : {}),
@@ -624,35 +644,42 @@ export function CodizulcaNotaPedido({
     const copy = [...filas];
     const fila = { ...copy[index], [campo]: valor };
 
-    // Si se modifica el código, resolver automáticamente con el catálogo maestro y dejar SOLO EL SKU
+    // Si se modifica el código, resolver automáticamente con el catálogo maestro y dejar SOLO EL SKU numérico oficial
     if (campo === 'codigo') {
+      const productoOficial = matchProductoCodizulca(valor, fila.descripcion);
       const match = resolverProductoPorCodigoODescripcion(valor, fila.descripcion);
-      if (match) {
-        fila.codigo = match.sku; // Solo los SKU
+      if (productoOficial.codigo !== 'S/C') {
+        fila.codigo = productoOficial.codigo;
+        fila.skuCodizulca = productoOficial.codigo;
+        if (!fila.descripcion || fila.descripcion === '') fila.descripcion = productoOficial.descripcion;
+      } else if (match) {
+        fila.codigo = match.sku;
         fila.skuCodizulca = match.sku;
         fila.codigoBarra = match.codigoBarra;
         if (!fila.descripcion || fila.descripcion === '') fila.descripcion = match.producto;
         if (!fila.unid || fila.unid === '') fila.unid = match.unidadSugerida || 'CJ';
-        if (!fila.precio || fila.precio === 0) fila.precio = match.precioSugeridoUSD;
       }
     }
 
-    // Si se modifica la descripción, resolver automáticamente con el catálogo maestro y dejar SOLO EL SKU
+    // Si se modifica la descripción, resolver automáticamente con el catálogo maestro y dejar SOLO EL SKU numérico oficial
     if (campo === 'descripcion') {
+      const productoOficial = matchProductoCodizulca(fila.codigo, valor);
       const match = resolverProductoPorCodigoODescripcion(fila.codigo, valor);
-      if (match) {
-        fila.codigo = match.sku; // Solo los SKU
+      if (productoOficial.codigo !== 'S/C') {
+        fila.codigo = productoOficial.codigo;
+        fila.skuCodizulca = productoOficial.codigo;
+      } else if (match) {
+        fila.codigo = match.sku;
         fila.skuCodizulca = match.sku;
         fila.codigoBarra = match.codigoBarra;
         if (!fila.unid || fila.unid === '') fila.unid = match.unidadSugerida || 'CJ';
-        if (!fila.precio || fila.precio === 0) fila.precio = match.precioSugeridoUSD;
       }
     }
 
-    // Si cambió cantidad o precio, recalcular subtotal (la cantidad despachada se mantiene en blanco)
+    // Si cambió cantidad o precio, recalcular subtotal (SUB TOTAL = CANT * VALOR UNITARIO DE LA OC)
     if (campo === 'cantSolicitada' || campo === 'precio' || campo === 'codigo' || campo === 'descripcion') {
-      const cant = Number(campo === 'cantSolicitada' ? valor : fila.cantSolicitada) || 0;
-      const prec = Number(campo === 'precio' ? valor : fila.precio) || 0;
+      const cant = toSafeNumber(campo === 'cantSolicitada' ? valor : fila.cantSolicitada);
+      const prec = toSafeNumber(campo === 'precio' ? valor : fila.precio);
       fila.subtotal = Number((cant * prec).toFixed(2));
     }
 

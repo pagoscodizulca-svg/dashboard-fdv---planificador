@@ -32,7 +32,10 @@ import {
   ALKOSTO_OC_EXTRACTION_SYSTEM_PROMPT,
   ALKOSTO_OC_RESPONSE_SCHEMA,
   AlkostoParseValidationError,
-  AlkostoOcrStageError
+  AlkostoOcrStageError,
+  PRODUCTOS_CODIZULCA,
+  matchProductoCodizulca,
+  toSafeNumber
 } from '../../src/services/alkostoOcParser';
 import { resolverProductoPorCodigoODescripcion } from '../../src/services/alkostoService';
 
@@ -899,6 +902,89 @@ describe('Unit & Regression: alkostoOcParser', () => {
       expect(normalized.subtotalAlkosto).toBe(2200);
       expect(normalized.subtotalFamiliaCenter).toBe(400);
       expect(normalized.montoTotal).toBe(2600);
+    });
+
+    it('should validate the 158 official products (PRODUCTOS_CODIZULCA), matchProductoCodizulca Vencampo gramajes (1536, 1556, 1574, 1579), reject LPV, and compute exact Sala de Espera subtotal (CANT * valorUnitarioOC)', () => {
+      // 1. Catálogo oficial de 158 ítems (del 9 al 1592) con caracteres UTF-8 (Ñ) preservados
+      expect(PRODUCTOS_CODIZULCA).toHaveLength(158);
+      expect(PRODUCTOS_CODIZULCA[0].codigo).toBe('9');
+      expect(PRODUCTOS_CODIZULCA[PRODUCTOS_CODIZULCA.length - 1].codigo).toBe('1592');
+      expect(PRODUCTOS_CODIZULCA.some(p => p.descripcion.includes('DOÑA FLORA'))).toBe(true);
+      expect(PRODUCTOS_CODIZULCA.some(p => p.descripcion.includes('NAVIDEÑA'))).toBe(true);
+
+      // 2. Desambiguación obligatoria de Leche en Polvo Vencampo por gramaje y prohibición de 'LPV'
+      expect(matchProductoCodizulca('LPV', 'LECHE EN POLVO COMPLETA VENCAMPO 1KG')).toEqual({
+        codigo: '1536',
+        descripcion: 'LECHE EN POLVO VENCAMPO 10X1KG'
+      });
+      expect(matchProductoCodizulca('7590377000510', 'LECHE EN POLVO COMPLETA VENCAMPO 900GR')).toEqual({
+        codigo: '1556',
+        descripcion: 'LECHE EN POLVO VENCAMPO 10X900GR'
+      });
+      expect(matchProductoCodizulca('7590377000503', 'LECHE EN POLVO COMPLETA VENCAMPO 400GR')).toEqual({
+        codigo: '1574',
+        descripcion: 'LECHE EN POLVO VENCAMPO 10X400GR'
+      });
+      expect(matchProductoCodizulca('', 'LECHE EN POLVO VENCAMPO 500G')).toEqual({
+        codigo: '1579',
+        descripcion: 'LECHE EN POLVO VENCAMPO 10X500GR'
+      });
+
+      // 3. Limpieza numérica toSafeNumber y cálculo determinista SUB TOTAL = CANT * VALOR_UNITARIO_OC
+      expect(toSafeNumber('45,50')).toBe(45.5);
+      expect(toSafeNumber('1.250,75')).toBe(1250.75);
+      expect(toSafeNumber('1,250.75')).toBe(1250.75);
+      expect(toSafeNumber('$ 40.0000')).toBe(40);
+
+      // Verificar que si entra un payload con código inventado 'LPV' y valorUnitarioOC, se corrige al código numérico y calcula subtotal exacto
+      const aiPayloadWithLpv = {
+        numeroOrden: '0000054457',
+        fechaOrden: '06/10/2026',
+        tiendasDetectadas: ['AK01', 'FC01'],
+        renglones: [
+          {
+            codigo: 'LPV',
+            descripcion: 'LECHE EN POLVO COMPLETA VENCAMPO 400GR',
+            unidad: 'CJ',
+            cantidad: 40,
+            desglosePorTienda: [
+              { tienda: 'AK01', cantidad: 30 },
+              { tienda: 'FC01', cantidad: 10 }
+            ],
+            valorUnitarioOC: 40,
+            subtotal: 1600
+          }
+        ],
+        montoTotal: 1600
+      };
+
+      const normalizedLpv = normalizeOrderForCodizulca(aiPayloadWithLpv);
+      expect(normalizedLpv.items[0].codigo).toBe('1574');
+      expect(normalizedLpv.items[0].skuCodizulca).toBe('1574');
+      expect(normalizedLpv.items[0].descripcion).toBe('LECHE EN POLVO VENCAMPO 10X400GR');
+      expect(normalizedLpv.items[0].valorUnitarioOC).toBe(40);
+      expect(normalizedLpv.items[0].costoUnitario).toBe(40);
+
+      const lote = extraerPedidosNormalizadosDeOC({
+        initialData: normalizedLpv,
+        filasActuales: [],
+        tiendaSeleccionada: 'CONSOLIDADO',
+        enviarLoteCompleto: true,
+        idClienteSeleccionado: '7498',
+        clienteNombreSeleccionado: 'Alkosto 1 san Felipe',
+        numero_oc: '0000054457',
+        vendedor: 'Sairu Valles',
+        fechaISO: '2026-10-06'
+      });
+
+      expect(lote.pedidos).toHaveLength(2);
+      const ak01 = lote.pedidos.find(p => p.sucursalTag === 'AK01')!;
+      expect(ak01.renglones?.[0].codigo).toBe('1574');
+      expect(ak01.renglones?.[0].descripcion).toBe('LECHE EN POLVO VENCAMPO 10X400GR');
+      expect(ak01.renglones?.[0].cantidad).toBe(30);
+      expect(ak01.renglones?.[0].precio_unitario).toBe(40);
+      expect(ak01.renglones?.[0].subtotal).toBe(1200);
+      expect(ak01.monto_pedido).toBe(1200);
     });
   });
 });

@@ -63,11 +63,13 @@ export interface CanonicalVenezuelanReceiptResult {
 }
 
 export interface AuditedReceiptResult extends Partial<CanonicalVenezuelanReceiptResult> {
+  es_legible?: boolean;
   legible: boolean;
   confianza: number;
   confianza_lectura: ConfianzaLectura;
   metodo_pago: MetodoPagoSoportado;
   banco: string | null;
+  canal?: string | null;
   banco_origen: string | null;
   banco_destino: string | null;
   monto_bs: number | null;
@@ -87,96 +89,73 @@ export interface AuditedReceiptResult extends Partial<CanonicalVenezuelanReceipt
 export const VENEZUELAN_RECEIPT_RESPONSE_SCHEMA = {
   type: Type.OBJECT,
   properties: {
-    lectura_exitosa: { type: Type.BOOLEAN },
-    nivel_confianza: { type: Type.STRING, description: 'ALTO, MEDIO o BAJO' },
-    requiere_revision_manual: { type: Type.BOOLEAN },
-    motivo_revision: { type: Type.STRING, nullable: true },
-    datos_extraidos: {
-      type: Type.OBJECT,
-      properties: {
-        fecha_operacion: { type: Type.STRING, nullable: true, description: 'Fecha normalizada YYYY-MM-DD (ej. 2026-11-02) o null' },
-        fecha_original: { type: Type.STRING, nullable: true, description: 'Texto original de la fecha (ej. 02/11/2026) o null' },
-        numero_referencia: { type: Type.STRING, nullable: true, description: 'Referencia con ceros a la izquierda (ej. 000019111) o null' },
-        monto_numerico: { type: Type.NUMBER, nullable: true, description: 'Monto float estándar con punto decimal (ej. 576599.07) o null' },
-        monto_texto: { type: Type.STRING, nullable: true, description: 'Texto original del monto (ej. 576.599,07) o null' },
-        moneda: { type: Type.STRING, nullable: true, description: 'VES o USD o null' },
-        banco_identificado: { type: Type.STRING, nullable: true, description: 'Nombre del banco (ej. BBVA Provincial, Banesco, Banco Mercantil, Banco de Venezuela, Bancamiga, BNC, Bancaribe, Banco Exterior) o null' },
-        codigo_banco: { type: Type.STRING, nullable: true, description: 'Código bancario de 4 dígitos (0108, 0134, 0105, 0102, 0172, 0191, 0114, 0115) o null' },
-        plataforma_canal: { type: Type.STRING, nullable: true, description: 'Provinet, BanescOnline, Mercantil, BDVenlínea, Pago Móvil, Transferencia o null' },
-        numero_cuenta: { type: Type.STRING, nullable: true, description: 'Cuenta de 20 caracteres conservando asteriscos (ej. 0108*****40*****7396) o null' }
-      }
+    es_legible: {
+      type: Type.BOOLEAN,
+      description: 'true siempre que se pueda leer con certeza al menos uno de monto_bs, referencia o fecha_pago; false solo si toda la imagen está borrosa, en negro o sin datos financieros'
     },
-    evidencia_visual: {
-      type: Type.OBJECT,
-      properties: {
-        tiene_etiquetas_visibles: { type: Type.BOOLEAN },
-        es_foto_de_pantalla: { type: Type.BOOLEAN },
-        lineas_crudas_detectadas: {
-          type: Type.ARRAY,
-          items: { type: Type.STRING }
-        }
-      }
+    fecha_pago: {
+      type: Type.STRING,
+      nullable: true,
+      description: 'Fecha en formato DD/MM/YYYY o DD-MM-YYYY (ejemplo: "23/10/2026") o null'
+    },
+    referencia: {
+      type: Type.STRING,
+      nullable: true,
+      description: 'Secuencia numérica entera de 6 a 12 dígitos conservando ceros a la izquierda (ejemplo: "000012723") o null'
+    },
+    monto_bs: {
+      type: Type.NUMBER,
+      nullable: true,
+      description: 'Valor numérico en formato estándar (ejemplo: 48742.49) o null'
+    },
+    banco: {
+      type: Type.STRING,
+      nullable: true,
+      description: 'Nombre del banco (BBVA Provincial, Banco de Venezuela, Banesco, Mercantil, Bancamiga, Banplus, BNC) o null'
+    },
+    canal: {
+      type: Type.STRING,
+      nullable: true,
+      description: 'Canal o plataforma (ejemplo: "Provinet", "Pago Móvil", "Transferencia") o null'
+    },
+    numero_cuenta: {
+      type: Type.STRING,
+      nullable: true,
+      description: 'Cuenta de 20 dígitos o enmascarada con asteriscos (ejemplo: "0108*****40*****7396") o null'
+    },
+    metodo_pago: {
+      type: Type.STRING,
+      nullable: true,
+      description: 'Pago Móvil, Transferencia, Zelle, Biopago, Divisas o Efectivo'
     },
     titular_remitente: { type: Type.STRING, nullable: true },
     rif_ci_titular: { type: Type.STRING, nullable: true },
     beneficiario_detectado: { type: Type.STRING, nullable: true },
     codigo_autorizacion: { type: Type.STRING, nullable: true }
   },
-  required: ['lectura_exitosa', 'nivel_confianza', 'requiere_revision_manual', 'datos_extraidos', 'evidencia_visual']
+  required: ['es_legible', 'fecha_pago', 'referencia', 'monto_bs', 'banco', 'canal']
 };
 
-export const VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT = `Eres un motor de extracción de datos financieros y bancarios de Venezuela de precisión quirúrgica.
-REGLAS ANTI-ALUCINACIÓN:
-1. PROHIBIDO INVENTAR: Extrae únicamente lo que sea visualmente legible en la imagen. Si un campo no existe o no se lee, devuelve \`null\`.
-2. CUENTAS ENMASCARADAS: Conserva exactamente los asteriscos (ej. \`0108*****40*****7396\`).
-3. CEROS A LA IZQUIERDA: Extrae el número de referencia como texto (\`string\`) respetando todos los ceros iniciales (ej. \`"000019111"\`). Ignora cualquier ícono gráfico de copiado/compartir al final de la referencia.
+export const VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT = `Eres un extractor experto de datos bancarios de Venezuela de alta precisión. Tu única tarea es extraer los datos visibles en la imagen del comprobante de pago sin inventar, adivinar ni alucinar ningún carácter.
 
-REGLAS DE RECONOCIMIENTO POR PATRONES (SOPORTES RECORTADOS SIN ETIQUETAS):
-Muchos vendedores suben fotos recortadas donde NO aparecen los títulos de las filas ("Fecha", "Referencia", "Monto", "Cuenta", "Banco"). Clasifica cada dato por su morfología visual:
-- FECHA: Patrón \`DD/MM/YYYY\`, \`DD-MM-YYYY\` o \`YYYY-MM-DD\` (ej. \`02/11/2026\`). Normalízala a \`YYYY-MM-DD\` (\`"2026-11-02"\`) y guarda el texto original en \`fecha_original\` (\`"02/11/2026"\`).
-- REFERENCIA: Secuencia de dígitos continuos sin puntos ni comas ni asteriscos (ej. \`"000019111"\`).
-- MONTO: Patrón monetario con separador de miles (\`.\`) y decimales (\`,\`), como \`576.599,07\`. Devuelve el texto original en \`monto_texto\` (\`"576.599,07"\`) y el valor numérico float estándar en \`monto_numerico\` (\`576599.07\`).
-- CUENTA: Secuencia de 20 caracteres (dígitos y asteriscos) que inicia con un código bancario venezolano de 4 dígitos (ej. \`0108*****40*****7396\`).
-- BANCO Y PLATAFORMA: Deduce el banco por texto explícito, nombre de plataforma o los primeros 4 dígitos de la cuenta:
-  * \`0108\` o \`"Provinet"\` -> \`"BBVA Provincial"\`
-  * \`0134\` o \`"BanescOnline"\` -> \`"Banesco"\`
-  * \`0105\` o \`"Mercantil"\` -> \`"Banco Mercantil"\`
-  * \`0102\` o \`"BDVenlínea"\` -> \`"Banco de Venezuela"\`
-  * \`0172\` -> \`"Bancamiga"\`
-  * \`0191\` -> \`"BNC"\`
-  * \`0114\` -> \`"Bancaribe"\`
-  * \`0115\` -> \`"Banco Exterior"\`
-
-ESTRUCTURA DE SALIDA (JSON PURO):
-Responde ÚNICAMENTE con un objeto JSON válido siguiendo exactamente esta estructura:
-{
-  "lectura_exitosa": true,
-  "nivel_confianza": "ALTO",
-  "requiere_revision_manual": false,
-  "motivo_revision": null,
-  "datos_extraidos": {
-    "fecha_operacion": "2026-11-02",
-    "fecha_original": "02/11/2026",
-    "numero_referencia": "000019111",
-    "monto_numerico": 576599.07,
-    "monto_texto": "576.599,07",
-    "moneda": "VES",
-    "banco_identificado": "BBVA Provincial",
-    "codigo_banco": "0108",
-    "plataforma_canal": "Provinet",
-    "numero_cuenta": "0108*****40*****7396"
-  },
-  "evidencia_visual": {
-    "tiene_etiquetas_visibles": false,
-    "es_foto_de_pantalla": true,
-    "lineas_crudas_detectadas": [
-      "0108*****40*****7396",
-      "02/11/2026",
-      "000019111",
-      "576.599,07"
-    ]
-  }
-}`;
+REGLAS ESTRICTAS DE EXTRACCIÓN:
+1. TOLERANCIA A RECORTES Y FOTOS DE PANTALLA: NO rechaces la imagen ni la marques como ilegible si está recortada (sin los nombres de las columnas a la izquierda) o si es una foto tomada a un monitor (con líneas de píxeles/moiré), SIEMPRE Y CUANDO los números y textos sean visualmente legibles.
+2. RECONOCIMIENTO POR PATRONES DETERMINÍSTICOS (cuando no hay etiquetas a la izquierda):
+   - FECHA DE PAGO (fecha_pago): Identifica cualquier cadena con formato de fecha DD/MM/YYYY o DD-MM-YYYY (ejemplo: "23/10/2026").
+   - NRO. DE REFERENCIA (referencia): Identifica la secuencia numérica entera de 6 a 12 dígitos, frecuentemente precedida por ceros a la izquierda (ejemplo: "000012723") que NO tenga decimales ni asteriscos.
+   - MONTO EN BS (monto_bs): Identifica el valor numérico con formato monetario (separador de miles con punto y decimales con coma, o viceversa, ejemplo: "48.742,49"). Conviértelo al formato numérico estándar que espera el formulario sin alterar sus dígitos.
+   - BANCO Y CANAL (banco / canal): 
+     * Si aparece un número de cuenta enmascarado de 20 dígitos o parcial, extrae los primeros 4 dígitos (código Sudeban):
+       - "0108" o texto "Provinet" -> Banco: "BBVA Provincial", Canal: "Provinet".
+       - "0102" -> Banco: "Banco de Venezuela".
+       - "0134" -> Banco: "Banesco".
+       - "0105" -> Banco: "Mercantil".
+       - "0172" -> Banco: "Bancamiga".
+       - "0174" -> Banco: "Banplus".
+       - "0191" -> Banco: "BNC".
+     * Si se lee explícitamente "Provinet", asigna canal = "Provinet" y banco = "BBVA Provincial".
+3. PROHIBICIÓN DE INVENTAR: Si un dato específico realmente no aparece en la imagen o los dígitos están borrosos al punto de no distinguirse, devuelve null únicamente en ese campo, pero NUNCA invalides ni descartes los demás campos que sí se leen con claridad.
+4. Marca "es_legible": true siempre que puedas leer con certeza al menos UNO de estos campos clave (monto_bs, referencia o fecha_pago). Solo devuelve "es_legible": false si toda la imagen está completamente borrosa, en negro o no contiene ningún dato financiero.`;
 
 const BENEFICIARY_NAME_PATTERNS: RegExp[] = [
   /CODIZULCA/i,
@@ -422,10 +401,11 @@ export function detectReceiptMimeType(
  */
 export async function prepareImageForGemini(
   input: File | Blob | string,
-  options: { maxDimension?: number; quality?: number; declaredMime?: string; fileName?: string } = {}
+  options: { minDimension?: number; maxDimension?: number; quality?: number; declaredMime?: string; fileName?: string } = {}
 ): Promise<PreparedGeminiImage> {
-  const maxDim = options.maxDimension ?? 2048;
-  const quality = options.quality ?? 0.92;
+  const minDim = Math.max(1280, options.minDimension ?? 1280);
+  const maxDim = Math.max(minDim, options.maxDimension ?? 2048);
+  const quality = Math.max(0.85, Math.min(1, options.quality ?? 0.92));
 
   const readInputAsDataUrl = (): Promise<{ dataUrl: string; declaredMime: string; fileName: string }> => {
     if (typeof input === 'string') {
@@ -494,15 +474,16 @@ export async function prepareImageForGemini(
     };
   }
 
-  // En navegador: verificar dimensiones de la imagen y redimensionar en <canvas> si supera 2048px (calidad 0.92)
+  // En navegador: garantizar resolución mínima de al menos 1280px en su lado más largo (y máxima maxDim) con calidad >= 0.85
   return new Promise<PreparedGeminiImage>((resolve) => {
     const img = new Image();
     img.onload = () => {
       try {
         let width = img.naturalWidth || img.width || 0;
         let height = img.naturalHeight || img.height || 0;
+        const longestSide = Math.max(width, height);
 
-        if (width <= 0 || height <= 0 || (width <= maxDim && height <= maxDim)) {
+        if (width <= 0 || height <= 0 || (longestSide >= minDim && longestSide <= maxDim)) {
           return resolve({
             base64Data: rawBase64,
             mimeType: detectedMime,
@@ -513,12 +494,13 @@ export async function prepareImageForGemini(
           });
         }
 
-        if (width > height) {
-          height = Math.round((height * maxDim) / width);
-          width = maxDim;
+        const targetLongSide = longestSide < minDim ? minDim : maxDim;
+        if (width >= height) {
+          height = Math.max(1, Math.round((height * targetLongSide) / width));
+          width = targetLongSide;
         } else {
-          width = Math.round((width * maxDim) / height);
-          height = maxDim;
+          width = Math.max(1, Math.round((width * targetLongSide) / height));
+          height = targetLongSide;
         }
 
         const canvas = document.createElement('canvas');
@@ -837,10 +819,10 @@ export function resolveVenezuelanBankDetails(
     codigoBanco = codigoBanco || matchedEntry.codes[0] || null;
   }
 
-  // Plataforma / canal solo si está explícita en el input o en el texto visual (Regla 2: CERO INVENCIÓN)
+  // Plataforma / canal solo si está explícita en el input, en el texto visual o por regla determinística 0108 -> Provinet
   let plataformaCanal: string | null = cleanPlat;
   if (!plataformaCanal && combined) {
-    if (/\bprovinet\b/i.test(combined)) plataformaCanal = 'Provinet';
+    if (/\bprovinet\b/i.test(combined) || codigoBanco === '0108') plataformaCanal = 'Provinet';
     else if (/\bbanesconline\b/i.test(combined)) plataformaCanal = 'BanescOnline';
     else if (/mercantil\s+en\s+l[ií]nea/i.test(combined)) plataformaCanal = 'Mercantil en Línea';
     else if (/bdvenl[ií]nea/i.test(combined)) plataformaCanal = 'BDVenlínea';
@@ -849,6 +831,12 @@ export function resolveVenezuelanBankDetails(
     else if (/dinero\s+r[aá]pido/i.test(combined)) plataformaCanal = 'Dinero Rápido';
     else if (/pago\s*m[oó]vil/i.test(combined)) plataformaCanal = 'Pago Móvil';
     else if (/\btransferencia\b/i.test(combined)) plataformaCanal = 'Transferencia';
+  }
+  if (/\bprovinet\b/i.test(combined) || codigoBanco === '0108') {
+    bancoIdentificado = 'BBVA Provincial';
+    legacyBanco = 'BBVA Provincial';
+    codigoBanco = '0108';
+    if (!plataformaCanal) plataformaCanal = 'Provinet';
   }
 
   return {
@@ -1158,10 +1146,14 @@ export function auditAndNormalizeReceiptPayload(rawInput: any): AuditedReceiptRe
       ? raw.lineas_crudas_detectadas.map((l: unknown) => String(l ?? '').trim()).filter(Boolean)
       : [];
 
+  const rawCanalInput = cleanNullableString(
+    datosSub.plataforma_canal ?? raw.plataforma_canal ?? raw.canal ?? datosSub.canal
+  );
+
   const bankDetails = resolveVenezuelanBankDetails(
     datosSub.banco_identificado ?? raw.banco_identificado ?? raw.banco ?? raw.banco_origen ?? raw.banco_destino,
     numeroCuenta || datosSub.codigo_banco || raw.codigo_banco,
-    datosSub.plataforma_canal ?? raw.plataforma_canal ?? raw.metodo_pago,
+    rawCanalInput ?? raw.metodo_pago,
     rawLineasCrudas.join(' ')
   );
 
@@ -1198,13 +1190,16 @@ export function auditAndNormalizeReceiptPayload(rawInput: any): AuditedReceiptRe
         ? 'VES'
         : null;
 
-  // Tolerancia a lectura parcial: si se extrajo al menos monto, referencia, cuenta o banco/fecha/emisor,
-  // marcar legible = true para autocompletar todos los campos encontrados sin bloquear al usuario
+  // Regla 4 de Extracción: Marca es_legible / legible = true siempre que exista al menos UNO de los campos
+  // clave (monto_bs, referencia, fecha_pago, banco, canal, cuenta o titular), sin bloquear recortes parciales.
   const hasCoreOrPartialData = Boolean(
     (montoBs && montoBs > 0) ||
       nroReferencia ||
+      fecha_iso ||
+      fecha_pago ||
+      bancoPrincipal ||
+      bankDetails.plataforma_canal ||
       numeroCuenta ||
-      (bancoPrincipal && fecha_iso) ||
       titular
   );
   const legible = hasCoreOrPartialData;
@@ -1280,6 +1275,8 @@ export function auditAndNormalizeReceiptPayload(rawInput: any): AuditedReceiptRe
         : 'Lectura parcial completada; se autocompletaron los datos detectados en el comprobante.'
       : 'No se lograron identificar con claridad el monto o la referencia del comprobante.');
 
+  const resolvedCanal = rawCanalInput ?? bankDetails.plataforma_canal ?? null;
+
   const datosExtraidos: DatosExtraidosSoporte = {
     fecha_operacion: fecha_iso,
     fecha_original: fecha_pago,
@@ -1291,7 +1288,7 @@ export function auditAndNormalizeReceiptPayload(rawInput: any): AuditedReceiptRe
       bankDetails.banco_identificado ||
       (bancoPrincipal === 'Mercantil' ? 'Banco Mercantil' : bancoPrincipal),
     codigo_banco: cleanNullableString(datosSub.codigo_banco ?? raw.codigo_banco) ?? bankDetails.codigo_banco,
-    plataforma_canal: cleanNullableString(datosSub.plataforma_canal ?? raw.plataforma_canal) ?? bankDetails.plataforma_canal,
+    plataforma_canal: resolvedCanal,
     numero_cuenta: numeroCuenta
   };
 
@@ -1302,6 +1299,7 @@ export function auditAndNormalizeReceiptPayload(rawInput: any): AuditedReceiptRe
   };
 
   return {
+    es_legible: legible,
     lectura_exitosa: legible,
     nivel_confianza: nivelConfianza,
     requiere_revision_manual: requiereRevisionManual,
@@ -1313,6 +1311,7 @@ export function auditAndNormalizeReceiptPayload(rawInput: any): AuditedReceiptRe
     confianza_lectura: confianzaLectura,
     metodo_pago: metodoPago,
     banco: bancoPrincipal,
+    canal: resolvedCanal,
     banco_origen: bancoOrigen,
     banco_destino: bancoDestino,
     monto_bs: montoBs,
@@ -1434,7 +1433,7 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
   let montoLineIndex = -1;
 
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+    const line = lines[i].replace(/(\d)\s*([.,])\s*(\d)/g, '$1$2$3');
     if (/comisi[oó]n|iva\b|beneficiario|cuenta\s+debitada|tel[eé]fono|celular|c[eé]dula|rif\b/i.test(line)) {
       continue;
     }
@@ -1485,12 +1484,14 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
   }
 
   // Inferencia por patrón (Regla morfológica para soportes recortados sin etiquetas como Provinet):
-  // Si no apareció "Bs." ni "Monto", detectar cifra en formato moneda venezolana con coma y exactamente 2 decimales (ej. "576.599,07")
+  // Si no apareció "Bs." ni "Monto", detectar cifra en formato moneda venezolana con coma o punto y 2 decimales (ej. "48.742,49" o "576.599,07")
   if (montoBs === null) {
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
+      const line = lines[i].replace(/(\d)\s*([.,])\s*(\d)/g, '$1$2$3');
       if (/comisi[oó]n|iva\b|tasa\b/i.test(line)) continue;
-      const standaloneMoneyMatch = line.match(/\b(\d{1,3}(?:\.\d{3})+,\d{2}|\d{2,10},\d{2})\b/);
+      const standaloneMoneyMatch = line.match(
+        /\b(\d{1,3}(?:\.\d{3})+,\d{2}|\d{1,3}(?:,\d{3})+\.\d{2}|\d{2,10},\d{2})\b/
+      );
       if (standaloneMoneyMatch) {
         const candidate = parseVenezuelanMonto(standaloneMoneyMatch[1]);
         if (candidate && (!montoBs || candidate > montoBs)) {
@@ -1565,29 +1566,40 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
   }
 
   // Inferencia por patrón y posición (Regla morfológica para tablas recortadas sin etiquetas como Provinet):
-  // Buscar secuencia numérica pura de 6 a 15 dígitos (conservando ceros a la izquierda como "000019111"),
-  // sin separadores de miles (.), sin decimales (,) ni asteriscos (*).
+  // Buscar secuencia numérica entera de 6 a 15 dígitos (ej. "000012723" o "000019111"), incluso si comparte
+  // línea con la fecha o el monto en una tabla horizontal.
   if (!nroReferencia) {
-    const candidateRefs: { ref: string; distance: number }[] = [];
+    const candidateRefs: { ref: string; distance: number; hasLeadingZeros: boolean }[] = [];
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (i === fechaLineIndex || i === montoLineIndex) continue;
-      if (/[*•,/.]/.test(line)) continue;
-      const pureSeqMatch = line.match(/^(?:#|nro\.?\s*)?(\d{6,15})$/i);
-      if (pureSeqMatch) {
-        const normalized = normalizeReferenciaBancaria(pureSeqMatch[1]);
+      // Limpiar fechas, cuentas enmascaradas y montos con decimales de la línea antes de buscar la referencia entera
+      const strippedLine = lines[i]
+        .replace(/(\d)\s*([.,])\s*(\d)/g, '$1$2$3')
+        .replace(/\b\d{1,2}[/-]\d{1,2}[/-](?:20\d{2}|\d{2})\b/g, ' ')
+        .replace(/\b20\d{2}[/-]\d{1,2}[/-]\d{1,2}\b/g, ' ')
+        .replace(/\b01\d{2}[*•xX\d-]{8,22}\b/g, ' ')
+        .replace(/\b\d{1,3}(?:[.,]\d{3})+[.,]\d{1,2}\b/g, ' ')
+        .replace(/\b\d+[.,]\d{1,2}\b/g, ' ');
+
+      const seqMatches = strippedLine.matchAll(/(?:^|[\s|#:-])(\d{6,15})(?=$|[\s|])/g);
+      for (const m of seqMatches) {
+        const rawCandidate = m[1];
+        const normalized = normalizeReferenciaBancaria(rawCandidate);
         if (normalized && normalized.length >= 6 && normalized.length <= 15) {
           const distFecha = fechaLineIndex >= 0 ? Math.abs(i - fechaLineIndex) : 99;
           const distMonto = montoLineIndex >= 0 ? Math.abs(i - montoLineIndex) : 99;
           candidateRefs.push({
             ref: normalized,
-            distance: Math.min(distFecha, distMonto)
+            distance: Math.min(distFecha, distMonto),
+            hasLeadingZeros: /^0+/.test(normalized)
           });
         }
       }
     }
     if (candidateRefs.length > 0) {
-      candidateRefs.sort((a, b) => a.distance - b.distance);
+      candidateRefs.sort((a, b) => {
+        if (a.hasLeadingZeros !== b.hasLeadingZeros) return a.hasLeadingZeros ? -1 : 1;
+        return a.distance - b.distance;
+      });
       nroReferencia = candidateRefs[0].ref;
     }
   }
@@ -1641,13 +1653,19 @@ export function parseVenezuelanReceiptText(rawText: string): AuditedReceiptResul
 
   const metodoPago = normalizeMetodoPago('', fullText);
   const resolvedRef = nroReferencia ?? codigoAutorizacion ?? null;
+  const canalDetectado = /\bprovinet\b/i.test(fullText) || (numeroCuentaDetectada && numeroCuentaDetectada.startsWith('0108'))
+    ? 'Provinet'
+    : null;
+  const esLegible = Boolean((montoBs && montoBs > 0) || resolvedRef || fechaPago || banco || canalDetectado || numeroCuentaDetectada);
 
   return auditAndNormalizeReceiptPayload({
-    legible: Boolean((montoBs && montoBs > 0) || resolvedRef || numeroCuentaDetectada),
+    es_legible: esLegible,
+    legible: esLegible,
     confianza: montoBs && resolvedRef ? 0.9 : 0.65,
     confianza_lectura: montoBs && resolvedRef ? 'alta' : 'media',
     metodo_pago: metodoPago,
     banco,
+    canal: canalDetectado,
     banco_origen: bancoOrigen,
     banco_destino: bancoDestino,
     monto_bs: montoBs,
@@ -1714,7 +1732,7 @@ export async function extractSupportWithGemini(options: {
   }
 
   const userInstruction =
-    'Analiza minuciosamente este soporte o comprobante de pago venezolano (incluyendo soportes recortados sin etiquetas o fotos a pantallas de monitores). Extrae únicamente datos legibles aplicando las reglas anti-alucinación y devuelve el JSON estructurado.';
+    'Extrae los datos visibles en este comprobante de pago venezolano (incluyendo capturas recortadas sin etiquetas a la izquierda o fotos tomadas a monitores con efecto moiré) aplicando estrictamente las reglas determinísticas. Devuelve un objeto JSON válido con los campos: es_legible, fecha_pago, referencia, monto_bs, banco, canal, numero_cuenta, metodo_pago, titular_remitente, rif_ci_titular.';
 
   let lastErrorMsg = '';
   let sawQuota = false;
@@ -1741,7 +1759,7 @@ export async function extractSupportWithGemini(options: {
             config: {
               systemInstruction: VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT,
               responseMimeType: 'application/json',
-              responseSchema: VENEZUELAN_RECEIPT_RESPONSE_SCHEMA,
+              ...(attempt === 0 ? { responseSchema: VENEZUELAN_RECEIPT_RESPONSE_SCHEMA } : {}),
               temperature: 0.0,
               topP: 0.1
             }
@@ -1751,7 +1769,7 @@ export async function extractSupportWithGemini(options: {
           if (rawText) {
             const parsedJson = safeExtractReceiptJson(rawText);
             const audited = auditAndNormalizeReceiptPayload(parsedJson);
-            if (audited.legible || audited.lectura_exitosa) {
+            if (audited.legible || audited.es_legible || audited.lectura_exitosa) {
               return {
                 audited,
                 usedModel: modelName,
@@ -1774,8 +1792,8 @@ export async function extractSupportWithGemini(options: {
           if (/API_KEY_INVALID|API key not valid|reported as leaked|PERMISSION_DENIED/i.test(msg)) {
             break;
           }
-          if (attempt === 0 && /503|502|504|overloaded|UNAVAILABLE|fetch|network/i.test(msg)) {
-            await new Promise((r) => setTimeout(r, 350));
+          if (attempt === 0) {
+            await new Promise((r) => setTimeout(r, 250));
             continue;
           }
           break;

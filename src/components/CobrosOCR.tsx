@@ -572,7 +572,11 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
     }
 
     try {
-      const prepared = await prepareImageForGemini(finalFile, { maxDimension: 2048, quality: 0.92 });
+      const prepared = await prepareImageForGemini(finalFile, {
+        minDimension: 1280,
+        maxDimension: 2048,
+        quality: 0.92
+      });
       const isPdfFile = prepared.mimeType === 'application/pdf' || validation.isPdf;
       const resolvedFileName =
         finalFile.name || (isPdfFile ? `comprobante_${Date.now()}.pdf` : `soporte_whatsapp.jpg`);
@@ -647,6 +651,11 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
       let data: any = null;
       let resOk = false;
 
+      const clientApiKey =
+        (import.meta as any).env?.VITE_GEMINI_API_KEY ||
+        (import.meta as any).env?.VITE_GOOGLE_API_KEY ||
+        '';
+
       try {
         const res = await fetch('/api/ocr', {
           method: 'POST',
@@ -659,9 +668,37 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
         resOk = res.ok;
         const rawBodyText = await res.text();
         data = safeExtractReceiptJson(rawBodyText);
+
+        // Si el backend no logró extraer datos (ej. clave no configurada en servidor) pero hay clave en cliente, reintentar con Gemini directo
+        const hasExtractedServerData = Boolean(
+          data &&
+            (data.es_legible ||
+              data.legible ||
+              data.lectura_exitosa ||
+              data.monto_bs ||
+              data.referencia ||
+              data.fecha_pago ||
+              data.banco ||
+              data.canal)
+        );
+        if (!hasExtractedServerData && clientApiKey) {
+          const directRes = await extractSupportWithGemini({
+            apiKeys: [clientApiKey],
+            base64Data: pureBase64,
+            mimeType
+          });
+          if (
+            directRes.audited &&
+            (directRes.audited.es_legible ||
+              directRes.audited.legible ||
+              directRes.audited.lectura_exitosa)
+          ) {
+            data = directRes.audited;
+            resOk = true;
+          }
+        }
       } catch (networkErr) {
         // Fallback directo en cliente si el endpoint /api/ocr no responde y existe clave configurada
-        const clientApiKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || '';
         if (clientApiKey) {
           const directRes = await extractSupportWithGemini({
             apiKeys: [clientApiKey],
@@ -669,7 +706,7 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
             mimeType
           });
           data = directRes.audited;
-          resOk = Boolean(data?.legible || data?.lectura_exitosa);
+          resOk = Boolean(data?.es_legible || data?.legible || data?.lectura_exitosa);
         } else {
           throw networkErr;
         }
@@ -696,14 +733,18 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
 
       // 1. Método de Pago estricto (seleccionado automáticamente en el selector)
       const rawMetodoCandidate =
-        data.metodo_pago ?? datosExtraidos.plataforma_canal ?? data.plataforma_canal ?? null;
+        data.metodo_pago ??
+        data.canal ??
+        datosExtraidos.plataforma_canal ??
+        data.plataforma_canal ??
+        null;
       if (rawMetodoCandidate && rawMetodoCandidate !== 'null') {
         const normalizedMetodo = normalizeMetodoPago(
           rawMetodoCandidate,
           `${data.observacion_auditoria || ''} ${data.observacion_ia || ''} ${data.motivo_revision || ''}`
         );
         setMetodoPago(normalizedMetodo);
-        if (resOk || (data.legible !== false && data.lectura_exitosa !== false)) {
+        if (resOk || (data.es_legible !== false && data.legible !== false && data.lectura_exitosa !== false)) {
           camposCargados.push(normalizedMetodo);
         }
       }
@@ -714,7 +755,11 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
         data.cuenta_origen_o_destino ??
         data.numero_cuenta ??
         null;
-      const rawCanal = datosExtraidos.plataforma_canal ?? data.plataforma_canal ?? null;
+      const rawCanal =
+        data.canal ??
+        datosExtraidos.plataforma_canal ??
+        data.plataforma_canal ??
+        null;
       const resolvedCuentaCanal =
         (rawCuentaMask && rawCuentaMask !== 'null' ? String(rawCuentaMask).trim() : '') ||
         (rawCanal && rawCanal !== 'null' ? String(rawCanal).trim() : '');
@@ -728,9 +773,9 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
 
       // 3. Banco normalizado (priorizando banco_identificado o deducción por código de cuenta 0108 / plataforma Provinet)
       const deducedBankInfo = resolveVenezuelanBankDetails(
-        datosExtraidos.banco_identificado ??
+        data.banco ??
+          datosExtraidos.banco_identificado ??
           data.banco_identificado ??
-          data.banco ??
           data.banco_origen ??
           data.banco_destino ??
           datosExtraidos.codigo_banco ??
@@ -740,9 +785,9 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
       );
       const resolvedBanco =
         deducedBankInfo.banco_identificado ??
+        data.banco ??
         datosExtraidos.banco_identificado ??
         data.banco_identificado ??
-        data.banco ??
         data.banco_origen ??
         data.banco_destino ??
         null;

@@ -280,6 +280,7 @@ export interface CodizulcaNotaPedidoItem {
   codigoInternoAlkosto?: string | null;
   descripcion: string;
   precio: number;
+  valorUnitarioOC?: number;
   precioBruto?: number;
   descuento?: number;
   subtotal: number;
@@ -347,6 +348,7 @@ export interface ParsedOrdenCompraAlkosto {
     descuento?: number;
     costoUnitario: number;
     precioUnitario?: number;
+    valorUnitarioOC?: number;
     totalRenglon: number;
     subtotal?: number;
     tiendas?: Record<string, number>;
@@ -358,3 +360,91 @@ export interface ParsedOrdenCompraAlkosto {
     notaRevision?: string | null;
   }>;
 }
+
+// ============================================================================
+// MÓDULO PLANIFICADOR DE RUTA INTELIGENTE (RUTERO FDV - FASE 1)
+// ============================================================================
+
+export type DiaSemanaRuta = 'LUNES' | 'MARTES' | 'MIERCOLES' | 'JUEVES' | 'VIERNES' | 'SABADO';
+
+export type EstadoVisitaRuta = 'PENDIENTE' | 'EFECTIVA_PEDIDO' | 'GESTION_COBRO' | 'SIN_VENTA';
+
+export type MotivoNoVentaRuta =
+  | 'INVENTARIO_ALTO'
+  | 'SIN_CUPO_CREDITO'
+  | 'ENCARGADO_AUSENTE'
+  | 'LOCAL_CERRADO'
+  | 'PRECIO_COMPETENCIA'
+  | 'OTRO';
+
+export type PrioridadRutaCliente = 'ALTA_INACTIVO' | 'ALTA_CIERRE_5' | 'MEDIA_DESARROLLO' | 'CUMPLIDO_5';
+
+export interface AsignacionClienteRuta {
+  clienteKey: string;
+  clienteId: string;
+  clienteNombre: string;
+  vendedorId: string;
+  dias: DiaSemanaRuta[];
+  orden?: number;
+  zona?: string;
+  notasFijas?: string;
+  updatedAt: string;
+}
+
+export interface RegistroVisitaRuta {
+  id: string;
+  fecha: string; // YYYY-MM-DD
+  diaSemana: DiaSemanaRuta;
+  clienteKey: string;
+  clienteId: string;
+  clienteNombre: string;
+  vendedorId: string;
+  estado: EstadoVisitaRuta;
+  motivoNoVenta?: MotivoNoVentaRuta;
+  rubrosOfrecidos?: string[];
+  montoEstimadoUSD?: number;
+  observacion?: string;
+  checkInTimestamp: string;
+  coords?: {
+    lat: number;
+    lng: number;
+  };
+}
+
+export interface ClienteRutaEnriquecido {
+  clienteKey: string;
+  clienteId: string;
+  clienteNombre: string;
+  vendedorId: string;
+  zona?: string;
+  diasAsignados: DiaSemanaRuta[];
+  orden?: number;
+  notasFijas?: string;
+  isActivoMes: boolean;
+  rubrosComprados: string[];
+  rubrosFaltantes: string[];
+  totalRubrosActivos: number;
+  prioridad: PrioridadRutaCliente;
+  prioridadScore: number;
+  ejecutadoKgMes: number;
+  metaKgMes: number;
+  visitaHoy?: RegistroVisitaRuta;
+}
+
+export interface ResumenJornadaRuta {
+  diaSeleccionado: DiaSemanaRuta;
+  fechaISO: string;
+  totalCarteraVendedor: number;
+  totalConDiaAsignado: number;
+  totalSinDiaAsignado: number;
+  programadosHoy: number;
+  visitadosHoy: number;
+  pendientesHoy: number;
+  efectivosPedidoHoy: number;
+  gestionCobroHoy: number;
+  sinVentaHoy: number;
+  inactivosProgramadosHoy: number;
+  porcentajeAvanceRuta: number;
+  porcentajeEfectividad: number;
+}
+

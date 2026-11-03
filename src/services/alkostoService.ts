@@ -10,6 +10,7 @@ import {
 import { db } from '../lib/firebase';
 import { AlkostoOrder, EstadoPedidoAlkosto, AlkostoOrderItem, ParsedOrdenCompraAlkosto } from '../types';
 import { getAuthHeaders } from './authService';
+import { PRODUCTOS_CODIZULCA, matchProductoCodizulca, toSafeNumber } from './productosCodizulca';
 
 export const ALKOSTO_COLLECTION = 'alkosto_orders';
 const STORAGE_KEY = 'dashboard_fdv_alkosto_orders_cache';
@@ -544,17 +545,6 @@ export const CATALOGO_ALKOSTO: CatalogoAlkostoItem[] = [
 
   // --- VÍVERES, BÁSICOS Y LÁCTEOS ---
   {
-    sku: 'QS',
-    producto: 'QUESO AMARILLO',
-    categoria: 'LACTEOS',
-    presentacion: 'Barra ~3.5 kg (Caja 14 kg)',
-    kilosPorCaja: 14.0,
-    precioSugeridoUSD: 72.00,
-    codigosCadena: ['QS', 'QUESO'],
-    sinonimos: ['QUESO AMARILLO GOUDA', 'QUESO', 'QS'],
-    unidadSugerida: 'KG'
-  },
-  {
     sku: '301',
     producto: 'ACEITE VEGETAL COMESTIBLE 12X1LT',
     categoria: 'BASICOS',
@@ -692,14 +682,47 @@ export const CATALOGO_ALKOSTO: CatalogoAlkostoItem[] = [
     unidadSugerida: 'CJ'
   },
   {
-    sku: 'UTH',
-    producto: 'LECHE LIQUIDA UHT 12X1LT',
+    sku: '1536',
+    producto: 'LECHE EN POLVO VENCAMPO 10X1KG',
     categoria: 'LACTEOS',
-    presentacion: 'Caja (12 litros)',
-    kilosPorCaja: 12.0,
-    precioSugeridoUSD: 18.00,
-    codigosCadena: ['UTH', 'LECHE UTH'],
-    sinonimos: ['LECHE UHT', 'LECHE LIQUIDA', 'UTH'],
+    presentacion: 'Bulto (10 und x 1kg)',
+    kilosPorCaja: 10.0,
+    precioSugeridoUSD: 0,
+    codigosCadena: ['1536'],
+    sinonimos: ['LECHE EN POLVO VENCAMPO 10X1KG', 'LECHE EN POLVO COMPLETA VENCAMPO 1KG', 'LECHE VENCAMPO 1KG', '1536'],
+    unidadSugerida: 'CJ'
+  },
+  {
+    sku: '1556',
+    producto: 'LECHE EN POLVO VENCAMPO 10X900GR',
+    categoria: 'LACTEOS',
+    presentacion: 'Bulto (10 und x 900g)',
+    kilosPorCaja: 9.0,
+    precioSugeridoUSD: 0,
+    codigosCadena: ['1556'],
+    sinonimos: ['LECHE EN POLVO VENCAMPO 10X900GR', 'LECHE EN POLVO COMPLETA VENCAMPO 900GR', 'LECHE VENCAMPO 900GR', '1556'],
+    unidadSugerida: 'CJ'
+  },
+  {
+    sku: '1574',
+    producto: 'LECHE EN POLVO VENCAMPO 10X400GR',
+    categoria: 'LACTEOS',
+    presentacion: 'Bulto (10 und x 400g)',
+    kilosPorCaja: 4.0,
+    precioSugeridoUSD: 0,
+    codigosCadena: ['1574'],
+    sinonimos: ['LECHE EN POLVO VENCAMPO 10X400GR', 'LECHE EN POLVO COMPLETA VENCAMPO 400GR', 'LECHE VENCAMPO 400GR', '1574'],
+    unidadSugerida: 'CJ'
+  },
+  {
+    sku: '1579',
+    producto: 'LECHE EN POLVO VENCAMPO 10X500GR',
+    categoria: 'LACTEOS',
+    presentacion: 'Bulto (10 und x 500g)',
+    kilosPorCaja: 5.0,
+    precioSugeridoUSD: 0,
+    codigosCadena: ['1579'],
+    sinonimos: ['LECHE EN POLVO VENCAMPO 10X500GR', 'LECHE EN POLVO COMPLETA VENCAMPO 500GR', 'LECHE VENCAMPO 500GR', '1579'],
     unidadSugerida: 'CJ'
   },
   {
@@ -727,28 +750,6 @@ export const CATALOGO_ALKOSTO: CatalogoAlkostoItem[] = [
     unidadSugerida: 'CJ'
   },
   {
-    sku: 'LPV',
-    producto: 'LECHE EN POLVO VENCAMPO',
-    categoria: 'LACTEOS',
-    presentacion: 'Bulto (12 x 1kg / 24 x 500g)',
-    kilosPorCaja: 12.0,
-    precioSugeridoUSD: 54.00,
-    codigosCadena: ['LPV', 'LECHE EN POLVO'],
-    sinonimos: ['LECHE VENCAMPO', 'LECHE EN POLVO', 'LPV'],
-    unidadSugerida: 'CJ'
-  },
-  {
-    sku: 'JUGOS',
-    producto: 'JUGOS Y NECTAR VARIOS',
-    categoria: 'BEBIDAS',
-    presentacion: 'Caja (24 und x 250ml)',
-    kilosPorCaja: 6.0,
-    precioSugeridoUSD: 16.00,
-    codigosCadena: ['JUGOS', 'BEBIDAS'],
-    sinonimos: ['JUGOS Y NECTAR', 'JUGOS', 'BEBIDAS'],
-    unidadSugerida: 'CJ'
-  },
-  {
     sku: '1572',
     producto: 'CAJAS DE PIZZA 1X100',
     categoria: 'EMPAQUES',
@@ -760,6 +761,28 @@ export const CATALOGO_ALKOSTO: CatalogoAlkostoItem[] = [
     unidadSugerida: 'BLT'
   }
 ];
+
+// Sincronizar automáticamente los 158 productos oficiales de `Data de productos.csv` en `CATALOGO_ALKOSTO`
+(() => {
+  const existingSkus = new Set(CATALOGO_ALKOSTO.map(c => String(c.sku).trim()));
+  for (const prod of PRODUCTOS_CODIZULCA) {
+    if (!existingSkus.has(prod.codigo)) {
+      const isKg = /\b(X\s*KG|POR\s*KG|A\s+GRANEL)\b/i.test(prod.descripcion);
+      CATALOGO_ALKOSTO.push({
+        sku: prod.codigo,
+        producto: prod.descripcion,
+        categoria: 'CATALOGO CODIZULCA',
+        presentacion: isKg ? 'KG' : 'CJ',
+        kilosPorCaja: isKg ? 1.0 : 10.0,
+        precioSugeridoUSD: 0,
+        codigosCadena: [prod.codigo],
+        sinonimos: [prod.descripcion, prod.codigo],
+        unidadSugerida: isKg ? 'KG' : 'CJ'
+      });
+      existingSkus.add(prod.codigo);
+    }
+  }
+})();
 
 /**
  * Normaliza y limpia códigos de productos extraídos por OCR o ingresados por el usuario.
@@ -1259,29 +1282,33 @@ export function sanitizarPedidoSucursalAntesDeEnviar(pedido: AlkostoOrder): Alko
 
   const itemsActivos = (Array.isArray(pedido.items) ? pedido.items : [])
     .map((it: any, idx: number) => {
-      const cant = Number(
+      const cant = toSafeNumber(
         it.cantidadCajas ?? it.cantidad ?? it.bultos ?? it.cajas ?? it.cantSolicitada ?? it.cantidad_solicitada ?? 0
       );
       if (!Number.isFinite(cant) || Number.isNaN(cant) || cant <= 0) return null;
 
-      const skuClean = String(it.sku ?? it.codigo ?? '').trim();
-      const prodClean = String(it.producto ?? it.descripcion ?? '').trim();
-      if (!skuClean && !prodClean) return null;
+      const rawSku = String(it.sku ?? it.codigo ?? '').trim();
+      const rawProd = String(it.producto ?? it.descripcion ?? '').trim();
+      if (!rawSku && !rawProd) return null;
 
-      const precioBruto = Number.isFinite(Number(it.precioBrutoUSD ?? it.precio_bruto))
-        ? Number(it.precioBrutoUSD ?? it.precio_bruto)
-        : 0;
-      const descuento = Number.isFinite(Number(it.descuento)) && Number(it.descuento) > 0
-        ? Number(Number(it.descuento).toFixed(2))
-        : 0;
-      let precio = Number.isFinite(Number(it.precioUnitarioUSD ?? it.precio_unitario ?? it.precio))
-        ? Number(it.precioUnitarioUSD ?? it.precio_unitario ?? it.precio)
-        : 0;
+      const isForbiddenAlpha = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(rawSku);
+      const productoOficial = matchProductoCodizulca(isForbiddenAlpha ? '' : rawSku, rawProd);
+      const skuClean = (isForbiddenAlpha && productoOficial.codigo !== 'S/C')
+        ? productoOficial.codigo
+        : (rawSku || productoOficial.codigo);
+      const prodClean = (isForbiddenAlpha && productoOficial.codigo !== 'S/C')
+        ? productoOficial.descripcion
+        : (rawProd || productoOficial.descripcion);
+
+      const precioBruto = toSafeNumber(it.precioBrutoUSD ?? it.precio_bruto);
+      const descuento = Math.max(0, Number(toSafeNumber(it.descuento).toFixed(2)));
+      let precio = toSafeNumber(it.valorUnitarioOC ?? it.precioUnitarioUSD ?? it.precio_unitario ?? it.precio);
       if (precio <= 0 && precioBruto > 0 && descuento > 0 && descuento <= 100) {
         precio = Number((precioBruto * (1 - descuento / 100)).toFixed(4));
       }
 
-      const rawSub = Number(it.subtotalUSD ?? it.subtotal ?? it.sub_total ?? 0);
+      const rawSub = toSafeNumber(it.subtotalUSD ?? it.subtotal ?? it.sub_total ?? 0);
+      // REGLA MATEMÁTICA OBLIGATORIA: SUB TOTAL = CANT * VALOR UNITARIO DE LA OC
       const sub = precio > 0
         ? Number((cant * precio).toFixed(2))
         : (Number.isFinite(rawSub) && rawSub >= 0 ? Number(rawSub.toFixed(2)) : 0);
@@ -1333,27 +1360,31 @@ export function sanitizarPedidoSucursalAntesDeEnviar(pedido: AlkostoOrder): Alko
 
   const renglonesActivos = renglonesBase
     .map((r: any) => {
-      const cant = Number(r.cantidad ?? r.cantidad_solicitada ?? r.cantidadCajas ?? r.bultos ?? 0);
+      const cant = toSafeNumber(r.cantidad ?? r.cantidad_solicitada ?? r.cantidadCajas ?? r.bultos ?? 0);
       if (!Number.isFinite(cant) || Number.isNaN(cant) || cant <= 0) return null;
 
-      const codigo = String(r.codigo ?? r.sku ?? '').trim();
-      const descripcion = String(r.descripcion ?? r.producto ?? '').trim();
-      if (!codigo && !descripcion) return null;
+      const rawCodigo = String(r.codigo ?? r.sku ?? '').trim();
+      const rawDescripcion = String(r.descripcion ?? r.producto ?? '').trim();
+      if (!rawCodigo && !rawDescripcion) return null;
 
-      const precioBruto = Number.isFinite(Number(r.precio_bruto ?? r.precioBrutoUSD))
-        ? Number(r.precio_bruto ?? r.precioBrutoUSD)
-        : 0;
-      const descuento = Number.isFinite(Number(r.descuento)) && Number(r.descuento) > 0
-        ? Number(Number(r.descuento).toFixed(2))
-        : 0;
-      let precio = Number.isFinite(Number(r.precio_unitario ?? r.precio ?? r.precioUnitarioUSD))
-        ? Number(r.precio_unitario ?? r.precio ?? r.precioUnitarioUSD)
-        : 0;
+      const isForbiddenAlpha = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(rawCodigo);
+      const productoOficial = matchProductoCodizulca(isForbiddenAlpha ? '' : rawCodigo, rawDescripcion);
+      const codigo = (isForbiddenAlpha && productoOficial.codigo !== 'S/C')
+        ? productoOficial.codigo
+        : (rawCodigo || productoOficial.codigo);
+      const descripcion = (isForbiddenAlpha && productoOficial.codigo !== 'S/C')
+        ? productoOficial.descripcion
+        : (rawDescripcion || productoOficial.descripcion);
+
+      const precioBruto = toSafeNumber(r.precio_bruto ?? r.precioBrutoUSD);
+      const descuento = Math.max(0, Number(toSafeNumber(r.descuento).toFixed(2)));
+      let precio = toSafeNumber(r.valorUnitarioOC ?? r.precio_unitario ?? r.precio ?? r.precioUnitarioUSD);
       if (precio <= 0 && precioBruto > 0 && descuento > 0 && descuento <= 100) {
         precio = Number((precioBruto * (1 - descuento / 100)).toFixed(4));
       }
 
-      const rawSub = Number(r.subtotal ?? r.sub_total ?? r.subtotalUSD ?? 0);
+      const rawSub = toSafeNumber(r.subtotal ?? r.sub_total ?? r.subtotalUSD ?? 0);
+      // REGLA MATEMÁTICA OBLIGATORIA: SUB TOTAL = CANT * VALOR UNITARIO DE LA OC
       const sub = precio > 0
         ? Number((cant * precio).toFixed(2))
         : (Number.isFinite(rawSub) && rawSub >= 0 ? Number(rawSub.toFixed(2)) : 0);
@@ -1365,7 +1396,7 @@ export function sanitizarPedidoSucursalAntesDeEnviar(pedido: AlkostoOrder): Alko
       return {
         ...r,
         codigo,
-        sku: String(r.sku || codigo).trim(),
+        sku: String((!isForbiddenAlpha && r.sku) ? r.sku : codigo).trim(),
         descripcion,
         unidad_medida: r.unidad_medida || 'CJ',
         cantidad: Number(cant.toFixed(2)),

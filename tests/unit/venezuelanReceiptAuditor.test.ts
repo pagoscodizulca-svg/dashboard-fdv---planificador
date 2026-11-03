@@ -430,46 +430,56 @@ describe('Agente Experto en Auditoría Bancaria Venezolana (venezuelanReceiptAud
     expect(detectReceiptMimeType('data:image/webp;base64,UklGRg==')).toBe('image/webp');
   });
 
-  it('Esquema estricto VENEZUELAN_RECEIPT_RESPONSE_SCHEMA y mapeo de cuenta_origen_o_destino', () => {
+  it('Esquema estricto VENEZUELAN_RECEIPT_RESPONSE_SCHEMA, System Prompt determinista y lectura sin etiquetas ni bloqueo por recortes', () => {
     expect(VENEZUELAN_RECEIPT_RESPONSE_SCHEMA.type).toBe('OBJECT');
     expect(VENEZUELAN_RECEIPT_RESPONSE_SCHEMA.required).toEqual([
-      'lectura_exitosa',
-      'nivel_confianza',
-      'requiere_revision_manual',
-      'datos_extraidos',
-      'evidencia_visual'
+      'es_legible',
+      'fecha_pago',
+      'referencia',
+      'monto_bs',
+      'banco',
+      'canal'
     ]);
-    expect(VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT).toContain('0108*****40*****7396');
-    expect(VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT).toContain('000019111');
+    expect(VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT).toContain('23/10/2026');
+    expect(VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT).toContain('000012723');
+    expect(VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT).toContain('48.742,49');
+    expect(VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT).toContain('Provinet');
 
-    const auditedSchemaOutput = auditAndNormalizeReceiptPayload({
-      lectura_exitosa: true,
-      nivel_confianza: 'ALTO',
-      datos_extraidos: {
-        fecha_operacion: '2026-11-02',
-        fecha_original: '02/11/2026',
-        numero_referencia: '000019111',
-        monto_numerico: 576599.07,
-        monto_texto: '576.599,07',
-        moneda: 'VES',
-        banco_identificado: 'BBVA Provincial',
-        codigo_banco: '0108',
-        cuenta_origen_o_destino: '0108*****40*****7396',
-        plataforma_canal: 'Provinet'
-      },
-      evidencia_visual: {
-        tiene_etiquetas_visibles: false,
-        es_foto_de_monitor: true,
-        lineas_detectadas: ['0108*****40*****7396', '02/11/2026', '000019111', '576.599,07']
-      },
-      observaciones: null
+    const auditedFlatOutput = auditAndNormalizeReceiptPayload({
+      es_legible: true,
+      fecha_pago: '2026-10-23',
+      referencia: '000012723',
+      monto_bs: 48742.49,
+      banco: 'BBVA Provincial',
+      canal: 'Provinet',
+      numero_cuenta: '0108*****40*****7396'
     });
 
-    expect(auditedSchemaOutput.lectura_exitosa).toBe(true);
-    expect(auditedSchemaOutput.banco).toBe('BBVA Provincial');
-    expect(auditedSchemaOutput.monto_bs).toBe(576599.07);
-    expect(auditedSchemaOutput.referencia).toBe('000019111');
-    expect(auditedSchemaOutput.fecha_iso).toBe('2026-11-02');
-    expect(auditedSchemaOutput.datos_extraidos.numero_cuenta).toBe('0108*****40*****7396');
+    expect(auditedFlatOutput.es_legible).toBe(true);
+    expect(auditedFlatOutput.legible).toBe(true);
+    expect(auditedFlatOutput.lectura_exitosa).toBe(true);
+    expect(auditedFlatOutput.banco).toBe('BBVA Provincial');
+    expect(auditedFlatOutput.canal).toBe('Provinet');
+    expect(auditedFlatOutput.monto_bs).toBe(48742.49);
+    expect(auditedFlatOutput.referencia).toBe('000012723');
+    expect(auditedFlatOutput.fecha_iso).toBe('2026-10-23');
+    expect(auditedFlatOutput.datos_extraidos?.numero_cuenta).toBe('0108*****40*****7396');
+
+    // Lectura parcial con un campo nulo (ej. sin fecha en recorte) no bloquea es_legible
+    const partialCropOutput = auditAndNormalizeReceiptPayload({
+      es_legible: false,
+      fecha_pago: null,
+      referencia: '000012723',
+      monto_bs: '48.742,49',
+      banco: null,
+      canal: 'Provinet'
+    });
+    expect(partialCropOutput.es_legible).toBe(true);
+    expect(partialCropOutput.legible).toBe(true);
+    expect(partialCropOutput.banco).toBe('BBVA Provincial');
+    expect(partialCropOutput.canal).toBe('Provinet');
+    expect(partialCropOutput.referencia).toBe('000012723');
+    expect(partialCropOutput.monto_bs).toBe(48742.49);
+    expect(partialCropOutput.fecha_iso).toBeNull();
   });
 });

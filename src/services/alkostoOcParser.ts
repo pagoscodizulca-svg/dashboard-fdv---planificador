@@ -68,6 +68,23 @@ import {
   SUCURSALES_FAMILIA_CENTER,
   CADENAS_ABREVIATURAS
 } from './alkostoService';
+import {
+  ProductoCodizulca,
+  PRODUCTOS_CODIZULCA,
+  MAPA_PRODUCTOS_CODIZULCA,
+  matchProductoCodizulca,
+  toSafeNumber,
+  formatCatalogoCodizulcaForPrompt
+} from './productosCodizulca';
+
+export type { ProductoCodizulca };
+export {
+  PRODUCTOS_CODIZULCA,
+  MAPA_PRODUCTOS_CODIZULCA,
+  matchProductoCodizulca,
+  toSafeNumber,
+  formatCatalogoCodizulcaForPrompt
+};
 
 /**
  * Lista oficial de modelos Gemini en cascada automática (Paso 3):
@@ -120,6 +137,7 @@ export function buildAlkostoOcSystemPrompt(
   const sucursalesFcDetalle = (SUCURSALES_FAMILIA_CENTER || [])
     .map(s => `${s.tag || s.codigo}: "${s.nombre}" (ID ${s.codigo})`)
     .join(' | ');
+  const catalogoOficial158Str = formatCatalogoCodizulcaForPrompt();
 
   return `ROL Y OBJETIVO:
 Eres un motor experto en extracción de datos contables y comerciales (OCR + Comprensión Documental) especializado en procesar Órdenes de Compra emitidas por ALKOSTO y FAMILIA CENTER para ser integradas automáticamente en la Nota de Pedido de Codizulca.
@@ -127,41 +145,53 @@ Eres un motor experto en extracción de datos contables y comerciales (OCR + Com
 TAREA PRINCIPAL:
 Analiza minuciosamente la imagen, captura o documento PDF adjunto correspondiente a una Orden de Compra de ALKOSTO / FAMILIA CENTER en TODAS sus páginas. Extrae la totalidad de los datos de cabecera, todos los renglones de productos, códigos, el desglose de cantidades por tienda/sucursal y los montos financieros, sin omitir ni resumir ningún ítem.
 
+REGLA OBLIGATORIA DE CATÁLOGO OFICIAL DE CODIZULCA (158 PRODUCTOS):
+"PROHIBIDO inventar códigos alfabéticos o siglas (como 'LPV'). Debes buscar cada producto de la Orden de Compra dentro del Catálogo Oficial de Codizulca adjunto y asignar su \`codigo\` numérico exacto (del 9 al 1592) y su \`descripcion\` oficial exacta, prestando máxima atención a la presentación/gramaje (ej. diferenciar entre 10X1KG [cód 1536], 10X900GR [cód 1556], 10X400GR [cód 1574] y 10X500GR [cód 1579])."
+
+CATÁLOGO OFICIAL DE CODIZULCA (158 PRODUCTOS: codigo - descripcion):
+${catalogoOficial158Str}
+
 17 TIENDAS VÁLIDAS SINCRONIZADAS EN BASE DE DATOS (ÚNICAS PERMITIDAS):
 - Alkosto (${akTagsStr}): ${sucursalesAkDetalle}
 - Familia Center (${fcTagsStr}): ${sucursalesFcDetalle}
 - PROHIBIDO extraer las columnas administrativas "AKOP", "FCOP" o "CI": ignóralas por completo.
 
-REGLAS ESTRICTAS DE EXTRACCIÓN Y NORMALIZACIÓN (PASO 4):
+REGLAS ESTRICTAS DE EXTRACCIÓN Y NORMALIZACIÓN:
 1. LECTURA MULTIPÁGINA Y UNIFICACIÓN (ALKOSTO + FAMILIA CENTER):
    - Lee todas las páginas del documento (unificando la sección de Página 1 "ALKOSTO DONDE COMPRAR ES GANAR, C.A." y la de Página 2 "FAMILIA CENTER, C.A.").
    - Nunca utilices comentarios como "// resto de los ítems".
 2. EXCLUSIÓN DE COLUMNAS EXTRA (AKOP / CI) Y EXTRACCIÓN DE LAS 17 TIENDAS:
    - Extrae únicamente las 17 tiendas válidas sincronizadas en base de datos (${akTagsStr} y ${fcTagsStr}).
    - Ignora por completo las columnas "AKOP", "FCOP" y "CI" que aparecen en las tablas del PDF.
-3. CONSOLIDACIÓN POR CÓDIGO DE PRODUCTO SIN DUPLICADOS:
-   - Si el mismo código de producto (ej. "7590377000503", "7590377000510") aparece en la página de ALKOSTO (AK01..AK10) y en la página de FAMILIA CENTER (FC01..FC07), consolida sus cantidades por tienda en un único renglón por producto dentro de \`tiendas\` (ej. \`{"AK01": 15, ..., "FC01": 10}\`) y en \`distribucion_tiendas\`, evitando claves o filas duplicadas.
-   - Homologación oficial Codizulca:
-     * 7591289609129 -> codigo_principal: "21", codigo_ean: "7591289609129", unidad_medida: "CJ", descripcion_producto: "MORTADELA DE POLLO DEL CORRAL 1KG"
-     * 7591289400023 -> codigo_principal: "047", codigo_ean: "7591289400023", unidad_medida: "UND", descripcion_producto: "NUGGETS DE POLLO DEL CORRAL 460GR"
-     * 5412873178161 -> codigo_principal: "1360", codigo_ean: "5412873178161", unidad_medida: "CJ", descripcion_producto: "PAPAS FRITAS CONGELADAS MARQUISE 2,5KG"
-     * 7590377000077 -> codigo_principal: "1496", codigo_ean: "7590377000077", unidad_medida: "CJ", descripcion_producto: "MORTADELA ESPECIAL DE POLLO 900GR ASTURIAS"
-     * 7590377000589 -> codigo_principal: "1497", codigo_ean: "7590377000589", unidad_medida: "CJ", descripcion_producto: "MORTADELA ESPECIAL DE POLLO ASTURIA 500GR"
-     * 100881 -> codigo_principal: "1512", codigo_interno_alkosto: "100881", unidad_medida: "KG", descripcion_producto: "PECHUGA DE PAVO ASTURIAS X KG"
-     * 100882 -> codigo_principal: "1511", codigo_interno_alkosto: "100882", unidad_medida: "KG", descripcion_producto: "PECHUGA DE POLLO ASTURIAS X KG"
-     * 100929 -> codigo_principal: "171", codigo_interno_alkosto: "100929", unidad_medida: "KG", descripcion_producto: "JAMON COCIDO DE PAVO AHUMADO SUPERIOR ASTURIAS X KG"
-     * 100281 -> codigo_principal: "100281", codigo_interno_alkosto: "100281", unidad_medida: "KG", descripcion_producto: "QUESO MOZZARELLA CORLASA X KG"
-     * 7591210000513 -> codigo_principal: "7591210000513", codigo_ean: "7591210000513", unidad_medida: "CJ", descripcion_producto: "CREMA DE LECHE PURISIMA 500GR"
-     * 7591210000544 -> codigo_principal: "7591210000544", codigo_ean: "7591210000544", unidad_medida: "CJ", descripcion_producto: "CREMA DE LECHE PURISIMA 250GR"
-     * 7590377000503 -> codigo_principal: "7590377000503", codigo_ean: "7590377000503", unidad_medida: "CJ", descripcion_producto: "LECHE EN POLVO COMPLETA VENCAMPO 400GR"
-     * 7590377000510 -> codigo_principal: "7590377000510", codigo_ean: "7590377000510", unidad_medida: "CJ", descripcion_producto: "LECHE EN POLVO COMPLETA VENCAMPO 900GR"
+3. CONSOLIDACIÓN POR CÓDIGO DE PRODUCTO SIN DUPLICADOS Y HOMOLOGACIÓN:
+   - Si el mismo código de producto aparece en la página de ALKOSTO (AK01..AK10) y en la página de FAMILIA CENTER (FC01..FC07), consolida sus cantidades por tienda en un único renglón por producto dentro de \`tiendas\` y en \`distribucion_tiendas\` / \`desglosePorTienda\`, evitando claves o filas duplicadas.
+   - Homologación directa de EAN/PLU frecuentes en Órdenes de Compra de Alkosto hacia el Catálogo Oficial de Codizulca:
+     * 7590377000503 (LECHE EN POLVO COMPLETA VENCAMPO 400GR) -> codigo: "1574", descripcion: "LECHE EN POLVO VENCAMPO 10X400GR", unidad: "BULTO"
+     * 7590377000510 (LECHE EN POLVO COMPLETA VENCAMPO 900GR) -> codigo: "1556", descripcion: "LECHE EN POLVO VENCAMPO 10X900GR", unidad: "BULTO"
+     * LECHE EN POLVO VENCAMPO 10X1KG -> codigo: "1536", descripcion: "LECHE EN POLVO VENCAMPO 10X1KG", unidad: "BULTO"
+     * LECHE EN POLVO VENCAMPO 10X500GR -> codigo: "1579", descripcion: "LECHE EN POLVO VENCAMPO 10X500GR", unidad: "BULTO"
+     * LECHE EN POLVO VENCAMPO 20X400GR -> codigo: "1555", descripcion: "LECHE EN POLVO VENCAMPO 20X400GR", unidad: "BULTO"
+     * LECHE EN POLVO VENCAMPO 20X500GR -> codigo: "1544", descripcion: "LECHE EN POLVO VENCAMPO 20X500GR", unidad: "BULTO"
+     * 7591289609129 -> codigo: "21", descripcion: "MORTADELA ESP D/POLLO CORRAL 1X12UNI", unidad: "CJ"
+     * 7591289400023 -> codigo: "047", descripcion: "NUGGET CORRAL DE 460GM", unidad: "UND"
+     * 5412873178161 -> codigo: "1360", descripcion: "PATATAS FRESCAS MARQUISE 4X2.5KG", unidad: "CJ"
+     * 7590377000077 -> codigo: "1496", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR", unidad: "CJ"
+     * 7590377000589 -> codigo: "1497", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 20UNDX500GR", unidad: "CJ"
+     * 100881 -> codigo: "1512", descripcion: "MORT DE PAVO ASTURIAS X KG", unidad: "KG"
+     * 100882 -> codigo: "1511", descripcion: "MORT. PECHUGA DE POLLO ASTURIAS X KG", unidad: "KG"
+     * 100929 -> codigo: "1463", descripcion: "MORT. SUPERIOR ASTURIAS X KG", unidad: "KG"
+     * 100281 -> codigo: "1575", descripcion: "QUESO MOZZARELLA CORLASA 3.5KG X 4 UND", unidad: "KG"
+     * 7591210000513 -> codigo: "1091", descripcion: "CREMA DE LECHE PURISIMA 6 X 500 GRS", unidad: "CJ"
+     * 7591210000544 -> codigo: "1089", descripcion: "CREMA DE LECHE PURISIMA 12X250GRS", unidad: "CJ"
    - Elimina siempre el sufijo de PVP sugerido tras la barra en la descripción (ej. quitar "/ 2.40", "/ 6.88").
-4. FORMATO NUMÉRICO ESTÁNDAR (CRÍTICO):
+4. EXTRACCIÓN QUIRÚRGICA DE \`valorUnitarioOC\` Y FORMATO NUMÉRICO ESTÁNDAR (CRÍTICO):
+   - Extrae con precisión quirúrgica el \`valorUnitarioOC\` (Precio/Valor Unitario impreso en la Orden de Compra por cada unidad de empaque solicitada, sin confundirlo con el subtotal ni con impuestos).
+   - El sistema NUNCA debe inventar precios ni alterar el Valor Unitario que viene en la Orden de Compra. Calcula \`subtotal\` = \`cantidad * valorUnitarioOC\`.
    - Normaliza todos los números eliminando comas de miles ("9,600.00" -> 9600, "46,150.00" -> 46150) y reduciendo costos de 4 decimales ("40.0000" -> 40, "90.0000" -> 90).
    - Usa punto \`.\` exclusivamente como separador decimal y elimina símbolos de moneda \`$\`, \`Bs\`, \`%\`.
 5. CABECERA COMPLETA Y VALIDACIÓN ARITMÉTICA:
    - Extrae la cabecera completa: \`numero_orden\`, \`fecha_emision\`, \`fecha_entrega\`, \`dias_credito\`, \`tasa_cambio\` y \`observaciones\`.
-   - Comprueba en cada renglón si \`cantidad_total * costo_unitario\` coincide con \`monto_total_renglon\`. Si hay discrepancia por lectura borrosa en foto, prioriza valores legibles y marca \`alerta_revision: true\`.
+   - Comprueba en cada renglón si \`cantidad * valorUnitarioOC\` coincide con \`subtotal\`. Si hay discrepancia por lectura borrosa en foto, prioriza valores legibles y marca \`alerta_revision: true\`.
 6. SALIDA JSON PURA:
    - Devuelve ÚNICAMENTE un objeto JSON válido sin bloques Markdown (\`\`\`json) ni texto adicional.
 
@@ -191,13 +221,21 @@ ESQUEMA JSON DE SALIDA REQUERIDO:
   "renglones": [
     {
       "numero_renglon": 1,
-      "codigo_principal": "string",
+      "codigo": "1574",
+      "codigo_principal": "1574",
       "codigo_ean": "string | null",
       "codigo_interno_alkosto": "string | null",
-      "descripcion_producto": "string",
+      "descripcion": "LECHE EN POLVO VENCAMPO 10X400GR",
+      "descripcion_producto": "LECHE EN POLVO VENCAMPO 10X400GR",
+      "unidad": "BULTO",
       "unidad_medida": "CJ",
       "unidades_por_empaque": 1,
-      "cantidad_total": 0.0,
+      "cantidad": 240.0,
+      "cantidad_total": 240.0,
+      "valorUnitarioOC": 40.0,
+      "costo_unitario": 40.0,
+      "subtotal": 9600.0,
+      "monto_total_renglon": 9600.0,
       "tiendas": {
         "AK01": 0.0,
         "FC01": 0.0
@@ -209,10 +247,8 @@ ESQUEMA JSON DE SALIDA REQUERIDO:
           "cantidad": 0.0
         }
       ],
-      "costo_unitario": 0.0,
       "porcentaje_descuento": 0.0,
       "porcentaje_impuesto": 0.0,
-      "monto_total_renglon": 0.0,
       "alerta_revision": false,
       "nota_revision": "string | null"
     }
@@ -232,8 +268,15 @@ ESQUEMA JSON DE SALIDA REQUERIDO:
 export const ALKOSTO_OC_EXTRACTION_SYSTEM_PROMPT = buildAlkostoOcSystemPrompt();
 
 /**
- * Esquema estructurado de salida (`responseSchema`) para Gemini Structured Outputs (Paso 2):
- * Garantiza que el modelo devuelva JSON válido con los campos requeridos por la Nota de Pedido de Codizulca.
+ * Esquema estructurado de salida (`responseSchema`) para Gemini Structured Outputs (Paso 3):
+ * Garantiza que cada renglón devuelva obligatoriamente:
+ * - `codigo` (string: código numérico oficial de Codizulca, del 9 al 1592)
+ * - `descripcion` (string: descripción oficial de Codizulca)
+ * - `unidad` (string: ej. BULTO, CAJA, KG, UND)
+ * - `cantidad` (number: cantidad numérica solicitada)
+ * - `valorUnitarioOC` (number: valor unitario exacto leído de la Orden de Compra)
+ * - `subtotal` (number: cantidad * valorUnitarioOC)
+ * junto con `desglosePorTienda` para las 17 tiendas de Alkosto y Familia Center.
  */
 export const ALKOSTO_OC_RESPONSE_SCHEMA = {
   type: 'OBJECT',
@@ -279,14 +322,19 @@ export const ALKOSTO_OC_RESPONSE_SCHEMA = {
       items: {
         type: 'OBJECT',
         properties: {
+          codigo: {
+            type: 'STRING',
+            description: 'Código numérico oficial de Codizulca del 9 al 1592 (PROHIBIDO inventar siglas alfabéticas como LPV; ej. "1536", "1556", "1574", "1579").'
+          },
           codigoProducto: {
             type: 'STRING',
-            description: 'Código principal o SKU del producto (homologado a Codizulca o código impreso).'
+            nullable: true,
+            description: 'Código principal o SKU del producto homologado a Codizulca.'
           },
           ean: {
             type: 'STRING',
             nullable: true,
-            description: 'Código de barras EAN-13 si está presente (ej. "7590377000503").'
+            description: 'Código de barras EAN-13 impreso en la OC si está presente (ej. "7590377000503").'
           },
           codigoInternoAlkosto: {
             type: 'STRING',
@@ -295,20 +343,29 @@ export const ALKOSTO_OC_RESPONSE_SCHEMA = {
           },
           descripcion: {
             type: 'STRING',
-            description: 'Descripción limpia del producto sin el sufijo de PVP tras la barra.'
+            description: 'Descripción oficial exacta del Catálogo de Codizulca prestando máxima atención al gramaje (ej. "LECHE EN POLVO VENCAMPO 10X1KG", "LECHE EN POLVO VENCAMPO 10X400GR", "LECHE EN POLVO VENCAMPO 10X900GR").'
+          },
+          unidad: {
+            type: 'STRING',
+            description: 'Unidad de empaque solicitada: "BULTO", "CAJA", "CJ", "KG" o "UND".'
           },
           unidadMedida: {
             type: 'STRING',
             nullable: true,
-            description: 'Unidad de medida oficial: "CJ", "KG", "UND" o "BLT".'
+            description: 'Unidad de medida normalizada: "CJ", "KG", "UND" o "BLT".'
           },
           unidadesPorEmpaque: {
             type: 'NUMBER',
             nullable: true,
             description: 'Unidades por empaque (columna EMP).'
           },
+          cantidad: {
+            type: 'NUMBER',
+            description: 'Cantidad numérica solicitada del producto.'
+          },
           cantidadTotal: {
             type: 'NUMBER',
+            nullable: true,
             description: 'Cantidad total solicitada del producto sumando las sucursales válidas.'
           },
           desglosePorTienda: {
@@ -329,9 +386,14 @@ export const ALKOSTO_OC_RESPONSE_SCHEMA = {
               required: ['tienda', 'cantidad']
             }
           },
+          valorUnitarioOC: {
+            type: 'NUMBER',
+            description: 'Valor unitario exacto leído de la Orden de Compra por cada unidad de empaque solicitada (sin confundirlo con subtotal ni impuestos).'
+          },
           precioUnitario: {
             type: 'NUMBER',
-            description: 'Costo o precio unitario neto en USD (sin comas de miles).'
+            nullable: true,
+            description: 'Costo o valor unitario neto en USD leído de la Orden de Compra.'
           },
           porcentajeDescuento: {
             type: 'NUMBER',
@@ -340,15 +402,16 @@ export const ALKOSTO_OC_RESPONSE_SCHEMA = {
           },
           subtotal: {
             type: 'NUMBER',
-            description: 'Subtotal o monto total del renglón en USD (cantidadTotal * precioUnitario).'
+            description: 'Subtotal exacto del renglón en USD (cantidad * valorUnitarioOC).'
           }
         },
         required: [
-          'codigoProducto',
+          'codigo',
           'descripcion',
-          'cantidadTotal',
+          'unidad',
+          'cantidad',
           'desglosePorTienda',
-          'precioUnitario',
+          'valorUnitarioOC',
           'subtotal'
         ]
       }
@@ -2187,12 +2250,18 @@ export function validateAndNormalizeAlkostoOC(
       return;
     }
 
+    const isForbiddenAlphaCode = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(cleanCod);
+    const officialMatchIfAlpha = isForbiddenAlphaCode
+      ? matchProductoCodizulca(cleanCod, cleanDesc)
+      : undefined;
+
     const match =
-      resolverProductoPorCodigoODescripcion(cleanCod, cleanDesc) ||
+      (!isForbiddenAlphaCode ? resolverProductoPorCodigoODescripcion(cleanCod, cleanDesc) : undefined) ||
       (cleanCodEanInput ? resolverProductoPorCodigoODescripcion(cleanCodEanInput, cleanDesc) : undefined) ||
       (cleanCodAlkostoInput ? resolverProductoPorCodigoODescripcion(cleanCodAlkostoInput, cleanDesc) : undefined);
 
     const finalSku =
+      (officialMatchIfAlpha ? officialMatchIfAlpha.codigo : '') ||
       (match ? match.sku : '') ||
       (it.skuCodizulca ? normalizarCodigoProducto(it.skuCodizulca) : '') ||
       normalizarCodigoProducto(rawCodPrincipal) ||
@@ -2214,7 +2283,10 @@ export function validateAndNormalizeAlkostoOC(
       null;
 
     const finalBarcode = resolvedEan || undefined;
-    const finalDesc = cleanDesc || (match ? match.producto : '');
+    const finalDesc =
+      (officialMatchIfAlpha ? officialMatchIfAlpha.descripcion : '') ||
+      cleanDesc ||
+      (match ? match.producto : '');
 
     if (!finalCodigo) {
       issues.push({
@@ -2462,6 +2534,10 @@ export function validateAndNormalizeAlkostoOC(
 
     let precio = parseNumeroEstricto(
       pickProp(it, [
+        'valorUnitarioOC',
+        'valor_unitario_oc',
+        'valorUnitario',
+        'valor_unitario',
         'costo_unitario',
         'costoUnitario',
         'PRECIO',
@@ -2591,6 +2667,7 @@ export function validateAndNormalizeAlkostoOC(
       ...(descuentoNum > 0 ? { descuento: Number(descuentoNum.toFixed(2)) } : {}),
       costoUnitario: precio,
       precioUnitario: precio,
+      valorUnitarioOC: precio,
       totalRenglon: Number(totalRenglon.toFixed(2)),
       subtotal: Number(totalRenglon.toFixed(2)),
       tiendas: cleanTiendas,
@@ -3028,7 +3105,7 @@ export function normalizeOrderForCodizulca(rawData: any): ParsedOrdenCompraAlkos
     }
 
     const codeKey = safeStr(it.codigo || it.codigoPrincipal || it.codigoProducto || it.skuCodizulca || it.codigoBarra, `ITEM_${i + 1}`);
-    const costoUnit = safeNum(it.costoUnitario ?? it.precioUnitario, 0);
+    const costoUnit = safeNum((it as any).valorUnitarioOC ?? it.costoUnitario ?? it.precioUnitario, 0);
     const costoBruto = safeNum(it.costoBruto, costoUnit);
     const sumAk = Object.entries(cleanStores)
       .filter(([tk]) => tk.startsWith('AK'))
@@ -3082,6 +3159,7 @@ export function normalizeOrderForCodizulca(rawData: any): ParsedOrdenCompraAlkos
         ...(safeNum(it.descuento, 0) > 0 ? { descuento: Number(safeNum(it.descuento, 0).toFixed(2)) } : {}),
         costoUnitario: costoUnit,
         precioUnitario: costoUnit,
+        valorUnitarioOC: costoUnit,
         totalRenglon: effectiveTotal > 0 ? effectiveTotal : Number(safeNum(it.totalRenglon, 0).toFixed(2)),
         subtotal: effectiveTotal > 0 ? effectiveTotal : Number(safeNum(it.totalRenglon, 0).toFixed(2)),
         tiendas: cleanStores,
@@ -3438,16 +3516,35 @@ export function construirPedidoNormalizadoSucursal(params: {
   const itemsAlkosto: AlkostoOrder['items'] = [];
 
   params.filas.forEach((f, idx) => {
-    const cantidad = parseNumeroEstricto(f.cantidad, 0);
-    const precioUnitarioRaw = parseNumeroEstricto(f.precio_unitario, 0);
-    const precioBrutoRaw = parseNumeroEstricto(f.precio_bruto, 0);
-    const descuentoRaw = Math.max(0, parseNumeroEstricto(f.descuento, 0));
+    const cantidad = toSafeNumber(f.cantidad);
+    const precioUnitarioRaw = toSafeNumber((f as any).valorUnitarioOC ?? f.precio_unitario);
+    const precioBrutoRaw = toSafeNumber(f.precio_bruto);
+    const descuentoRaw = Math.max(0, toSafeNumber(f.descuento));
     if (cantidad <= 0 && !f.codigo && !f.descripcion) return;
     if (cantidad <= 0) return;
 
     const match = resolverProductoPorCodigoODescripcion(f.codigo, f.descripcion);
-    const cleanSku = String(f.skuCodizulca || (match ? match.sku : f.codigo) || 'S/C').trim();
-    const cleanDesc = limpiarDescripcionAlkosto(f.descripcion || (match ? match.producto : 'PRODUCTO'));
+    const rawCandidateCode = String(f.skuCodizulca || (match ? match.sku : f.codigo) || '').trim();
+    const isForbiddenAlpha = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(rawCandidateCode);
+    const productoOficial = matchProductoCodizulca(
+      isForbiddenAlpha ? '' : rawCandidateCode,
+      f.descripcion || (match ? match.producto : '')
+    );
+    const cleanSku = String(
+      (isForbiddenAlpha && productoOficial.codigo !== 'S/C' ? productoOficial.codigo : '') ||
+      (!isForbiddenAlpha && f.skuCodizulca ? f.skuCodizulca : '') ||
+      (!isForbiddenAlpha && match?.sku ? match.sku : '') ||
+      (productoOficial.codigo !== 'S/C' ? productoOficial.codigo : '') ||
+      (!isForbiddenAlpha ? f.codigo : '') ||
+      'S/C'
+    ).trim();
+    const cleanDesc = limpiarDescripcionAlkosto(
+      (isForbiddenAlpha && productoOficial.codigo !== 'S/C' ? productoOficial.descripcion : '') ||
+      f.descripcion ||
+      (match ? match.producto : '') ||
+      productoOficial.descripcion ||
+      'PRODUCTO'
+    );
     const unid = normalizarUnidadMedidaAlkosto(f.unid, cleanDesc, undefined, match?.unidadSugerida);
 
     // Si se indica precio bruto y descuento porcentual (0 < descuento <= 100) sin precio unitario neto explícito:
@@ -3465,11 +3562,11 @@ export function construirPedidoNormalizadoSucursal(params: {
           ? Number((((precioBrutoRaw - precioUnitario) / precioBrutoRaw) * 100).toFixed(2))
           : 0;
 
-    const calcSub = precioUnitario > 0
+    const subtotalExacto = precioUnitario > 0
       ? Number((cantidad * precioUnitario).toFixed(2))
-      : Number(parseNumeroEstricto(f.subtotal, 0).toFixed(2));
+      : Number(toSafeNumber(f.subtotal).toFixed(2));
     const safePrice = Number((Number.isFinite(precioUnitario) ? precioUnitario : 0).toFixed(4));
-    const safeSub = Number((Number.isFinite(calcSub) ? calcSub : 0).toFixed(2));
+    const safeSub = Number((Number.isFinite(subtotalExacto) ? subtotalExacto : 0).toFixed(2));
 
     const kxBox = match ? match.kilosPorCaja : (unid === 'KG' ? 1 : 10);
     const totalK = Number((unid === 'KG' ? cantidad : cantidad * kxBox).toFixed(2));
@@ -3663,9 +3760,11 @@ export function extraerPedidosNormalizadosDeOC(params: {
     const skuKey = String(f.skuCodizulca || f.codigo || '').trim().toUpperCase();
     const codKey = String(f.codigo || '').trim().toUpperCase();
     const barKey = String(f.codigoBarra || '').trim().toUpperCase();
+    const oficialKey = matchProductoCodizulca(f.skuCodizulca || f.codigo, f.descripcion).codigo.trim().toUpperCase();
     if (skuKey) editedByCode.set(skuKey, f);
     if (codKey) editedByCode.set(codKey, f);
     if (barKey) editedByCode.set(barKey, f);
+    if (oficialKey && oficialKey !== 'S/C') editedByCode.set(oficialKey, f);
   });
 
   // Fuente maestra de filas con tiendas
@@ -3687,15 +3786,29 @@ export function extraerPedidosNormalizadosDeOC(params: {
   if (rawItemsFromOC.length > 0) {
     rawItemsFromOC.forEach((ocItem, idx) => {
       const match = resolverProductoPorCodigoODescripcion(ocItem.codigo, ocItem.descripcion);
-      const skuKey = String(ocItem.skuCodizulca || (match ? match.sku : ocItem.codigo) || '').trim().toUpperCase();
+      const rawSkuCandidate = String(ocItem.skuCodizulca || (match ? match.sku : ocItem.codigo) || '').trim();
+      const isForbiddenAlpha = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(rawSkuCandidate);
+      const productoOficial = matchProductoCodizulca(
+        isForbiddenAlpha ? '' : rawSkuCandidate,
+        ocItem.descripcion || (match ? match.producto : '')
+      );
+      const skuKey = String(
+        (isForbiddenAlpha && productoOficial.codigo !== 'S/C' ? productoOficial.codigo : rawSkuCandidate) || ''
+      ).trim().toUpperCase();
       const rawKey = String(ocItem.codigo || '').trim().toUpperCase();
       const barKey = String(ocItem.codigoBarra || match?.codigoBarra || '').trim().toUpperCase();
+      const oficialKey = productoOficial.codigo !== 'S/C' ? productoOficial.codigo.toUpperCase() : '';
 
       // Solo cruzar por clave exacta de producto (NUNCA usar filasActuales[idx] cuando la vista está filtrada por tienda)
-      const editedRow = editedByCode.get(skuKey) || editedByCode.get(rawKey) || (barKey ? editedByCode.get(barKey) : undefined);
+      const editedRow =
+        editedByCode.get(skuKey) ||
+        editedByCode.get(rawKey) ||
+        (barKey ? editedByCode.get(barKey) : undefined) ||
+        (oficialKey ? editedByCode.get(oficialKey) : undefined);
       if (skuKey) usedEditedKeys.add(skuKey);
       if (rawKey) usedEditedKeys.add(rawKey);
       if (barKey) usedEditedKeys.add(barKey);
+      if (oficialKey) usedEditedKeys.add(oficialKey);
 
       const mergedTiendas: Record<string, number> = {
         ...(ocItem.tiendas || {}),
@@ -3708,14 +3821,22 @@ export function extraerPedidosNormalizadosDeOC(params: {
         editedRow &&
         (editedRow.codigo || editedRow.descripcion)
       ) {
-        const editedQty = parseNumeroEstricto(editedRow.cantSolicitada, 0);
+        const editedQty = toSafeNumber(editedRow.cantSolicitada);
         if (editedQty > 0) {
           mergedTiendas[tiendaSeleccionada] = editedQty;
         }
       }
 
-      const finalSku = editedRow?.codigo || ocItem.skuCodizulca || (match ? match.sku : ocItem.codigo);
-      const finalDesc = limpiarDescripcionAlkosto(editedRow?.descripcion || ocItem.descripcion || (match ? match.producto : ''));
+      const rawFinalSku = editedRow?.codigo || ocItem.skuCodizulca || (match ? match.sku : ocItem.codigo);
+      const finalSku = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(String(rawFinalSku || '').trim()) && productoOficial.codigo !== 'S/C'
+        ? productoOficial.codigo
+        : rawFinalSku;
+      const finalDesc = limpiarDescripcionAlkosto(
+        editedRow?.descripcion ||
+        ocItem.descripcion ||
+        (match ? match.producto : '') ||
+        (productoOficial.codigo !== 'S/C' ? productoOficial.descripcion : '')
+      );
       const finalUnid = normalizarUnidadMedidaAlkosto(
         editedRow?.unid || ocItem.unid,
         finalDesc,
@@ -3723,13 +3844,13 @@ export function extraerPedidosNormalizadosDeOC(params: {
         match?.unidadSugerida
       );
       const finalPrecio =
-        parseNumeroEstricto(editedRow?.precio, 0) ||
-        parseNumeroEstricto(ocItem.costoUnitario, 0) ||
-        (match?.precioSugeridoUSD ?? 0);
+        toSafeNumber((editedRow as any)?.valorUnitarioOC ?? editedRow?.precio) ||
+        toSafeNumber((ocItem as any).valorUnitarioOC ?? ocItem.costoUnitario ?? (ocItem as any).precioUnitario) ||
+        0;
       const finalPrecioBruto =
-        parseNumeroEstricto(editedRow?.precioBruto, 0) ||
-        parseNumeroEstricto(ocItem.costoBruto, 0);
-      const finalDescuento = parseNumeroEstricto(editedRow?.descuento, 0);
+        toSafeNumber(editedRow?.precioBruto) ||
+        toSafeNumber(ocItem.costoBruto);
+      const finalDescuento = toSafeNumber(editedRow?.descuento);
 
       masterRows.push({
         renglon: idx + 1,
@@ -3740,7 +3861,7 @@ export function extraerPedidosNormalizadosDeOC(params: {
         precio: finalPrecio,
         precioBruto: finalPrecioBruto > 0 ? finalPrecioBruto : undefined,
         descuento: finalDescuento > 0 ? finalDescuento : undefined,
-        cantSolicitada: parseNumeroEstricto(editedRow?.cantSolicitada, 0) || parseNumeroEstricto(ocItem.totalCantidad, 0),
+        cantSolicitada: toSafeNumber(editedRow?.cantSolicitada) || toSafeNumber(ocItem.totalCantidad),
         tiendas: mergedTiendas
       });
     });
@@ -3749,21 +3870,25 @@ export function extraerPedidosNormalizadosDeOC(params: {
   // Agregar cualquier fila extra que la vendedora haya insertado manualmente en la tabla y que no estuviera en rawItemsFromOC
   filasActuales.forEach(f => {
     if (!f.codigo && !f.descripcion) return;
-    const cant = parseNumeroEstricto(f.cantSolicitada, 0);
+    const cant = toSafeNumber(f.cantSolicitada);
     if (cant <= 0) return;
     const key = String(f.codigo || f.skuCodizulca || '').trim().toUpperCase();
-    if (rawItemsFromOC.length > 0 && usedEditedKeys.has(key)) {
+    const oficialKey = matchProductoCodizulca(f.skuCodizulca || f.codigo, f.descripcion).codigo.trim().toUpperCase();
+    if (rawItemsFromOC.length > 0 && (usedEditedKeys.has(key) || (oficialKey !== 'S/C' && usedEditedKeys.has(oficialKey)))) {
       return;
     }
+    const isForbiddenAlpha = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(String(f.codigo || f.skuCodizulca || '').trim());
+    const prodMatch = matchProductoCodizulca(isForbiddenAlpha ? '' : (f.skuCodizulca || f.codigo), f.descripcion);
+    const resolvedCod = (isForbiddenAlpha && prodMatch.codigo !== 'S/C') ? prodMatch.codigo : (f.codigo || prodMatch.codigo);
     masterRows.push({
       renglon: f.renglon || masterRows.length + 1,
-      codigo: f.codigo,
-      skuCodizulca: f.skuCodizulca || f.codigo,
-      descripcion: limpiarDescripcionAlkosto(f.descripcion),
+      codigo: resolvedCod,
+      skuCodizulca: (!isForbiddenAlpha && f.skuCodizulca) ? f.skuCodizulca : resolvedCod,
+      descripcion: limpiarDescripcionAlkosto(f.descripcion || prodMatch.descripcion),
       unid: f.unid || 'CJ',
-      precio: parseNumeroEstricto(f.precio, 0),
-      precioBruto: parseNumeroEstricto(f.precioBruto, 0) || undefined,
-      descuento: parseNumeroEstricto(f.descuento, 0) || undefined,
+      precio: toSafeNumber((f as any).valorUnitarioOC ?? f.precio),
+      precioBruto: toSafeNumber(f.precioBruto) || undefined,
+      descuento: toSafeNumber(f.descuento) || undefined,
       cantSolicitada: cant,
       tiendas: f.tiendas
     });

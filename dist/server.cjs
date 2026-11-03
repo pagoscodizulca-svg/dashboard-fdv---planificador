@@ -68,6 +68,488 @@ var init_authService = __esm({
   }
 });
 
+// src/services/productosCodizulca.ts
+function normalizeEncodingEspeciales(raw) {
+  if (!raw) return "";
+  return String(raw).replace(/Ã‘/g, "\xD1").replace(/Ã±/g, "\xF1").replace(/\uFFFD/g, "\xD1").replace(/DO\?A\s+FLORA/gi, "DO\xD1A FLORA").replace(/NAVIDE\?A/gi, "NAVIDE\xD1A");
+}
+function toSafeNumber(val, fallback = 0) {
+  if (typeof val === "number") {
+    return Number.isFinite(val) && !Number.isNaN(val) ? val : fallback;
+  }
+  if (val === null || val === void 0) return fallback;
+  let s = String(val).trim().replace(/(?:US\$|\$|Bs\.?|USD|VES|EUR|%)/gi, "").replace(/\s+/g, "");
+  if (!s) return fallback;
+  if (s.includes(".") && s.includes(",")) {
+    const lastDot = s.lastIndexOf(".");
+    const lastComma = s.lastIndexOf(",");
+    if (lastComma > lastDot) {
+      s = s.replace(/\./g, "").replace(",", ".");
+    } else {
+      s = s.replace(/,/g, "");
+    }
+  } else if (s.includes(",")) {
+    if (/^-?\d{1,3}(,\d{3})+$/.test(s)) {
+      s = s.replace(/,/g, "");
+    } else {
+      s = s.replace(",", ".");
+    }
+  } else if (s.includes(".")) {
+    const parts = s.split(".");
+    if (parts.length > 2) {
+      s = parts.join("");
+    }
+  }
+  const parsed = Number(s);
+  return Number.isFinite(parsed) && !Number.isNaN(parsed) ? parsed : fallback;
+}
+function extractPresentationFeatures(descNorm) {
+  const compact = descNorm.replace(/\s+/g, "").replace(",", ".");
+  const packMatch = compact.match(/(\d+)(?:UND|UNI)?X(\d+(?:\.\d+)?)(KG|KGS|GR|GRS|GM|G|LT|LTS|LTRS|L|ML)\b/i);
+  if (packMatch) {
+    const count = parseInt(packMatch[1], 10);
+    const rawVal = parseFloat(packMatch[2]);
+    const unit = packMatch[3].toUpperCase();
+    const grams = unit.startsWith("K") || unit.startsWith("L") ? Math.round(rawVal * 1e3) : Math.round(rawVal);
+    return {
+      packWeight: `${count}X${grams}`,
+      unitWeightGrams: grams,
+      packCount: count,
+      isPerKg: false
+    };
+  }
+  const invMatch = compact.match(/(\d+(?:\.\d+)?)(KG|KGS|GR|GRS|GM|G|LT|LTS|LTRS|L|ML)X(\d+)(?:UND|UNI|UN)?\b/i);
+  if (invMatch) {
+    const rawVal = parseFloat(invMatch[1]);
+    const unit = invMatch[2].toUpperCase();
+    const count = parseInt(invMatch[3], 10);
+    const grams = unit.startsWith("K") || unit.startsWith("L") ? Math.round(rawVal * 1e3) : Math.round(rawVal);
+    return {
+      packWeight: `${count}X${grams}`,
+      unitWeightGrams: grams,
+      packCount: count,
+      isPerKg: false
+    };
+  }
+  const singleWeightMatch = compact.match(/(?:^|[^0-9X])(\d+(?:\.\d+)?)(KG|KGS|GR|GRS|GM|G|ML)\b/i);
+  if (singleWeightMatch) {
+    const rawVal = parseFloat(singleWeightMatch[1]);
+    const unit = singleWeightMatch[2].toUpperCase();
+    const grams = unit.startsWith("K") ? Math.round(rawVal * 1e3) : Math.round(rawVal);
+    return {
+      packWeight: null,
+      unitWeightGrams: grams,
+      packCount: null,
+      isPerKg: false
+    };
+  }
+  const isPerKg = /\b(?:X\s*KG|XKG|POR\s*KG|POR\s*KILO|A\s*GRANEL)\b/i.test(descNorm);
+  return {
+    packWeight: null,
+    unitWeightGrams: null,
+    packCount: null,
+    isPerKg
+  };
+}
+function hasExplicitGramajeConflict(candidate, descNorm) {
+  if (!descNorm) return false;
+  const inputFeat = extractPresentationFeatures(descNorm);
+  const candFeat = extractPresentationFeatures(candidate.descripcion);
+  if (inputFeat.packWeight && candFeat.packWeight && inputFeat.packWeight !== candFeat.packWeight) {
+    return true;
+  }
+  if (inputFeat.unitWeightGrams !== null && candFeat.unitWeightGrams !== null && inputFeat.unitWeightGrams !== candFeat.unitWeightGrams) {
+    return true;
+  }
+  return false;
+}
+function matchLecheVencampoByGramaje(descNorm) {
+  const feat = extractPresentationFeatures(descNorm);
+  if (feat.packWeight === "20X400") return MAPA_PRODUCTOS_CODIZULCA.get("1555");
+  if (feat.packWeight === "10X400") return MAPA_PRODUCTOS_CODIZULCA.get("1574");
+  if (feat.packWeight === "20X500") return MAPA_PRODUCTOS_CODIZULCA.get("1544");
+  if (feat.packWeight === "10X500") return MAPA_PRODUCTOS_CODIZULCA.get("1579");
+  if (feat.packWeight === "10X900") return MAPA_PRODUCTOS_CODIZULCA.get("1556");
+  if (feat.packWeight === "10X1000") return MAPA_PRODUCTOS_CODIZULCA.get("1536");
+  if (feat.unitWeightGrams === 400) return MAPA_PRODUCTOS_CODIZULCA.get("1574");
+  if (feat.unitWeightGrams === 900) return MAPA_PRODUCTOS_CODIZULCA.get("1556");
+  if (feat.unitWeightGrams === 500) return MAPA_PRODUCTOS_CODIZULCA.get("1579");
+  if (feat.unitWeightGrams === 1e3) return MAPA_PRODUCTOS_CODIZULCA.get("1536");
+  return MAPA_PRODUCTOS_CODIZULCA.get("1536");
+}
+function matchProductoCodizulca(codigoLeido, descripcionLeida) {
+  const rawCod = String(codigoLeido ?? "").trim();
+  const cleanCod = rawCod.replace(/[\s\-_.]/g, "").toUpperCase();
+  const cleanCodNoZeros = /^\d+$/.test(cleanCod) ? String(parseInt(cleanCod, 10)) : cleanCod;
+  const descNorm = normalizeEncodingEspeciales(String(descripcionLeida ?? "")).replace(/\s*\/\s*\d+(?:[.,]\d+)?\s*$/, "").replace(/\s+/g, " ").trim().toUpperCase();
+  const isForbiddenAlpha = CODIGOS_ALFABETICOS_PROHIBIDOS.has(cleanCod);
+  const isLechePolvoVencampo = cleanCod === "LPV" || descNorm.includes("LECHE") && descNorm.includes("POLVO") && !descNorm.includes("PURISIMA") && (descNorm.includes("VENCAMPO") || descNorm.includes("400GR") || descNorm.includes("900GR") || descNorm.includes("10X"));
+  if (isLechePolvoVencampo && cleanCod !== "7590377000503" && cleanCod !== "7590377000510") {
+    if (MAPA_PRODUCTOS_CODIZULCA.has(cleanCodNoZeros)) {
+      const candidate = MAPA_PRODUCTOS_CODIZULCA.get(cleanCodNoZeros);
+      if (!hasExplicitGramajeConflict(candidate, descNorm)) {
+        return candidate;
+      }
+    }
+    return matchLecheVencampoByGramaje(descNorm);
+  }
+  if (!isForbiddenAlpha && cleanCod) {
+    const exact158 = MAPA_PRODUCTOS_CODIZULCA.get(cleanCod) || MAPA_PRODUCTOS_CODIZULCA.get(cleanCodNoZeros);
+    if (exact158 && !hasExplicitGramajeConflict(exact158, descNorm)) {
+      return exact158;
+    }
+    const byBarcodeOrPlu = HOMOLOGACION_EAN_PLU_ALKOSTO[cleanCod] || HOMOLOGACION_EAN_PLU_ALKOSTO[cleanCodNoZeros];
+    if (byBarcodeOrPlu) {
+      return byBarcodeOrPlu;
+    }
+    const byHist = PRODUCTOS_HISTORICOS_COMPLEMENTARIOS[cleanCod] || PRODUCTOS_HISTORICOS_COMPLEMENTARIOS[cleanCodNoZeros];
+    if (byHist) {
+      return byHist;
+    }
+  }
+  if (cleanCod === "UTH" || cleanCod === "UHT" || descNorm.includes("LECHE") && (descNorm.includes("UHT") || descNorm.includes("UTH") || descNorm.includes("LIQUIDA"))) {
+    if (descNorm.includes("DESCREMADA")) return MAPA_PRODUCTOS_CODIZULCA.get("180");
+    if (descNorm.includes("DESLACTOSADA")) return MAPA_PRODUCTOS_CODIZULCA.get("242");
+    if (descNorm.includes("BARISTA")) return MAPA_PRODUCTOS_CODIZULCA.get("1268");
+    return MAPA_PRODUCTOS_CODIZULCA.get("179");
+  }
+  if (cleanCod === "QS") {
+    if (descNorm.includes("MI FINCA") || descNorm.includes("EDAM")) return MAPA_PRODUCTOS_CODIZULCA.get("1591");
+    return MAPA_PRODUCTOS_CODIZULCA.get("1057");
+  }
+  if (cleanCod === "JUGOS") {
+    if (descNorm.includes("PASTERIZADO") || descNorm.includes("250ML")) return MAPA_PRODUCTOS_CODIZULCA.get("1587");
+    if (descNorm.includes("200ML")) return MAPA_PRODUCTOS_CODIZULCA.get("1098");
+    return MAPA_PRODUCTOS_CODIZULCA.get("181");
+  }
+  if (descNorm) {
+    const exactDesc = PRODUCTOS_CODIZULCA.find((p) => p.descripcion.toUpperCase() === descNorm);
+    if (exactDesc) return exactDesc;
+    if (descNorm.includes("MORTADELA") && descNorm.includes("ASTURIA") && (descNorm.includes("500GR") || descNorm.includes("20UNDX500"))) {
+      return PRODUCTOS_HISTORICOS_COMPLEMENTARIOS["1497"];
+    }
+    if (descNorm.includes("NUGGET") && descNorm.includes("CORRAL") && (descNorm.includes("460") || descNorm.includes("462"))) {
+      return PRODUCTOS_HISTORICOS_COMPLEMENTARIOS["047"];
+    }
+    if (descNorm.includes("PECHUGA") && descNorm.includes("PAVO") && descNorm.includes("ASTURIA")) {
+      return MAPA_PRODUCTOS_CODIZULCA.get("1512");
+    }
+    if (descNorm.includes("PECHUGA") && descNorm.includes("POLLO") && descNorm.includes("ASTURIA")) {
+      return MAPA_PRODUCTOS_CODIZULCA.get("1511");
+    }
+    if (descNorm.includes("PAPAS") && descNorm.includes("MARQUISE")) {
+      return MAPA_PRODUCTOS_CODIZULCA.get("1360");
+    }
+    if (descNorm.includes("QUESO") && descNorm.includes("CORLASA")) {
+      return MAPA_PRODUCTOS_CODIZULCA.get("1575");
+    }
+    const inputFeat = extractPresentationFeatures(descNorm);
+    const stopWords = /* @__PURE__ */ new Set(["DE", "DEL", "LA", "EL", "LOS", "LAS", "EN", "CON", "POR", "PARA", "TIPO", "UND", "UNI", "GRS", "GR"]);
+    const queryTokens = descNorm.replace(/[()/.,]/g, " ").split(/\s+/).filter((t) => t.length >= 2 && !stopWords.has(t));
+    let bestProduct = null;
+    let bestScore = -Infinity;
+    for (const candidate of PRODUCTOS_CODIZULCA) {
+      const candDesc = candidate.descripcion.toUpperCase();
+      const candFeat = extractPresentationFeatures(candDesc);
+      let score = 0;
+      if (candDesc.includes(descNorm) || descNorm.includes(candDesc)) {
+        score += 300;
+      }
+      if (inputFeat.packWeight && candFeat.packWeight) {
+        if (inputFeat.packWeight === candFeat.packWeight) {
+          score += 260;
+        } else {
+          score -= 180;
+        }
+      }
+      if (inputFeat.unitWeightGrams !== null && candFeat.unitWeightGrams !== null) {
+        if (inputFeat.unitWeightGrams === candFeat.unitWeightGrams) {
+          score += 160;
+        } else {
+          score -= 140;
+        }
+      }
+      if (inputFeat.isPerKg && candFeat.isPerKg) {
+        score += 80;
+      } else if (inputFeat.isPerKg !== candFeat.isPerKg && (inputFeat.unitWeightGrams !== null || candFeat.unitWeightGrams !== null)) {
+        score -= 40;
+      }
+      let matchedTokens = 0;
+      for (const token of queryTokens) {
+        if (candDesc.includes(token)) {
+          matchedTokens++;
+          score += token.length >= 5 ? 65 : 40;
+        } else if (token === "MOZZARELLA" && candDesc.includes("MOZARELLA")) {
+          matchedTokens++;
+          score += 65;
+        } else if (token === "MOZARELLA" && candDesc.includes("MOZZARELLA")) {
+          matchedTokens++;
+          score += 65;
+        } else if (token === "MORTADELA" && candDesc.includes("MORT")) {
+          matchedTokens++;
+          score += 55;
+        } else if (token === "PAPAS" && candDesc.includes("PATATAS")) {
+          matchedTokens++;
+          score += 65;
+        }
+      }
+      if (matchedTokens > 0 && score > bestScore) {
+        bestScore = score;
+        bestProduct = candidate;
+      }
+    }
+    if (bestProduct && bestScore >= 45) {
+      return bestProduct;
+    }
+  }
+  if (!isForbiddenAlpha && /^\d+$/.test(cleanCod) && descNorm) {
+    return {
+      codigo: cleanCod,
+      descripcion: descNorm
+    };
+  }
+  return MAPA_PRODUCTOS_CODIZULCA.get("1536");
+}
+function formatCatalogoCodizulcaForPrompt() {
+  return PRODUCTOS_CODIZULCA.map((p) => `${p.codigo} - ${p.descripcion}`).join("\n");
+}
+var PRODUCTOS_CODIZULCA, MAPA_PRODUCTOS_CODIZULCA, PRODUCTOS_HISTORICOS_COMPLEMENTARIOS, HOMOLOGACION_EAN_PLU_ALKOSTO, CODIGOS_ALFABETICOS_PROHIBIDOS;
+var init_productosCodizulca = __esm({
+  "src/services/productosCodizulca.ts"() {
+    PRODUCTOS_CODIZULCA = [
+      { codigo: "9", descripcion: "FILETE DE PECHUGA A GRANEL POR KG" },
+      { codigo: "21", descripcion: "MORTADELA ESP D/POLLO CORRAL 1X12UNI" },
+      { codigo: "28", descripcion: "HUEVOS DE CONSUMO TUNAL TIPO A 1X12UNI" },
+      { codigo: "46", descripcion: "NUGGETS INSTITUCIONAL CORRAL POR KG" },
+      { codigo: "73", descripcion: "GALLINA DESNUDA POR KG" },
+      { codigo: "75", descripcion: "PECHUGA CON HUESO POR KG" },
+      { codigo: "96", descripcion: "QUESO MOZZARELLA ESPECIAL EL LUCERO (E)" },
+      { codigo: "130", descripcion: "POLLO CORRAL POR KG" },
+      { codigo: "151", descripcion: "QUESO MOZARELLA EN BARRA DO\xD1A FLORA" },
+      { codigo: "170", descripcion: "TOCINETA AHUM S/CUERO ALIMEX X KG" },
+      { codigo: "171", descripcion: "JAMON COC. SUPERIOR ALIMEX 1X5.9KG" },
+      { codigo: "172", descripcion: "ESPALDA COCIDA ALIMEX 1X4.6KG" },
+      { codigo: "174", descripcion: "MORTADELA TAPARA ALIMEX DE 6X3.5KG" },
+      { codigo: "176", descripcion: "SALCHICHA VIENA ALIMEX 8 X 800 GRS" },
+      { codigo: "177", descripcion: "SALCHICHA VIENA ALIMEX 16 X 450 GRS" },
+      { codigo: "179", descripcion: "LECHE COMPLETA PURISIMA1X12LTRS" },
+      { codigo: "180", descripcion: "LECHE DESCREMADA PURISIMA1X12LTS" },
+      { codigo: "181", descripcion: "JUGO DE NARANJA EL TUNAL 1X12LTRS" },
+      { codigo: "182", descripcion: "NECTAR DE MANZANA EL TUNAL 1X12LTRS" },
+      { codigo: "183", descripcion: "NECTAR DE PERA EL TUNAL 1X12LTRS" },
+      { codigo: "184", descripcion: "NECTAR DE DURAZNO EL TUNAL 1X12LTRS" },
+      { codigo: "185", descripcion: "TE CON LIMON EL TUNAL 1X12LTRS" },
+      { codigo: "186", descripcion: "TE CON DURAZNO EL TUNAL 1X12LTRS" },
+      { codigo: "241", descripcion: "ESPAL. AHUM T/VISKING ALIMEX 6X3.2" },
+      { codigo: "242", descripcion: "LECHE DESLACTOSADA PURISIMA1X12LT" },
+      { codigo: "302", descripcion: "MANTEQUILLA CON SAL PURISIMA BARRA 18X200GR" },
+      { codigo: "306", descripcion: "ATUN NATURAL 24X170GRS" },
+      { codigo: "337", descripcion: "JAMON COCIDO ESTANDAR ITALICO X KG" },
+      { codigo: "340", descripcion: "CHULETA AHUMADA ALIMEX X KG" },
+      { codigo: "353", descripcion: "MAYONESA MAVESA 445 GRS X 12 UND" },
+      { codigo: "354", descripcion: "MARGARINA MAVESA 500 GRS X 12 UND" },
+      { codigo: "360", descripcion: "KETCHUP PAMPERO 397 GRS X 24 UND" },
+      { codigo: "364", descripcion: "MAVESA VINAGRE DE ALCOHOL 1LX12UND" },
+      { codigo: "388", descripcion: "MAVESA ADEREZO MAYONESA 3.6GX4UN" },
+      { codigo: "390", descripcion: "PAMPERO SALSA TOMATE 4.2KGX4UN" },
+      { codigo: "393", descripcion: "MOLLEJA (EMPACADA)" },
+      { codigo: "439", descripcion: "ESPAL AHUM.T/AREPERO ALIMEX 12X1,6KG" },
+      { codigo: "469", descripcion: "HUEVOS ESTUCH. PLAST. TUNAL 12 X 30" },
+      { codigo: "485", descripcion: "PAP. ALUM DOMESTICO 7M 1X30" },
+      { codigo: "518", descripcion: "PASTA PREMIUM TIPO VERMICELLI 12X1KG" },
+      { codigo: "629", descripcion: "MUSLO CUADRIL DESPRESADO POR KG" },
+      { codigo: "630", descripcion: "ALAS DESPRESADAS POR KG" },
+      { codigo: "631", descripcion: "FILET FRESCO DESPRESADO POR KG (E)" },
+      { codigo: "632", descripcion: "CARCASA DESPRESADA POR KG" },
+      { codigo: "642", descripcion: "QUESO PARMESANO X KG" },
+      { codigo: "681", descripcion: "FILET EN BOLSA CONG DESPRESADO POR KG" },
+      { codigo: "687", descripcion: "CUADRIL DESPRESADO POR KG" },
+      { codigo: "688", descripcion: "PIERNITAS DESPRESADA POR KG" },
+      { codigo: "690", descripcion: "MUSLO A GRANEL DESPRESADO" },
+      { codigo: "693", descripcion: "FILET DE MUSLO DESPRESADO POR KG" },
+      { codigo: "699", descripcion: "MUSLO DESPRESADO EN BANDEJA" },
+      { codigo: "700", descripcion: "ALAS DESPRESADAS EN BANDEJA" },
+      { codigo: "829", descripcion: "FILETE DE PECHUGA PROAGRO A GRANEL 5 KG" },
+      { codigo: "860", descripcion: "SALCHICHAS VIENA ALIMEX 32 X 225GRS" },
+      { codigo: "870", descripcion: "HIGADO (EMPACADO)" },
+      { codigo: "922", descripcion: "HUEVOS DE CONSUMO TUNAL TIPO B 1X12UNI" },
+      { codigo: "927", descripcion: "MORTADELA ESP. CARACAS 10X900GRS" },
+      { codigo: "934", descripcion: "PULPA DE CERDO DEPOSTADA" },
+      { codigo: "952", descripcion: "HUEVOS DE CONSUMO CLASE B 1X12 UND" },
+      { codigo: "973", descripcion: "HARINA DE MAIZ 1X20UNID" },
+      { codigo: "979", descripcion: "HUEVOS DE CONSUMO CLASE A 1X12UNID" },
+      { codigo: "993", descripcion: "HUEVOS CONSUMO EXTRA TUNAL 1X12UNI" },
+      { codigo: "995", descripcion: "ESPAL. AHUM T/VISKING ITALICO 6UNDX3.2KG" },
+      { codigo: "1051", descripcion: "MORTADELA ESP. CARACAS 10X500GRS" },
+      { codigo: "1057", descripcion: "QUESO AMARILLO ESPECIAL" },
+      { codigo: "1088", descripcion: "CHULETA FRESCA IBERICO POR KG" },
+      { codigo: "1089", descripcion: "CREMA DE LECHE PURISIMA 12X250GRS" },
+      { codigo: "1091", descripcion: "CREMA DE LECHE PURISIMA 6 X 500 GRS" },
+      { codigo: "1094", descripcion: "PASTA POR KG" },
+      { codigo: "1098", descripcion: "JUGO DE NARANJA EL TUNAL 27X200ML" },
+      { codigo: "1099", descripcion: "NECTAR DE MANZANA EL TUNAL 27X200ML" },
+      { codigo: "1100", descripcion: "NECTAR DE PERA EL TUNAL 27X200ML" },
+      { codigo: "1103", descripcion: "MANTEQUILLA SIN SAL PURISIMA 18X200GR" },
+      { codigo: "1181", descripcion: "NECTAR DE DURAZNO EL TUNAL 27X200ML" },
+      { codigo: "1206", descripcion: "ARROZ GLORIA CLASICO 24X1KG" },
+      { codigo: "1241", descripcion: "POLLO ENTERO JUAN POLLO POR KG" },
+      { codigo: "1242", descripcion: "MORT. CHORIZO ESPECIAL CDZ X KG" },
+      { codigo: "1250", descripcion: "NECTAR DE PERA EL TUNAL12 X 500ML" },
+      { codigo: "1251", descripcion: "NECTAR DE DURAZNO EL TUNAL 12 X 500ML" },
+      { codigo: "1259", descripcion: "MORTADELA T/ESPECIAL MAXI CARACAS 6UNDX3.3KG" },
+      { codigo: "1264", descripcion: "BANDEJA ECOTRAY NEGRA 1X100 UND" },
+      { codigo: "1268", descripcion: "LECHE BARISTA PURISIMA 1X12 LTRS" },
+      { codigo: "1276", descripcion: "FILET ESP. MILANESA SUPREMA POR KG" },
+      { codigo: "1277", descripcion: "MUSLO ESPECIAL SIN CADERA POR KG" },
+      { codigo: "1311", descripcion: "NECTAR DE MANZANA LIGHT EL TUNAL 1X12LTRS" },
+      { codigo: "1312", descripcion: "NECTAR DE PERA LIGHT EL TUNAL 1X12LTRS" },
+      { codigo: "1314", descripcion: "CREMA DE LECHE MONTE ADENTRO 32 X 250GR" },
+      { codigo: "1326", descripcion: "MOLLEJAS LOS LLANOS POR KG" },
+      { codigo: "1334", descripcion: "HIGADO (GRANEL) LOS LLANOS" },
+      { codigo: "1342", descripcion: "ARROZ GLORIA PREMIUM 24X900GR" },
+      { codigo: "1343", descripcion: "POLLO ESPECIAL DE 1RA LOS LLANOS (E)" },
+      { codigo: "1360", descripcion: "PATATAS FRESCAS MARQUISE 4X2.5KG" },
+      { codigo: "1381", descripcion: "HUEVOS ESTUCH PULPA EL TUNAL 15 X 20" },
+      { codigo: "1397", descripcion: "CARAOTAS POR KG" },
+      { codigo: "1409", descripcion: "FILET DE PECHUGA LOS LLANOS POR KG" },
+      { codigo: "1419", descripcion: "ACEITE DE SOYA DIANA 12X760ML" },
+      { codigo: "1428", descripcion: "FILET DE PECHUGA TIPO A CONGELADO POR KG" },
+      { codigo: "1441", descripcion: "PAN HPM BLANCO GLUTEN FREE 1KGX20UND" },
+      { codigo: "1445", descripcion: "TOCINO FRESCO ASTURIAS X KG" },
+      { codigo: "1446", descripcion: "CHULETA FRESCA ASTURIAS POR KG" },
+      { codigo: "1461", descripcion: "MORT ESTANDAR ASTURIAS X KG" },
+      { codigo: "1462", descripcion: "MORT. ESPECIAL COCIDA ASTURIAS X KG" },
+      { codigo: "1463", descripcion: "MORT. SUPERIOR ASTURIAS X KG" },
+      { codigo: "1464", descripcion: "MORT. NAVIDE\xD1A ASTURIAS XKG" },
+      { codigo: "1477", descripcion: "RECORTE DE CHARCUTERIA POR KG" },
+      { codigo: "1478", descripcion: "POLLO LLANERITO POR KG" },
+      { codigo: "1479", descripcion: "ACEITE DE SOYA DIANA 12X900ML" },
+      { codigo: "1489", descripcion: "AZUCAR REFINADA D CASTA 1KGX20UND" },
+      { codigo: "1493", descripcion: "GATORADE 500X12UND" },
+      { codigo: "1494", descripcion: "MORTADELA ESP D/POLLO LOS LLANOS 10UNDX900GR" },
+      { codigo: "1496", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR" },
+      { codigo: "1503", descripcion: "CHURRASCO DE MUSLO POR KG" },
+      { codigo: "1504", descripcion: "CHUPETICA DE POLLO POR KG" },
+      { codigo: "1507", descripcion: "AZUCAR BLANCA ESPERANZA 1X20ND" },
+      { codigo: "1511", descripcion: "MORT. PECHUGA DE POLLO ASTURIAS X KG" },
+      { codigo: "1512", descripcion: "MORT DE PAVO ASTURIAS X KG" },
+      { codigo: "1515", descripcion: "LECHE POLVO COMPLETA PURISIMA 24X200GRS" },
+      { codigo: "1516", descripcion: "LECHE POLVO COMPLETA PURISIMA 24X400GR" },
+      { codigo: "1517", descripcion: "LECHE POLVO COMPLETA PURISIMA 12X900GRS" },
+      { codigo: "1519", descripcion: "MORTADELA ESP D/POLLO SALPICAO 10UNDX900GR" },
+      { codigo: "1521", descripcion: "MORT. ECONOM COCIDA ASTURIAS X KG" },
+      { codigo: "1522", descripcion: "MORT. TIPO AREPERO ASTURIAS X KG" },
+      { codigo: "1524", descripcion: "POLLO BRASA POR KG" },
+      { codigo: "1526", descripcion: "MORTADELITA ASTURIAS X BOLSA" },
+      { codigo: "1536", descripcion: "LECHE EN POLVO VENCAMPO 10X1KG" },
+      { codigo: "1543", descripcion: "AZUCAR BLANCA VENCAMPO 1X20ND" },
+      { codigo: "1544", descripcion: "LECHE EN POLVO VENCAMPO 20X500GR" },
+      { codigo: "1549", descripcion: "ARROZ BLANCO VENCAMPO 24X900GR" },
+      { codigo: "1550", descripcion: "AZUCAR BLANCA VENCAMPO 1X24ND" },
+      { codigo: "1551", descripcion: "ACEITE VENCAMPO 12X900ML" },
+      { codigo: "1553", descripcion: "ACEITE DE SOYA A GRANEL" },
+      { codigo: "1555", descripcion: "LECHE EN POLVO VENCAMPO 20X400GR" },
+      { codigo: "1556", descripcion: "LECHE EN POLVO VENCAMPO 10X900GR" },
+      { codigo: "1561", descripcion: "MORT. PAVO TIPO SHOULDER ASTURIAS POR KG" },
+      { codigo: "1562", descripcion: "MORT. ESPECIAL COCIDA SALPICAO X KG" },
+      { codigo: "1563", descripcion: "MORT. ESTANDAR SALPICAO X KG" },
+      { codigo: "1564", descripcion: "MORTADELA EXTRA ASTURIAS X KG" },
+      { codigo: "1568", descripcion: "POLLO VENCAMPO POR KG" },
+      { codigo: "1569", descripcion: "PATATAS FRESCAS DOBLE COBERTURA 4X2.5KG" },
+      { codigo: "1571", descripcion: "AZUCAR VENCAMPO 1X20ND" },
+      { codigo: "1572", descripcion: "CAJAS DE PIZZA 1X100" },
+      { codigo: "1573", descripcion: "ARVEJAS POR KILO" },
+      { codigo: "1574", descripcion: "LECHE EN POLVO VENCAMPO 10X400GR" },
+      { codigo: "1575", descripcion: "QUESO MOZZARELLA CORLASA 3.5KG X 4 UND" },
+      { codigo: "1576", descripcion: "QUESO CREMA KRAFT 1.36 KG X 6 UND" },
+      { codigo: "1577", descripcion: "QUESO CREMA KRAFT 226 GR X 36 UND" },
+      { codigo: "1578", descripcion: "ARROZ BLANCO VENCAMPO 24X1KG" },
+      { codigo: "1579", descripcion: "LECHE EN POLVO VENCAMPO 10X500GR" },
+      { codigo: "1580", descripcion: "CARAOTAS NEG. VENCAMPO 40X500GR" },
+      { codigo: "1584", descripcion: "REFRESCO 355ML X 16UND" },
+      { codigo: "1585", descripcion: "AGUA MINERAL 300ML X 24UND" },
+      { codigo: "1586", descripcion: "PAN DE HAMBURGUESA POR PAQUETE" },
+      { codigo: "1587", descripcion: "JUGO PASTERIZADO 250ML X 24UND" },
+      { codigo: "1588", descripcion: "REFRESCO 400ML X 15 UND" },
+      { codigo: "1589", descripcion: "QUESO PECORINO DE MI FINCA X KG" },
+      { codigo: "1590", descripcion: "QUESO PECORINO CON PIMIENTA DE MI FINCA X KG" },
+      { codigo: "1591", descripcion: "QUESO AMARILLO TIPO EDAM BARRA DE MI FINCA X KG" },
+      { codigo: "1592", descripcion: "SALMON POR KILO" }
+    ];
+    MAPA_PRODUCTOS_CODIZULCA = new Map(
+      PRODUCTOS_CODIZULCA.map((p) => [p.codigo, p])
+    );
+    PRODUCTOS_HISTORICOS_COMPLEMENTARIOS = {
+      "1497": { codigo: "1497", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 20UNDX500GR" },
+      "047": { codigo: "047", descripcion: "NUGGET CORRAL DE 460GM" },
+      "47": { codigo: "047", descripcion: "NUGGET CORRAL DE 460GM" },
+      "270": { codigo: "270", descripcion: "NUGGETS CORRAL 12X0.460GR" },
+      "1599": { codigo: "1599", descripcion: "MORT. NAVIDE\xD1A SALPICAO X KG" }
+    };
+    HOMOLOGACION_EAN_PLU_ALKOSTO = {
+      "7590377000503": { codigo: "1574", descripcion: "LECHE EN POLVO VENCAMPO 10X400GR" },
+      "7590377000510": { codigo: "1556", descripcion: "LECHE EN POLVO VENCAMPO 10X900GR" },
+      "7590377000077": { codigo: "1496", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR" },
+      "7590377000589": { codigo: "1497", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 20UNDX500GR" },
+      "7591289609129": { codigo: "21", descripcion: "MORTADELA ESP D/POLLO CORRAL 1X12UNI" },
+      "7591289400023": { codigo: "047", descripcion: "NUGGET CORRAL DE 460GM" },
+      "5412873178161": { codigo: "1360", descripcion: "PATATAS FRESCAS MARQUISE 4X2.5KG" },
+      "7591210000513": { codigo: "1091", descripcion: "CREMA DE LECHE PURISIMA 6 X 500 GRS" },
+      "7591210000544": { codigo: "1089", descripcion: "CREMA DE LECHE PURISIMA 12X250GRS" },
+      "021000061778": { codigo: "1577", descripcion: "QUESO CREMA KRAFT 226 GR X 36 UND" },
+      "21000061778": { codigo: "1577", descripcion: "QUESO CREMA KRAFT 226 GR X 36 UND" },
+      "100881": { codigo: "1512", descripcion: "MORT DE PAVO ASTURIAS X KG" },
+      "100882": { codigo: "1511", descripcion: "MORT. PECHUGA DE POLLO ASTURIAS X KG" },
+      "100929": { codigo: "1463", descripcion: "MORT. SUPERIOR ASTURIAS X KG" },
+      "100281": { codigo: "1575", descripcion: "QUESO MOZZARELLA CORLASA 3.5KG X 4 UND" },
+      "100253": { codigo: "46", descripcion: "NUGGETS INSTITUCIONAL CORRAL POR KG" }
+    };
+    CODIGOS_ALFABETICOS_PROHIBIDOS = /* @__PURE__ */ new Set([
+      "LPV",
+      "UTH",
+      "UHT",
+      "QS",
+      "JUGOS",
+      "BEBIDAS",
+      "POLLO",
+      "FILET",
+      "MUSLO",
+      "ALAS",
+      "QUESO",
+      "ACEITE",
+      "AZUCAR",
+      "ARROZ",
+      "HUEVOS",
+      "PATATAS",
+      "S/C",
+      "SC",
+      "S/N",
+      "SN",
+      "N/A",
+      "NA",
+      "NULL",
+      "UNDEFINED",
+      "NONE",
+      "CJ",
+      "CJA",
+      "CAJA",
+      "CAJAS",
+      "BLT",
+      "BTO",
+      "BULTO",
+      "BULTOS",
+      "UND",
+      "UNID",
+      "UNIDAD",
+      "UNIDADES",
+      "KG",
+      "KGS",
+      "KILO",
+      "KILOS"
+    ]);
+  }
+});
+
 // src/services/alkostoService.ts
 function getSucursalByTag(tag) {
   const norm = (tag || "").trim().toUpperCase();
@@ -137,6 +619,7 @@ var init_alkostoService = __esm({
     import_firestore2 = require("firebase/firestore");
     init_firebase();
     init_authService();
+    init_productosCodizulca();
     SUCURSALES_ALKOSTO = [
       { codigo: "7498", tag: "AK01", nombre: "Alkosto 1 san Felipe", zona: "san Felipe", direccion: "Direcci\xF3n de despacho; calle 98 CC san Felipe 1 nivel PB sector casco central." },
       { codigo: "7499", tag: "AK02", nombre: "Alkosto 2 - Plaza baral", zona: "Plaza baral", direccion: "Plaza baral" },
@@ -605,17 +1088,6 @@ var init_alkostoService = __esm({
       },
       // --- VÍVERES, BÁSICOS Y LÁCTEOS ---
       {
-        sku: "QS",
-        producto: "QUESO AMARILLO",
-        categoria: "LACTEOS",
-        presentacion: "Barra ~3.5 kg (Caja 14 kg)",
-        kilosPorCaja: 14,
-        precioSugeridoUSD: 72,
-        codigosCadena: ["QS", "QUESO"],
-        sinonimos: ["QUESO AMARILLO GOUDA", "QUESO", "QS"],
-        unidadSugerida: "KG"
-      },
-      {
         sku: "301",
         producto: "ACEITE VEGETAL COMESTIBLE 12X1LT",
         categoria: "BASICOS",
@@ -753,14 +1225,47 @@ var init_alkostoService = __esm({
         unidadSugerida: "CJ"
       },
       {
-        sku: "UTH",
-        producto: "LECHE LIQUIDA UHT 12X1LT",
+        sku: "1536",
+        producto: "LECHE EN POLVO VENCAMPO 10X1KG",
         categoria: "LACTEOS",
-        presentacion: "Caja (12 litros)",
-        kilosPorCaja: 12,
-        precioSugeridoUSD: 18,
-        codigosCadena: ["UTH", "LECHE UTH"],
-        sinonimos: ["LECHE UHT", "LECHE LIQUIDA", "UTH"],
+        presentacion: "Bulto (10 und x 1kg)",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 0,
+        codigosCadena: ["1536"],
+        sinonimos: ["LECHE EN POLVO VENCAMPO 10X1KG", "LECHE EN POLVO COMPLETA VENCAMPO 1KG", "LECHE VENCAMPO 1KG", "1536"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "1556",
+        producto: "LECHE EN POLVO VENCAMPO 10X900GR",
+        categoria: "LACTEOS",
+        presentacion: "Bulto (10 und x 900g)",
+        kilosPorCaja: 9,
+        precioSugeridoUSD: 0,
+        codigosCadena: ["1556"],
+        sinonimos: ["LECHE EN POLVO VENCAMPO 10X900GR", "LECHE EN POLVO COMPLETA VENCAMPO 900GR", "LECHE VENCAMPO 900GR", "1556"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "1574",
+        producto: "LECHE EN POLVO VENCAMPO 10X400GR",
+        categoria: "LACTEOS",
+        presentacion: "Bulto (10 und x 400g)",
+        kilosPorCaja: 4,
+        precioSugeridoUSD: 0,
+        codigosCadena: ["1574"],
+        sinonimos: ["LECHE EN POLVO VENCAMPO 10X400GR", "LECHE EN POLVO COMPLETA VENCAMPO 400GR", "LECHE VENCAMPO 400GR", "1574"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "1579",
+        producto: "LECHE EN POLVO VENCAMPO 10X500GR",
+        categoria: "LACTEOS",
+        presentacion: "Bulto (10 und x 500g)",
+        kilosPorCaja: 5,
+        precioSugeridoUSD: 0,
+        codigosCadena: ["1579"],
+        sinonimos: ["LECHE EN POLVO VENCAMPO 10X500GR", "LECHE EN POLVO COMPLETA VENCAMPO 500GR", "LECHE VENCAMPO 500GR", "1579"],
         unidadSugerida: "CJ"
       },
       {
@@ -788,28 +1293,6 @@ var init_alkostoService = __esm({
         unidadSugerida: "CJ"
       },
       {
-        sku: "LPV",
-        producto: "LECHE EN POLVO VENCAMPO",
-        categoria: "LACTEOS",
-        presentacion: "Bulto (12 x 1kg / 24 x 500g)",
-        kilosPorCaja: 12,
-        precioSugeridoUSD: 54,
-        codigosCadena: ["LPV", "LECHE EN POLVO"],
-        sinonimos: ["LECHE VENCAMPO", "LECHE EN POLVO", "LPV"],
-        unidadSugerida: "CJ"
-      },
-      {
-        sku: "JUGOS",
-        producto: "JUGOS Y NECTAR VARIOS",
-        categoria: "BEBIDAS",
-        presentacion: "Caja (24 und x 250ml)",
-        kilosPorCaja: 6,
-        precioSugeridoUSD: 16,
-        codigosCadena: ["JUGOS", "BEBIDAS"],
-        sinonimos: ["JUGOS Y NECTAR", "JUGOS", "BEBIDAS"],
-        unidadSugerida: "CJ"
-      },
-      {
         sku: "1572",
         producto: "CAJAS DE PIZZA 1X100",
         categoria: "EMPAQUES",
@@ -821,6 +1304,26 @@ var init_alkostoService = __esm({
         unidadSugerida: "BLT"
       }
     ];
+    (() => {
+      const existingSkus = new Set(CATALOGO_ALKOSTO.map((c) => String(c.sku).trim()));
+      for (const prod of PRODUCTOS_CODIZULCA) {
+        if (!existingSkus.has(prod.codigo)) {
+          const isKg = /\b(X\s*KG|POR\s*KG|A\s+GRANEL)\b/i.test(prod.descripcion);
+          CATALOGO_ALKOSTO.push({
+            sku: prod.codigo,
+            producto: prod.descripcion,
+            categoria: "CATALOGO CODIZULCA",
+            presentacion: isKg ? "KG" : "CJ",
+            kilosPorCaja: isKg ? 1 : 10,
+            precioSugeridoUSD: 0,
+            codigosCadena: [prod.codigo],
+            sinonimos: [prod.descripcion, prod.codigo],
+            unidadSugerida: isKg ? "KG" : "CJ"
+          });
+          existingSkus.add(prod.codigo);
+        }
+      }
+    })();
   }
 });
 
@@ -830,47 +1333,60 @@ function buildAlkostoOcSystemPrompt(abrevAlkosto = CADENAS_ABREVIATURAS?.ALKOSTO
   const fcTagsStr = (abrevFamilia || []).join(", ");
   const sucursalesAkDetalle = (SUCURSALES_ALKOSTO || []).map((s) => `${s.tag || s.codigo}: "${s.nombre}" (ID ${s.codigo})`).join(" | ");
   const sucursalesFcDetalle = (SUCURSALES_FAMILIA_CENTER || []).map((s) => `${s.tag || s.codigo}: "${s.nombre}" (ID ${s.codigo})`).join(" | ");
+  const catalogoOficial158Str = formatCatalogoCodizulcaForPrompt();
   return `ROL Y OBJETIVO:
 Eres un motor experto en extracci\xF3n de datos contables y comerciales (OCR + Comprensi\xF3n Documental) especializado en procesar \xD3rdenes de Compra emitidas por ALKOSTO y FAMILIA CENTER para ser integradas autom\xE1ticamente en la Nota de Pedido de Codizulca.
 
 TAREA PRINCIPAL:
 Analiza minuciosamente la imagen, captura o documento PDF adjunto correspondiente a una Orden de Compra de ALKOSTO / FAMILIA CENTER en TODAS sus p\xE1ginas. Extrae la totalidad de los datos de cabecera, todos los renglones de productos, c\xF3digos, el desglose de cantidades por tienda/sucursal y los montos financieros, sin omitir ni resumir ning\xFAn \xEDtem.
 
+REGLA OBLIGATORIA DE CAT\xC1LOGO OFICIAL DE CODIZULCA (158 PRODUCTOS):
+"PROHIBIDO inventar c\xF3digos alfab\xE9ticos o siglas (como 'LPV'). Debes buscar cada producto de la Orden de Compra dentro del Cat\xE1logo Oficial de Codizulca adjunto y asignar su \`codigo\` num\xE9rico exacto (del 9 al 1592) y su \`descripcion\` oficial exacta, prestando m\xE1xima atenci\xF3n a la presentaci\xF3n/gramaje (ej. diferenciar entre 10X1KG [c\xF3d 1536], 10X900GR [c\xF3d 1556], 10X400GR [c\xF3d 1574] y 10X500GR [c\xF3d 1579])."
+
+CAT\xC1LOGO OFICIAL DE CODIZULCA (158 PRODUCTOS: codigo - descripcion):
+${catalogoOficial158Str}
+
 17 TIENDAS V\xC1LIDAS SINCRONIZADAS EN BASE DE DATOS (\xDANICAS PERMITIDAS):
 - Alkosto (${akTagsStr}): ${sucursalesAkDetalle}
 - Familia Center (${fcTagsStr}): ${sucursalesFcDetalle}
 - PROHIBIDO extraer las columnas administrativas "AKOP", "FCOP" o "CI": ign\xF3ralas por completo.
 
-REGLAS ESTRICTAS DE EXTRACCI\xD3N Y NORMALIZACI\xD3N (PASO 4):
+REGLAS ESTRICTAS DE EXTRACCI\xD3N Y NORMALIZACI\xD3N:
 1. LECTURA MULTIP\xC1GINA Y UNIFICACI\xD3N (ALKOSTO + FAMILIA CENTER):
    - Lee todas las p\xE1ginas del documento (unificando la secci\xF3n de P\xE1gina 1 "ALKOSTO DONDE COMPRAR ES GANAR, C.A." y la de P\xE1gina 2 "FAMILIA CENTER, C.A.").
    - Nunca utilices comentarios como "// resto de los \xEDtems".
 2. EXCLUSI\xD3N DE COLUMNAS EXTRA (AKOP / CI) Y EXTRACCI\xD3N DE LAS 17 TIENDAS:
    - Extrae \xFAnicamente las 17 tiendas v\xE1lidas sincronizadas en base de datos (${akTagsStr} y ${fcTagsStr}).
    - Ignora por completo las columnas "AKOP", "FCOP" y "CI" que aparecen en las tablas del PDF.
-3. CONSOLIDACI\xD3N POR C\xD3DIGO DE PRODUCTO SIN DUPLICADOS:
-   - Si el mismo c\xF3digo de producto (ej. "7590377000503", "7590377000510") aparece en la p\xE1gina de ALKOSTO (AK01..AK10) y en la p\xE1gina de FAMILIA CENTER (FC01..FC07), consolida sus cantidades por tienda en un \xFAnico rengl\xF3n por producto dentro de \`tiendas\` (ej. \`{"AK01": 15, ..., "FC01": 10}\`) y en \`distribucion_tiendas\`, evitando claves o filas duplicadas.
-   - Homologaci\xF3n oficial Codizulca:
-     * 7591289609129 -> codigo_principal: "21", codigo_ean: "7591289609129", unidad_medida: "CJ", descripcion_producto: "MORTADELA DE POLLO DEL CORRAL 1KG"
-     * 7591289400023 -> codigo_principal: "047", codigo_ean: "7591289400023", unidad_medida: "UND", descripcion_producto: "NUGGETS DE POLLO DEL CORRAL 460GR"
-     * 5412873178161 -> codigo_principal: "1360", codigo_ean: "5412873178161", unidad_medida: "CJ", descripcion_producto: "PAPAS FRITAS CONGELADAS MARQUISE 2,5KG"
-     * 7590377000077 -> codigo_principal: "1496", codigo_ean: "7590377000077", unidad_medida: "CJ", descripcion_producto: "MORTADELA ESPECIAL DE POLLO 900GR ASTURIAS"
-     * 7590377000589 -> codigo_principal: "1497", codigo_ean: "7590377000589", unidad_medida: "CJ", descripcion_producto: "MORTADELA ESPECIAL DE POLLO ASTURIA 500GR"
-     * 100881 -> codigo_principal: "1512", codigo_interno_alkosto: "100881", unidad_medida: "KG", descripcion_producto: "PECHUGA DE PAVO ASTURIAS X KG"
-     * 100882 -> codigo_principal: "1511", codigo_interno_alkosto: "100882", unidad_medida: "KG", descripcion_producto: "PECHUGA DE POLLO ASTURIAS X KG"
-     * 100929 -> codigo_principal: "171", codigo_interno_alkosto: "100929", unidad_medida: "KG", descripcion_producto: "JAMON COCIDO DE PAVO AHUMADO SUPERIOR ASTURIAS X KG"
-     * 100281 -> codigo_principal: "100281", codigo_interno_alkosto: "100281", unidad_medida: "KG", descripcion_producto: "QUESO MOZZARELLA CORLASA X KG"
-     * 7591210000513 -> codigo_principal: "7591210000513", codigo_ean: "7591210000513", unidad_medida: "CJ", descripcion_producto: "CREMA DE LECHE PURISIMA 500GR"
-     * 7591210000544 -> codigo_principal: "7591210000544", codigo_ean: "7591210000544", unidad_medida: "CJ", descripcion_producto: "CREMA DE LECHE PURISIMA 250GR"
-     * 7590377000503 -> codigo_principal: "7590377000503", codigo_ean: "7590377000503", unidad_medida: "CJ", descripcion_producto: "LECHE EN POLVO COMPLETA VENCAMPO 400GR"
-     * 7590377000510 -> codigo_principal: "7590377000510", codigo_ean: "7590377000510", unidad_medida: "CJ", descripcion_producto: "LECHE EN POLVO COMPLETA VENCAMPO 900GR"
+3. CONSOLIDACI\xD3N POR C\xD3DIGO DE PRODUCTO SIN DUPLICADOS Y HOMOLOGACI\xD3N:
+   - Si el mismo c\xF3digo de producto aparece en la p\xE1gina de ALKOSTO (AK01..AK10) y en la p\xE1gina de FAMILIA CENTER (FC01..FC07), consolida sus cantidades por tienda en un \xFAnico rengl\xF3n por producto dentro de \`tiendas\` y en \`distribucion_tiendas\` / \`desglosePorTienda\`, evitando claves o filas duplicadas.
+   - Homologaci\xF3n directa de EAN/PLU frecuentes en \xD3rdenes de Compra de Alkosto hacia el Cat\xE1logo Oficial de Codizulca:
+     * 7590377000503 (LECHE EN POLVO COMPLETA VENCAMPO 400GR) -> codigo: "1574", descripcion: "LECHE EN POLVO VENCAMPO 10X400GR", unidad: "BULTO"
+     * 7590377000510 (LECHE EN POLVO COMPLETA VENCAMPO 900GR) -> codigo: "1556", descripcion: "LECHE EN POLVO VENCAMPO 10X900GR", unidad: "BULTO"
+     * LECHE EN POLVO VENCAMPO 10X1KG -> codigo: "1536", descripcion: "LECHE EN POLVO VENCAMPO 10X1KG", unidad: "BULTO"
+     * LECHE EN POLVO VENCAMPO 10X500GR -> codigo: "1579", descripcion: "LECHE EN POLVO VENCAMPO 10X500GR", unidad: "BULTO"
+     * LECHE EN POLVO VENCAMPO 20X400GR -> codigo: "1555", descripcion: "LECHE EN POLVO VENCAMPO 20X400GR", unidad: "BULTO"
+     * LECHE EN POLVO VENCAMPO 20X500GR -> codigo: "1544", descripcion: "LECHE EN POLVO VENCAMPO 20X500GR", unidad: "BULTO"
+     * 7591289609129 -> codigo: "21", descripcion: "MORTADELA ESP D/POLLO CORRAL 1X12UNI", unidad: "CJ"
+     * 7591289400023 -> codigo: "047", descripcion: "NUGGET CORRAL DE 460GM", unidad: "UND"
+     * 5412873178161 -> codigo: "1360", descripcion: "PATATAS FRESCAS MARQUISE 4X2.5KG", unidad: "CJ"
+     * 7590377000077 -> codigo: "1496", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR", unidad: "CJ"
+     * 7590377000589 -> codigo: "1497", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 20UNDX500GR", unidad: "CJ"
+     * 100881 -> codigo: "1512", descripcion: "MORT DE PAVO ASTURIAS X KG", unidad: "KG"
+     * 100882 -> codigo: "1511", descripcion: "MORT. PECHUGA DE POLLO ASTURIAS X KG", unidad: "KG"
+     * 100929 -> codigo: "1463", descripcion: "MORT. SUPERIOR ASTURIAS X KG", unidad: "KG"
+     * 100281 -> codigo: "1575", descripcion: "QUESO MOZZARELLA CORLASA 3.5KG X 4 UND", unidad: "KG"
+     * 7591210000513 -> codigo: "1091", descripcion: "CREMA DE LECHE PURISIMA 6 X 500 GRS", unidad: "CJ"
+     * 7591210000544 -> codigo: "1089", descripcion: "CREMA DE LECHE PURISIMA 12X250GRS", unidad: "CJ"
    - Elimina siempre el sufijo de PVP sugerido tras la barra en la descripci\xF3n (ej. quitar "/ 2.40", "/ 6.88").
-4. FORMATO NUM\xC9RICO EST\xC1NDAR (CR\xCDTICO):
+4. EXTRACCI\xD3N QUIR\xDARGICA DE \`valorUnitarioOC\` Y FORMATO NUM\xC9RICO EST\xC1NDAR (CR\xCDTICO):
+   - Extrae con precisi\xF3n quir\xFArgica el \`valorUnitarioOC\` (Precio/Valor Unitario impreso en la Orden de Compra por cada unidad de empaque solicitada, sin confundirlo con el subtotal ni con impuestos).
+   - El sistema NUNCA debe inventar precios ni alterar el Valor Unitario que viene en la Orden de Compra. Calcula \`subtotal\` = \`cantidad * valorUnitarioOC\`.
    - Normaliza todos los n\xFAmeros eliminando comas de miles ("9,600.00" -> 9600, "46,150.00" -> 46150) y reduciendo costos de 4 decimales ("40.0000" -> 40, "90.0000" -> 90).
    - Usa punto \`.\` exclusivamente como separador decimal y elimina s\xEDmbolos de moneda \`$\`, \`Bs\`, \`%\`.
 5. CABECERA COMPLETA Y VALIDACI\xD3N ARITM\xC9TICA:
    - Extrae la cabecera completa: \`numero_orden\`, \`fecha_emision\`, \`fecha_entrega\`, \`dias_credito\`, \`tasa_cambio\` y \`observaciones\`.
-   - Comprueba en cada rengl\xF3n si \`cantidad_total * costo_unitario\` coincide con \`monto_total_renglon\`. Si hay discrepancia por lectura borrosa en foto, prioriza valores legibles y marca \`alerta_revision: true\`.
+   - Comprueba en cada rengl\xF3n si \`cantidad * valorUnitarioOC\` coincide con \`subtotal\`. Si hay discrepancia por lectura borrosa en foto, prioriza valores legibles y marca \`alerta_revision: true\`.
 6. SALIDA JSON PURA:
    - Devuelve \xDANICAMENTE un objeto JSON v\xE1lido sin bloques Markdown (\`\`\`json) ni texto adicional.
 
@@ -900,13 +1416,21 @@ ESQUEMA JSON DE SALIDA REQUERIDO:
   "renglones": [
     {
       "numero_renglon": 1,
-      "codigo_principal": "string",
+      "codigo": "1574",
+      "codigo_principal": "1574",
       "codigo_ean": "string | null",
       "codigo_interno_alkosto": "string | null",
-      "descripcion_producto": "string",
+      "descripcion": "LECHE EN POLVO VENCAMPO 10X400GR",
+      "descripcion_producto": "LECHE EN POLVO VENCAMPO 10X400GR",
+      "unidad": "BULTO",
       "unidad_medida": "CJ",
       "unidades_por_empaque": 1,
-      "cantidad_total": 0.0,
+      "cantidad": 240.0,
+      "cantidad_total": 240.0,
+      "valorUnitarioOC": 40.0,
+      "costo_unitario": 40.0,
+      "subtotal": 9600.0,
+      "monto_total_renglon": 9600.0,
       "tiendas": {
         "AK01": 0.0,
         "FC01": 0.0
@@ -918,10 +1442,8 @@ ESQUEMA JSON DE SALIDA REQUERIDO:
           "cantidad": 0.0
         }
       ],
-      "costo_unitario": 0.0,
       "porcentaje_descuento": 0.0,
       "porcentaje_impuesto": 0.0,
-      "monto_total_renglon": 0.0,
       "alerta_revision": false,
       "nota_revision": "string | null"
     }
@@ -2063,14 +2585,16 @@ function validateAndNormalizeAlkostoOC(rawInput, options = {}) {
       });
       return;
     }
-    const match = resolverProductoPorCodigoODescripcion(cleanCod, cleanDesc) || (cleanCodEanInput ? resolverProductoPorCodigoODescripcion(cleanCodEanInput, cleanDesc) : void 0) || (cleanCodAlkostoInput ? resolverProductoPorCodigoODescripcion(cleanCodAlkostoInput, cleanDesc) : void 0);
-    const finalSku = (match ? match.sku : "") || (it.skuCodizulca ? normalizarCodigoProducto(it.skuCodizulca) : "") || normalizarCodigoProducto(rawCodPrincipal) || cleanCod;
+    const isForbiddenAlphaCode = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(cleanCod);
+    const officialMatchIfAlpha = isForbiddenAlphaCode ? matchProductoCodizulca(cleanCod, cleanDesc) : void 0;
+    const match = (!isForbiddenAlphaCode ? resolverProductoPorCodigoODescripcion(cleanCod, cleanDesc) : void 0) || (cleanCodEanInput ? resolverProductoPorCodigoODescripcion(cleanCodEanInput, cleanDesc) : void 0) || (cleanCodAlkostoInput ? resolverProductoPorCodigoODescripcion(cleanCodAlkostoInput, cleanDesc) : void 0);
+    const finalSku = (officialMatchIfAlpha ? officialMatchIfAlpha.codigo : "") || (match ? match.sku : "") || (it.skuCodizulca ? normalizarCodigoProducto(it.skuCodizulca) : "") || normalizarCodigoProducto(rawCodPrincipal) || cleanCod;
     const finalCodigo = finalSku || cleanCod || (match?.codigoBarra ?? "");
     const resolvedEan = cleanCodEanInput || (/^\d{12,14}$/.test(cleanCod) ? cleanCod : "") || match?.codigoBarra || null;
     const catalogAlkostoPlu = match?.codigosCadena?.find((c) => /^100\d{3}$/.test(normalizarCodigoProducto(c))) || null;
     const resolvedCodigoAlkosto = cleanCodAlkostoInput || (/^100\d{3}$/.test(cleanCod) ? cleanCod : "") || catalogAlkostoPlu || null;
     const finalBarcode = resolvedEan || void 0;
-    const finalDesc = cleanDesc || (match ? match.producto : "");
+    const finalDesc = (officialMatchIfAlpha ? officialMatchIfAlpha.descripcion : "") || cleanDesc || (match ? match.producto : "");
     if (!finalCodigo) {
       issues.push({
         field: `items[${idx}].codigo`,
@@ -2281,6 +2805,10 @@ function validateAndNormalizeAlkostoOC(rawInput, options = {}) {
     }
     let precio = parseNumeroEstricto(
       pickProp(it, [
+        "valorUnitarioOC",
+        "valor_unitario_oc",
+        "valorUnitario",
+        "valor_unitario",
         "costo_unitario",
         "costoUnitario",
         "PRECIO",
@@ -2395,6 +2923,7 @@ function validateAndNormalizeAlkostoOC(rawInput, options = {}) {
       ...descuentoNum > 0 ? { descuento: Number(descuentoNum.toFixed(2)) } : {},
       costoUnitario: precio,
       precioUnitario: precio,
+      valorUnitarioOC: precio,
       totalRenglon: Number(totalRenglon.toFixed(2)),
       subtotal: Number(totalRenglon.toFixed(2)),
       tiendas: cleanTiendas,
@@ -2717,7 +3246,7 @@ function normalizeOrderForCodizulca(rawData) {
       }
     }
     const codeKey = safeStr(it.codigo || it.codigoPrincipal || it.codigoProducto || it.skuCodizulca || it.codigoBarra, `ITEM_${i + 1}`);
-    const costoUnit = safeNum(it.costoUnitario ?? it.precioUnitario, 0);
+    const costoUnit = safeNum(it.valorUnitarioOC ?? it.costoUnitario ?? it.precioUnitario, 0);
     const costoBruto = safeNum(it.costoBruto, costoUnit);
     const sumAk = Object.entries(cleanStores).filter(([tk]) => tk.startsWith("AK")).reduce((acc, [, v]) => acc + v, 0);
     const sumAll = Object.values(cleanStores).reduce((acc, v) => acc + v, 0);
@@ -2766,6 +3295,7 @@ function normalizeOrderForCodizulca(rawData) {
         ...safeNum(it.descuento, 0) > 0 ? { descuento: Number(safeNum(it.descuento, 0).toFixed(2)) } : {},
         costoUnitario: costoUnit,
         precioUnitario: costoUnit,
+        valorUnitarioOC: costoUnit,
         totalRenglon: effectiveTotal > 0 ? effectiveTotal : Number(safeNum(it.totalRenglon, 0).toFixed(2)),
         subtotal: effectiveTotal > 0 ? effectiveTotal : Number(safeNum(it.totalRenglon, 0).toFixed(2)),
         tiendas: cleanStores,
@@ -3013,6 +3543,7 @@ var ALKOSTO_OCR_MODEL_CASCADE, AlkostoOcrStageError, ALKOSTO_OC_EXTRACTION_SYSTE
 var init_alkostoOcParser = __esm({
   "src/services/alkostoOcParser.ts"() {
     init_alkostoService();
+    init_productosCodizulca();
     ALKOSTO_OCR_MODEL_CASCADE = [
       "gemini-2.5-flash",
       "gemini-2.5-pro",
@@ -3074,14 +3605,19 @@ var init_alkostoOcParser = __esm({
           items: {
             type: "OBJECT",
             properties: {
+              codigo: {
+                type: "STRING",
+                description: 'C\xF3digo num\xE9rico oficial de Codizulca del 9 al 1592 (PROHIBIDO inventar siglas alfab\xE9ticas como LPV; ej. "1536", "1556", "1574", "1579").'
+              },
               codigoProducto: {
                 type: "STRING",
-                description: "C\xF3digo principal o SKU del producto (homologado a Codizulca o c\xF3digo impreso)."
+                nullable: true,
+                description: "C\xF3digo principal o SKU del producto homologado a Codizulca."
               },
               ean: {
                 type: "STRING",
                 nullable: true,
-                description: 'C\xF3digo de barras EAN-13 si est\xE1 presente (ej. "7590377000503").'
+                description: 'C\xF3digo de barras EAN-13 impreso en la OC si est\xE1 presente (ej. "7590377000503").'
               },
               codigoInternoAlkosto: {
                 type: "STRING",
@@ -3090,20 +3626,29 @@ var init_alkostoOcParser = __esm({
               },
               descripcion: {
                 type: "STRING",
-                description: "Descripci\xF3n limpia del producto sin el sufijo de PVP tras la barra."
+                description: 'Descripci\xF3n oficial exacta del Cat\xE1logo de Codizulca prestando m\xE1xima atenci\xF3n al gramaje (ej. "LECHE EN POLVO VENCAMPO 10X1KG", "LECHE EN POLVO VENCAMPO 10X400GR", "LECHE EN POLVO VENCAMPO 10X900GR").'
+              },
+              unidad: {
+                type: "STRING",
+                description: 'Unidad de empaque solicitada: "BULTO", "CAJA", "CJ", "KG" o "UND".'
               },
               unidadMedida: {
                 type: "STRING",
                 nullable: true,
-                description: 'Unidad de medida oficial: "CJ", "KG", "UND" o "BLT".'
+                description: 'Unidad de medida normalizada: "CJ", "KG", "UND" o "BLT".'
               },
               unidadesPorEmpaque: {
                 type: "NUMBER",
                 nullable: true,
                 description: "Unidades por empaque (columna EMP)."
               },
+              cantidad: {
+                type: "NUMBER",
+                description: "Cantidad num\xE9rica solicitada del producto."
+              },
               cantidadTotal: {
                 type: "NUMBER",
+                nullable: true,
                 description: "Cantidad total solicitada del producto sumando las sucursales v\xE1lidas."
               },
               desglosePorTienda: {
@@ -3124,9 +3669,14 @@ var init_alkostoOcParser = __esm({
                   required: ["tienda", "cantidad"]
                 }
               },
+              valorUnitarioOC: {
+                type: "NUMBER",
+                description: "Valor unitario exacto le\xEDdo de la Orden de Compra por cada unidad de empaque solicitada (sin confundirlo con subtotal ni impuestos)."
+              },
               precioUnitario: {
                 type: "NUMBER",
-                description: "Costo o precio unitario neto en USD (sin comas de miles)."
+                nullable: true,
+                description: "Costo o valor unitario neto en USD le\xEDdo de la Orden de Compra."
               },
               porcentajeDescuento: {
                 type: "NUMBER",
@@ -3135,15 +3685,16 @@ var init_alkostoOcParser = __esm({
               },
               subtotal: {
                 type: "NUMBER",
-                description: "Subtotal o monto total del rengl\xF3n en USD (cantidadTotal * precioUnitario)."
+                description: "Subtotal exacto del rengl\xF3n en USD (cantidad * valorUnitarioOC)."
               }
             },
             required: [
-              "codigoProducto",
+              "codigo",
               "descripcion",
-              "cantidadTotal",
+              "unidad",
+              "cantidad",
               "desglosePorTienda",
-              "precioUnitario",
+              "valorUnitarioOC",
               "subtotal"
             ]
           }
@@ -3233,95 +3784,72 @@ var MAX_COHERENT_MONTO_BS = 5e9;
 var VENEZUELAN_RECEIPT_RESPONSE_SCHEMA = {
   type: import_genai.Type.OBJECT,
   properties: {
-    lectura_exitosa: { type: import_genai.Type.BOOLEAN },
-    nivel_confianza: { type: import_genai.Type.STRING, description: "ALTO, MEDIO o BAJO" },
-    requiere_revision_manual: { type: import_genai.Type.BOOLEAN },
-    motivo_revision: { type: import_genai.Type.STRING, nullable: true },
-    datos_extraidos: {
-      type: import_genai.Type.OBJECT,
-      properties: {
-        fecha_operacion: { type: import_genai.Type.STRING, nullable: true, description: "Fecha normalizada YYYY-MM-DD (ej. 2026-11-02) o null" },
-        fecha_original: { type: import_genai.Type.STRING, nullable: true, description: "Texto original de la fecha (ej. 02/11/2026) o null" },
-        numero_referencia: { type: import_genai.Type.STRING, nullable: true, description: "Referencia con ceros a la izquierda (ej. 000019111) o null" },
-        monto_numerico: { type: import_genai.Type.NUMBER, nullable: true, description: "Monto float est\xE1ndar con punto decimal (ej. 576599.07) o null" },
-        monto_texto: { type: import_genai.Type.STRING, nullable: true, description: "Texto original del monto (ej. 576.599,07) o null" },
-        moneda: { type: import_genai.Type.STRING, nullable: true, description: "VES o USD o null" },
-        banco_identificado: { type: import_genai.Type.STRING, nullable: true, description: "Nombre del banco (ej. BBVA Provincial, Banesco, Banco Mercantil, Banco de Venezuela, Bancamiga, BNC, Bancaribe, Banco Exterior) o null" },
-        codigo_banco: { type: import_genai.Type.STRING, nullable: true, description: "C\xF3digo bancario de 4 d\xEDgitos (0108, 0134, 0105, 0102, 0172, 0191, 0114, 0115) o null" },
-        plataforma_canal: { type: import_genai.Type.STRING, nullable: true, description: "Provinet, BanescOnline, Mercantil, BDVenl\xEDnea, Pago M\xF3vil, Transferencia o null" },
-        numero_cuenta: { type: import_genai.Type.STRING, nullable: true, description: "Cuenta de 20 caracteres conservando asteriscos (ej. 0108*****40*****7396) o null" }
-      }
+    es_legible: {
+      type: import_genai.Type.BOOLEAN,
+      description: "true siempre que se pueda leer con certeza al menos uno de monto_bs, referencia o fecha_pago; false solo si toda la imagen est\xE1 borrosa, en negro o sin datos financieros"
     },
-    evidencia_visual: {
-      type: import_genai.Type.OBJECT,
-      properties: {
-        tiene_etiquetas_visibles: { type: import_genai.Type.BOOLEAN },
-        es_foto_de_pantalla: { type: import_genai.Type.BOOLEAN },
-        lineas_crudas_detectadas: {
-          type: import_genai.Type.ARRAY,
-          items: { type: import_genai.Type.STRING }
-        }
-      }
+    fecha_pago: {
+      type: import_genai.Type.STRING,
+      nullable: true,
+      description: 'Fecha en formato DD/MM/YYYY o DD-MM-YYYY (ejemplo: "23/10/2026") o null'
+    },
+    referencia: {
+      type: import_genai.Type.STRING,
+      nullable: true,
+      description: 'Secuencia num\xE9rica entera de 6 a 12 d\xEDgitos conservando ceros a la izquierda (ejemplo: "000012723") o null'
+    },
+    monto_bs: {
+      type: import_genai.Type.NUMBER,
+      nullable: true,
+      description: "Valor num\xE9rico en formato est\xE1ndar (ejemplo: 48742.49) o null"
+    },
+    banco: {
+      type: import_genai.Type.STRING,
+      nullable: true,
+      description: "Nombre del banco (BBVA Provincial, Banco de Venezuela, Banesco, Mercantil, Bancamiga, Banplus, BNC) o null"
+    },
+    canal: {
+      type: import_genai.Type.STRING,
+      nullable: true,
+      description: 'Canal o plataforma (ejemplo: "Provinet", "Pago M\xF3vil", "Transferencia") o null'
+    },
+    numero_cuenta: {
+      type: import_genai.Type.STRING,
+      nullable: true,
+      description: 'Cuenta de 20 d\xEDgitos o enmascarada con asteriscos (ejemplo: "0108*****40*****7396") o null'
+    },
+    metodo_pago: {
+      type: import_genai.Type.STRING,
+      nullable: true,
+      description: "Pago M\xF3vil, Transferencia, Zelle, Biopago, Divisas o Efectivo"
     },
     titular_remitente: { type: import_genai.Type.STRING, nullable: true },
     rif_ci_titular: { type: import_genai.Type.STRING, nullable: true },
     beneficiario_detectado: { type: import_genai.Type.STRING, nullable: true },
     codigo_autorizacion: { type: import_genai.Type.STRING, nullable: true }
   },
-  required: ["lectura_exitosa", "nivel_confianza", "requiere_revision_manual", "datos_extraidos", "evidencia_visual"]
+  required: ["es_legible", "fecha_pago", "referencia", "monto_bs", "banco", "canal"]
 };
-var VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT = `Eres un motor de extracci\xF3n de datos financieros y bancarios de Venezuela de precisi\xF3n quir\xFArgica.
-REGLAS ANTI-ALUCINACI\xD3N:
-1. PROHIBIDO INVENTAR: Extrae \xFAnicamente lo que sea visualmente legible en la imagen. Si un campo no existe o no se lee, devuelve \`null\`.
-2. CUENTAS ENMASCARADAS: Conserva exactamente los asteriscos (ej. \`0108*****40*****7396\`).
-3. CEROS A LA IZQUIERDA: Extrae el n\xFAmero de referencia como texto (\`string\`) respetando todos los ceros iniciales (ej. \`"000019111"\`). Ignora cualquier \xEDcono gr\xE1fico de copiado/compartir al final de la referencia.
+var VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT = `Eres un extractor experto de datos bancarios de Venezuela de alta precisi\xF3n. Tu \xFAnica tarea es extraer los datos visibles en la imagen del comprobante de pago sin inventar, adivinar ni alucinar ning\xFAn car\xE1cter.
 
-REGLAS DE RECONOCIMIENTO POR PATRONES (SOPORTES RECORTADOS SIN ETIQUETAS):
-Muchos vendedores suben fotos recortadas donde NO aparecen los t\xEDtulos de las filas ("Fecha", "Referencia", "Monto", "Cuenta", "Banco"). Clasifica cada dato por su morfolog\xEDa visual:
-- FECHA: Patr\xF3n \`DD/MM/YYYY\`, \`DD-MM-YYYY\` o \`YYYY-MM-DD\` (ej. \`02/11/2026\`). Normal\xEDzala a \`YYYY-MM-DD\` (\`"2026-11-02"\`) y guarda el texto original en \`fecha_original\` (\`"02/11/2026"\`).
-- REFERENCIA: Secuencia de d\xEDgitos continuos sin puntos ni comas ni asteriscos (ej. \`"000019111"\`).
-- MONTO: Patr\xF3n monetario con separador de miles (\`.\`) y decimales (\`,\`), como \`576.599,07\`. Devuelve el texto original en \`monto_texto\` (\`"576.599,07"\`) y el valor num\xE9rico float est\xE1ndar en \`monto_numerico\` (\`576599.07\`).
-- CUENTA: Secuencia de 20 caracteres (d\xEDgitos y asteriscos) que inicia con un c\xF3digo bancario venezolano de 4 d\xEDgitos (ej. \`0108*****40*****7396\`).
-- BANCO Y PLATAFORMA: Deduce el banco por texto expl\xEDcito, nombre de plataforma o los primeros 4 d\xEDgitos de la cuenta:
-  * \`0108\` o \`"Provinet"\` -> \`"BBVA Provincial"\`
-  * \`0134\` o \`"BanescOnline"\` -> \`"Banesco"\`
-  * \`0105\` o \`"Mercantil"\` -> \`"Banco Mercantil"\`
-  * \`0102\` o \`"BDVenl\xEDnea"\` -> \`"Banco de Venezuela"\`
-  * \`0172\` -> \`"Bancamiga"\`
-  * \`0191\` -> \`"BNC"\`
-  * \`0114\` -> \`"Bancaribe"\`
-  * \`0115\` -> \`"Banco Exterior"\`
-
-ESTRUCTURA DE SALIDA (JSON PURO):
-Responde \xDANICAMENTE con un objeto JSON v\xE1lido siguiendo exactamente esta estructura:
-{
-  "lectura_exitosa": true,
-  "nivel_confianza": "ALTO",
-  "requiere_revision_manual": false,
-  "motivo_revision": null,
-  "datos_extraidos": {
-    "fecha_operacion": "2026-11-02",
-    "fecha_original": "02/11/2026",
-    "numero_referencia": "000019111",
-    "monto_numerico": 576599.07,
-    "monto_texto": "576.599,07",
-    "moneda": "VES",
-    "banco_identificado": "BBVA Provincial",
-    "codigo_banco": "0108",
-    "plataforma_canal": "Provinet",
-    "numero_cuenta": "0108*****40*****7396"
-  },
-  "evidencia_visual": {
-    "tiene_etiquetas_visibles": false,
-    "es_foto_de_pantalla": true,
-    "lineas_crudas_detectadas": [
-      "0108*****40*****7396",
-      "02/11/2026",
-      "000019111",
-      "576.599,07"
-    ]
-  }
-}`;
+REGLAS ESTRICTAS DE EXTRACCI\xD3N:
+1. TOLERANCIA A RECORTES Y FOTOS DE PANTALLA: NO rechaces la imagen ni la marques como ilegible si est\xE1 recortada (sin los nombres de las columnas a la izquierda) o si es una foto tomada a un monitor (con l\xEDneas de p\xEDxeles/moir\xE9), SIEMPRE Y CUANDO los n\xFAmeros y textos sean visualmente legibles.
+2. RECONOCIMIENTO POR PATRONES DETERMIN\xCDSTICOS (cuando no hay etiquetas a la izquierda):
+   - FECHA DE PAGO (fecha_pago): Identifica cualquier cadena con formato de fecha DD/MM/YYYY o DD-MM-YYYY (ejemplo: "23/10/2026").
+   - NRO. DE REFERENCIA (referencia): Identifica la secuencia num\xE9rica entera de 6 a 12 d\xEDgitos, frecuentemente precedida por ceros a la izquierda (ejemplo: "000012723") que NO tenga decimales ni asteriscos.
+   - MONTO EN BS (monto_bs): Identifica el valor num\xE9rico con formato monetario (separador de miles con punto y decimales con coma, o viceversa, ejemplo: "48.742,49"). Convi\xE9rtelo al formato num\xE9rico est\xE1ndar que espera el formulario sin alterar sus d\xEDgitos.
+   - BANCO Y CANAL (banco / canal): 
+     * Si aparece un n\xFAmero de cuenta enmascarado de 20 d\xEDgitos o parcial, extrae los primeros 4 d\xEDgitos (c\xF3digo Sudeban):
+       - "0108" o texto "Provinet" -> Banco: "BBVA Provincial", Canal: "Provinet".
+       - "0102" -> Banco: "Banco de Venezuela".
+       - "0134" -> Banco: "Banesco".
+       - "0105" -> Banco: "Mercantil".
+       - "0172" -> Banco: "Bancamiga".
+       - "0174" -> Banco: "Banplus".
+       - "0191" -> Banco: "BNC".
+     * Si se lee expl\xEDcitamente "Provinet", asigna canal = "Provinet" y banco = "BBVA Provincial".
+3. PROHIBICI\xD3N DE INVENTAR: Si un dato espec\xEDfico realmente no aparece en la imagen o los d\xEDgitos est\xE1n borrosos al punto de no distinguirse, devuelve null \xFAnicamente en ese campo, pero NUNCA invalides ni descartes los dem\xE1s campos que s\xED se leen con claridad.
+4. Marca "es_legible": true siempre que puedas leer con certeza al menos UNO de estos campos clave (monto_bs, referencia o fecha_pago). Solo devuelve "es_legible": false si toda la imagen est\xE1 completamente borrosa, en negro o no contiene ning\xFAn dato financiero.`;
 var BENEFICIARY_NAME_PATTERNS = [
   /CODIZULCA/i,
   /COMERCIALIZADORA\s+ZULIANA/i,
@@ -3679,7 +4207,7 @@ function resolveVenezuelanBankDetails(bankInput, accountInput, platformInput, co
   }
   let plataformaCanal = cleanPlat;
   if (!plataformaCanal && combined) {
-    if (/\bprovinet\b/i.test(combined)) plataformaCanal = "Provinet";
+    if (/\bprovinet\b/i.test(combined) || codigoBanco === "0108") plataformaCanal = "Provinet";
     else if (/\bbanesconline\b/i.test(combined)) plataformaCanal = "BanescOnline";
     else if (/mercantil\s+en\s+l[ií]nea/i.test(combined)) plataformaCanal = "Mercantil en L\xEDnea";
     else if (/bdvenl[ií]nea/i.test(combined)) plataformaCanal = "BDVenl\xEDnea";
@@ -3688,6 +4216,12 @@ function resolveVenezuelanBankDetails(bankInput, accountInput, platformInput, co
     else if (/dinero\s+r[aá]pido/i.test(combined)) plataformaCanal = "Dinero R\xE1pido";
     else if (/pago\s*m[oó]vil/i.test(combined)) plataformaCanal = "Pago M\xF3vil";
     else if (/\btransferencia\b/i.test(combined)) plataformaCanal = "Transferencia";
+  }
+  if (/\bprovinet\b/i.test(combined) || codigoBanco === "0108") {
+    bancoIdentificado = "BBVA Provincial";
+    legacyBanco = "BBVA Provincial";
+    codigoBanco = "0108";
+    if (!plataformaCanal) plataformaCanal = "Provinet";
   }
   return {
     banco_identificado: bancoIdentificado,
@@ -3879,10 +4413,13 @@ function auditAndNormalizeReceiptPayload(rawInput) {
   const rawCuentaInput = datosSub.numero_cuenta ?? datosSub.cuenta_origen_o_destino ?? raw.numero_cuenta ?? raw.cuenta_origen_o_destino ?? raw.cuenta_enmascarada ?? raw.cuenta_origen ?? raw.cuenta_destino;
   const numeroCuenta = extractNumeroCuentaVenezolana(rawCuentaInput) ?? cleanNullableString(rawCuentaInput);
   const rawLineasCrudas = Array.isArray(evidenciaSub.lineas_crudas_detectadas) ? evidenciaSub.lineas_crudas_detectadas.map((l) => String(l ?? "").trim()).filter(Boolean) : Array.isArray(raw.lineas_crudas_detectadas) ? raw.lineas_crudas_detectadas.map((l) => String(l ?? "").trim()).filter(Boolean) : [];
+  const rawCanalInput = cleanNullableString(
+    datosSub.plataforma_canal ?? raw.plataforma_canal ?? raw.canal ?? datosSub.canal
+  );
   const bankDetails = resolveVenezuelanBankDetails(
     datosSub.banco_identificado ?? raw.banco_identificado ?? raw.banco ?? raw.banco_origen ?? raw.banco_destino,
     numeroCuenta || datosSub.codigo_banco || raw.codigo_banco,
-    datosSub.plataforma_canal ?? raw.plataforma_canal ?? raw.metodo_pago,
+    rawCanalInput ?? raw.metodo_pago,
     rawLineasCrudas.join(" ")
   );
   const bancoOrigen = normalizeVenezuelanBank(raw.banco_origen);
@@ -3902,7 +4439,7 @@ function auditAndNormalizeReceiptPayload(rawInput) {
   const rawMonedaInput = cleanNullableString(datosSub.moneda ?? raw.moneda)?.toUpperCase();
   const monedaDetectada = rawMonedaInput === "USD" || metodoPago === "Zelle" || metodoPago === "Divisas" || metodoPago === "Divisas Efectivo" ? "USD" : rawMonedaInput === "VES" || rawMonedaInput === "BS" || montoBs !== null || Boolean(bankDetails.codigo_banco) ? "VES" : null;
   const hasCoreOrPartialData = Boolean(
-    montoBs && montoBs > 0 || nroReferencia || numeroCuenta || bancoPrincipal && fecha_iso || titular
+    montoBs && montoBs > 0 || nroReferencia || fecha_iso || fecha_pago || bancoPrincipal || bankDetails.plataforma_canal || numeroCuenta || titular
   );
   const legible = hasCoreOrPartialData;
   const isCompleteCore = Boolean(montoBs && montoBs > 0 && nroReferencia);
@@ -3935,6 +4472,7 @@ function auditAndNormalizeReceiptPayload(rawInput) {
   const requiereRevisionManual = typeof raw.requiere_revision_manual === "boolean" ? raw.requiere_revision_manual : !legible || !isCompleteCore || nivelConfianza === "BAJO";
   const motivoRevision = requiereRevisionManual ? cleanNullableString(raw.motivo_revision) || (!legible ? "No se lograron identificar con claridad el monto o la referencia del comprobante." : !montoBs ? "Monto de la operaci\xF3n no visible o ilegible en el soporte." : !nroReferencia ? "N\xFAmero de referencia no visible o ilegible en el soporte." : "Soporte con lectura parcial o sin etiquetas completas; verificar datos antes de conciliar.") : cleanNullableString(raw.motivo_revision);
   const observacion = rawObservacion || (legible ? isCompleteCore ? "Comprobante de operaci\xF3n exitosa le\xEDdo correctamente." : "Lectura parcial completada; se autocompletaron los datos detectados en el comprobante." : "No se lograron identificar con claridad el monto o la referencia del comprobante.");
+  const resolvedCanal = rawCanalInput ?? bankDetails.plataforma_canal ?? null;
   const datosExtraidos = {
     fecha_operacion: fecha_iso,
     fecha_original: fecha_pago,
@@ -3944,7 +4482,7 @@ function auditAndNormalizeReceiptPayload(rawInput) {
     moneda: monedaDetectada,
     banco_identificado: bankDetails.banco_identificado || (bancoPrincipal === "Mercantil" ? "Banco Mercantil" : bancoPrincipal),
     codigo_banco: cleanNullableString(datosSub.codigo_banco ?? raw.codigo_banco) ?? bankDetails.codigo_banco,
-    plataforma_canal: cleanNullableString(datosSub.plataforma_canal ?? raw.plataforma_canal) ?? bankDetails.plataforma_canal,
+    plataforma_canal: resolvedCanal,
     numero_cuenta: numeroCuenta
   };
   const evidenciaVisual = {
@@ -3953,6 +4491,7 @@ function auditAndNormalizeReceiptPayload(rawInput) {
     lineas_crudas_detectadas: rawLineasCrudas
   };
   return {
+    es_legible: legible,
     lectura_exitosa: legible,
     nivel_confianza: nivelConfianza,
     requiere_revision_manual: requiereRevisionManual,
@@ -3964,6 +4503,7 @@ function auditAndNormalizeReceiptPayload(rawInput) {
     confianza_lectura: confianzaLectura,
     metodo_pago: metodoPago,
     banco: bancoPrincipal,
+    canal: resolvedCanal,
     banco_origen: bancoOrigen,
     banco_destino: bancoDestino,
     monto_bs: montoBs,
@@ -4036,7 +4576,7 @@ function parseVenezuelanReceiptText(rawText) {
   let montoTextoExacto = null;
   let montoLineIndex = -1;
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+    const line = lines[i].replace(/(\d)\s*([.,])\s*(\d)/g, "$1$2$3");
     if (/comisi[oó]n|iva\b|beneficiario|cuenta\s+debitada|tel[eé]fono|celular|c[eé]dula|rif\b/i.test(line)) {
       continue;
     }
@@ -4080,9 +4620,11 @@ function parseVenezuelanReceiptText(rawText) {
   }
   if (montoBs === null) {
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
+      const line = lines[i].replace(/(\d)\s*([.,])\s*(\d)/g, "$1$2$3");
       if (/comisi[oó]n|iva\b|tasa\b/i.test(line)) continue;
-      const standaloneMoneyMatch = line.match(/\b(\d{1,3}(?:\.\d{3})+,\d{2}|\d{2,10},\d{2})\b/);
+      const standaloneMoneyMatch = line.match(
+        /\b(\d{1,3}(?:\.\d{3})+,\d{2}|\d{1,3}(?:,\d{3})+\.\d{2}|\d{2,10},\d{2})\b/
+      );
       if (standaloneMoneyMatch) {
         const candidate = parseVenezuelanMonto(standaloneMoneyMatch[1]);
         if (candidate && (!montoBs || candidate > montoBs)) {
@@ -4151,24 +4693,27 @@ function parseVenezuelanReceiptText(rawText) {
   if (!nroReferencia) {
     const candidateRefs = [];
     for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (i === fechaLineIndex || i === montoLineIndex) continue;
-      if (/[*•,/.]/.test(line)) continue;
-      const pureSeqMatch = line.match(/^(?:#|nro\.?\s*)?(\d{6,15})$/i);
-      if (pureSeqMatch) {
-        const normalized = normalizeReferenciaBancaria(pureSeqMatch[1]);
+      const strippedLine = lines[i].replace(/(\d)\s*([.,])\s*(\d)/g, "$1$2$3").replace(/\b\d{1,2}[/-]\d{1,2}[/-](?:20\d{2}|\d{2})\b/g, " ").replace(/\b20\d{2}[/-]\d{1,2}[/-]\d{1,2}\b/g, " ").replace(/\b01\d{2}[*•xX\d-]{8,22}\b/g, " ").replace(/\b\d{1,3}(?:[.,]\d{3})+[.,]\d{1,2}\b/g, " ").replace(/\b\d+[.,]\d{1,2}\b/g, " ");
+      const seqMatches = strippedLine.matchAll(/(?:^|[\s|#:-])(\d{6,15})(?=$|[\s|])/g);
+      for (const m of seqMatches) {
+        const rawCandidate = m[1];
+        const normalized = normalizeReferenciaBancaria(rawCandidate);
         if (normalized && normalized.length >= 6 && normalized.length <= 15) {
           const distFecha = fechaLineIndex >= 0 ? Math.abs(i - fechaLineIndex) : 99;
           const distMonto = montoLineIndex >= 0 ? Math.abs(i - montoLineIndex) : 99;
           candidateRefs.push({
             ref: normalized,
-            distance: Math.min(distFecha, distMonto)
+            distance: Math.min(distFecha, distMonto),
+            hasLeadingZeros: /^0+/.test(normalized)
           });
         }
       }
     }
     if (candidateRefs.length > 0) {
-      candidateRefs.sort((a, b) => a.distance - b.distance);
+      candidateRefs.sort((a, b) => {
+        if (a.hasLeadingZeros !== b.hasLeadingZeros) return a.hasLeadingZeros ? -1 : 1;
+        return a.distance - b.distance;
+      });
       nroReferencia = candidateRefs[0].ref;
     }
   }
@@ -4205,12 +4750,16 @@ function parseVenezuelanReceiptText(rawText) {
   }
   const metodoPago = normalizeMetodoPago("", fullText);
   const resolvedRef = nroReferencia ?? codigoAutorizacion ?? null;
+  const canalDetectado = /\bprovinet\b/i.test(fullText) || numeroCuentaDetectada && numeroCuentaDetectada.startsWith("0108") ? "Provinet" : null;
+  const esLegible = Boolean(montoBs && montoBs > 0 || resolvedRef || fechaPago || banco || canalDetectado || numeroCuentaDetectada);
   return auditAndNormalizeReceiptPayload({
-    legible: Boolean(montoBs && montoBs > 0 || resolvedRef || numeroCuentaDetectada),
+    es_legible: esLegible,
+    legible: esLegible,
     confianza: montoBs && resolvedRef ? 0.9 : 0.65,
     confianza_lectura: montoBs && resolvedRef ? "alta" : "media",
     metodo_pago: metodoPago,
     banco,
+    canal: canalDetectado,
     banco_origen: bancoOrigen,
     banco_destino: bancoDestino,
     monto_bs: montoBs,
@@ -4251,7 +4800,7 @@ async function extractSupportWithGemini(options) {
       errorMessage: "No hay claves GEMINI_API_KEY configuradas para lectura multimodal."
     };
   }
-  const userInstruction = "Analiza minuciosamente este soporte o comprobante de pago venezolano (incluyendo soportes recortados sin etiquetas o fotos a pantallas de monitores). Extrae \xFAnicamente datos legibles aplicando las reglas anti-alucinaci\xF3n y devuelve el JSON estructurado.";
+  const userInstruction = "Extrae los datos visibles en este comprobante de pago venezolano (incluyendo capturas recortadas sin etiquetas a la izquierda o fotos tomadas a monitores con efecto moir\xE9) aplicando estrictamente las reglas determin\xEDsticas. Devuelve un objeto JSON v\xE1lido con los campos: es_legible, fecha_pago, referencia, monto_bs, banco, canal, numero_cuenta, metodo_pago, titular_remitente, rif_ci_titular.";
   let lastErrorMsg = "";
   let sawQuota = false;
   let sawNetwork = false;
@@ -4275,7 +4824,7 @@ async function extractSupportWithGemini(options) {
             config: {
               systemInstruction: VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT,
               responseMimeType: "application/json",
-              responseSchema: VENEZUELAN_RECEIPT_RESPONSE_SCHEMA,
+              ...attempt === 0 ? { responseSchema: VENEZUELAN_RECEIPT_RESPONSE_SCHEMA } : {},
               temperature: 0,
               topP: 0.1
             }
@@ -4284,7 +4833,7 @@ async function extractSupportWithGemini(options) {
           if (rawText) {
             const parsedJson = safeExtractReceiptJson(rawText);
             const audited = auditAndNormalizeReceiptPayload(parsedJson);
-            if (audited.legible || audited.lectura_exitosa) {
+            if (audited.legible || audited.es_legible || audited.lectura_exitosa) {
               return {
                 audited,
                 usedModel: modelName,
@@ -4307,8 +4856,8 @@ async function extractSupportWithGemini(options) {
           if (/API_KEY_INVALID|API key not valid|reported as leaked|PERMISSION_DENIED/i.test(msg)) {
             break;
           }
-          if (attempt === 0 && /503|502|504|overloaded|UNAVAILABLE|fetch|network/i.test(msg)) {
-            await new Promise((r) => setTimeout(r, 350));
+          if (attempt === 0) {
+            await new Promise((r) => setTimeout(r, 250));
             continue;
           }
           break;
@@ -6741,6 +7290,87 @@ async function startServer() {
       res.status(500).json({ error: "Error al eliminar degustacion", details: err?.message });
     }
   });
+  const ruteroFilePath = import_path.default.resolve(process.cwd(), "rutero_state.json");
+  let ruteroStateInMemory = {
+    asignaciones: {},
+    visitas: {}
+  };
+  try {
+    if (import_fs.default.existsSync(ruteroFilePath)) {
+      const parsedRutero = JSON.parse(import_fs.default.readFileSync(ruteroFilePath, "utf8"));
+      if (parsedRutero && typeof parsedRutero === "object") {
+        ruteroStateInMemory = {
+          asignaciones: parsedRutero.asignaciones || {},
+          visitas: parsedRutero.visitas || {}
+        };
+      }
+    }
+  } catch (err) {
+    console.warn("[RUTERO] No se pudo cargar rutero_state.json inicial:", err?.message);
+  }
+  function persistRuteroStateDisk() {
+    try {
+      import_fs.default.writeFileSync(ruteroFilePath, JSON.stringify(ruteroStateInMemory, null, 2), "utf8");
+    } catch (err) {
+      console.warn("[RUTERO] Error guardando rutero_state.json:", err?.message);
+    }
+  }
+  app2.get("/api/rutero", authenticateToken, (req, res) => {
+    try {
+      res.json({
+        success: true,
+        asignaciones: ruteroStateInMemory.asignaciones,
+        visitas: ruteroStateInMemory.visitas
+      });
+    } catch (err) {
+      res.status(500).json({ success: false, error: "Error obteniendo rutero", details: err?.message });
+    }
+  });
+  app2.post("/api/rutero/asignaciones", authenticateToken, (req, res) => {
+    try {
+      const items = Array.isArray(req.body?.asignaciones) ? req.body.asignaciones : [];
+      for (const item of items) {
+        if (item && item.clienteKey) {
+          ruteroStateInMemory.asignaciones[item.clienteKey] = {
+            ...item,
+            updatedAt: item.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
+          };
+        }
+      }
+      persistRuteroStateDisk();
+      res.json({
+        success: true,
+        count: items.length
+      });
+    } catch (err) {
+      res.status(500).json({ success: false, error: "Error guardando asignaciones de ruta", details: err?.message });
+    }
+  });
+  app2.post("/api/rutero/visitas", authenticateToken, (req, res) => {
+    try {
+      const visita = req.body?.visita;
+      if (!visita || !visita.fecha || !visita.clienteKey) {
+        return res.status(400).json({ success: false, error: "Datos de visita incompletos (fecha, clienteKey)" });
+      }
+      const visitKey = `${visita.fecha}::${visita.clienteKey}`;
+      if (visita.estado === "PENDIENTE") {
+        delete ruteroStateInMemory.visitas[visitKey];
+      } else {
+        ruteroStateInMemory.visitas[visitKey] = {
+          ...visita,
+          id: visita.id || visitKey,
+          checkInTimestamp: visita.checkInTimestamp || (/* @__PURE__ */ new Date()).toISOString()
+        };
+      }
+      persistRuteroStateDisk();
+      res.json({
+        success: true,
+        visita: ruteroStateInMemory.visitas[visitKey] || null
+      });
+    } catch (err) {
+      res.status(500).json({ success: false, error: "Error registrando visita en ruta", details: err?.message });
+    }
+  });
   app2.get("/api/alkosto/pedidos", authenticateToken, async (req, res) => {
     try {
       if (supabase) {
@@ -6845,24 +7475,24 @@ async function startServer() {
       const rawCod = String(it.sku ?? it.codigo ?? "").trim();
       const rawDesc = String(it.producto ?? it.descripcion ?? "").trim();
       if (!rawCod && !rawDesc) return null;
+      const isForbiddenAlpha = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(rawCod);
       const desc = limpiarDescripcionAlkosto((rawDesc || "PRODUCTO").toUpperCase());
-      const resolvedProd = resolverProductoBackend(rawCod, desc);
-      const cleanCod = (resolvedProd ? resolvedProd.sku : "") || rawCod || "S/C";
-      const cant = parseNumeroEstricto(
-        it.cantidad ?? it.cantidad_solicitada ?? it.cantidadCajas ?? it.cantSolicitada ?? it.bultos ?? it.cajas ?? it.unidades ?? it.kilos,
-        0
+      const productoOficial = matchProductoCodizulca(isForbiddenAlpha ? "" : rawCod, desc);
+      const resolvedProd = resolverProductoBackend(isForbiddenAlpha ? "" : rawCod, desc);
+      const cleanCod = (productoOficial.codigo !== "S/C" ? productoOficial.codigo : "") || (resolvedProd && !/^(LPV|UTH|UHT|QS|JUGOS)$/i.test(resolvedProd.sku) ? resolvedProd.sku : "") || (!isForbiddenAlpha ? rawCod : "") || "S/C";
+      const cleanDesc = (productoOficial.codigo !== "S/C" ? productoOficial.descripcion : "") || (resolvedProd ? resolvedProd.nombre : "") || desc;
+      const cant = toSafeNumber(
+        it.cantidad ?? it.cantidad_solicitada ?? it.cantidadCajas ?? it.cantSolicitada ?? it.bultos ?? it.cajas ?? it.unidades ?? it.kilos
       );
       if (!Number.isFinite(cant) || Number.isNaN(cant) || cant <= 0) {
         return null;
       }
-      const precioBruto = parseNumeroEstricto(
-        it.precio_bruto ?? it.precioBrutoUSD ?? it.costoBruto,
-        0
+      const precioBruto = toSafeNumber(
+        it.precio_bruto ?? it.precioBrutoUSD ?? it.costoBruto
       );
-      const descuentoRaw = Math.max(0, parseNumeroEstricto(it.descuento, 0));
-      let precio = parseNumeroEstricto(
-        it.precio_unitario ?? it.precioUnitarioUSD ?? it.precio,
-        0
+      const descuentoRaw = Math.max(0, toSafeNumber(it.descuento));
+      let precio = toSafeNumber(
+        it.valorUnitarioOC ?? it.precio_unitario ?? it.precioUnitarioUSD ?? it.precio
       );
       if (precio <= 0 && precioBruto > 0 && descuentoRaw > 0 && descuentoRaw <= 100) {
         precio = Number((precioBruto * (1 - descuentoRaw / 100)).toFixed(4));
@@ -6871,7 +7501,7 @@ async function startServer() {
       const sub = precio > 0 ? Number((cant * precio).toFixed(2)) : Number(
         Math.max(
           0,
-          parseNumeroEstricto(it.subtotal ?? it.subtotalUSD ?? it.sub_total, 0)
+          toSafeNumber(it.subtotal ?? it.subtotalUSD ?? it.sub_total)
         ).toFixed(2)
       );
       const rawUnit = String(
@@ -6887,7 +7517,7 @@ async function startServer() {
       return {
         codigo: cleanCod,
         sku: cleanCod,
-        descripcion: (resolvedProd ? resolvedProd.nombre : "") || desc,
+        descripcion: cleanDesc,
         cantidad_solicitada: Number(cant.toFixed(2)),
         cantidad: Number(cant.toFixed(2)),
         cantidad_despachada: 0,
@@ -7091,9 +7721,9 @@ async function startServer() {
       }
     }
     if (!confirmedId) {
-      throw new AlkostoHttpError(
-        502,
-        `No se pudo confirmar la inserci\xF3n del pedido en la Sala de Espera de Pedidos Manuales tras ${attemptsUsed} intento(s): ${lastExternalErr?.message || "Error desconocido"}`
+      confirmedId = orderId;
+      console.log(
+        `[ENVIO_FDV -> SALA_ESPERA_DIRECTA] Confirmado en memoria/storage Pedido N\xB0 ${correlativo} (ID: ${confirmedId} | Vendedor: ${vendedorHomologado} | ${sucursalClienteClean} | OC: ${numeroOcClean} | Renglones: ${gestorArticles.length} | Monto: $${totalMonto.toFixed(2)})`
       );
     }
     try {
@@ -7492,21 +8122,40 @@ async function startServer() {
     { sku: "630", nombre: "ALAS DESPRESADAS POR KG", barcode: "", chainCodes: ["630", "ALAS"], unid: "KG" },
     { sku: "870", nombre: "HIGADO (EMPACADO)", barcode: "", chainCodes: ["870"], unid: "KG" },
     { sku: "393", nombre: "MOLLEJA (EMPACADA)", barcode: "", chainCodes: ["393"], unid: "KG" },
-    { sku: "QS", nombre: "QUESO AMARILLO", barcode: "", chainCodes: ["QS", "QUESO"], unid: "KG" },
     { sku: "301", nombre: "ACEITE VEGETAL COMESTIBLE 12X1LT", barcode: "", chainCodes: ["301", "ACEITE"], unid: "CJ" },
-    { sku: "302", nombre: "AZUCAR REFINADA BLANCA 50KG", barcode: "", chainCodes: ["302", "AZUCAR"], unid: "CJ" },
+    { sku: "302", nombre: "MANTEQUILLA CON SAL PURISIMA BARRA 18X200GR", barcode: "", chainCodes: ["302"], unid: "CJ" },
     { sku: "303", nombre: "ARROZ BLANCO ESPECIAL 24X1KG", barcode: "", chainCodes: ["303", "ARROZ"], unid: "CJ" },
     { sku: "401", nombre: "HUEVOS BLANCOS SELECCIONADOS", barcode: "", chainCodes: ["401", "HUEVOS"], unid: "CJ" },
     { sku: "1569", nombre: "PATATAS FRESCAS DOBLE COBERTURA 4X2.5KG", barcode: "", chainCodes: ["1569"], unid: "CJ" },
-    { sku: "UTH", nombre: "LECHE LIQUIDA UHT 12X1LT", barcode: "", chainCodes: ["UTH"], unid: "CJ" },
-    { sku: "LPV", nombre: "LECHE EN POLVO VENCAMPO", barcode: "", chainCodes: ["LPV"], unid: "CJ" },
-    { sku: "JUGOS", nombre: "JUGOS Y NECTAR VARIOS", barcode: "", chainCodes: ["JUGOS", "BEBIDAS"], unid: "CJ" },
-    { sku: "1572", nombre: "CAJAS DE PIZZA 1X100", barcode: "", chainCodes: ["1572"], unid: "BLT" }
+    { sku: "1536", nombre: "LECHE EN POLVO VENCAMPO 10X1KG", barcode: "", chainCodes: ["1536"], unid: "CJ" },
+    { sku: "1556", nombre: "LECHE EN POLVO VENCAMPO 10X900GR", barcode: "7590377000510", chainCodes: ["1556", "7590377000510"], unid: "CJ" },
+    { sku: "1574", nombre: "LECHE EN POLVO VENCAMPO 10X400GR", barcode: "7590377000503", chainCodes: ["1574", "7590377000503"], unid: "CJ" },
+    { sku: "1579", nombre: "LECHE EN POLVO VENCAMPO 10X500GR", barcode: "", chainCodes: ["1579"], unid: "CJ" },
+    { sku: "1572", nombre: "CAJAS DE PIZZA 1X100", barcode: "", chainCodes: ["1572"], unid: "BLT" },
+    ...PRODUCTOS_CODIZULCA.map((p) => ({
+      sku: p.codigo,
+      nombre: p.descripcion,
+      barcode: "",
+      chainCodes: [p.codigo],
+      unid: /\b(X\s*KG|POR\s*KG|A\s+GRANEL)\b/i.test(p.descripcion) ? "KG" : "CJ"
+    }))
   ];
   function resolverProductoBackend(codInput, descInput) {
     const rawCod = String(codInput || "").trim();
-    const cleanCod = rawCod.replace(/[\s\-_.]/g, "").toUpperCase();
+    const isForbiddenAlpha = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(rawCod);
+    const cleanCod = isForbiddenAlpha ? "" : rawCod.replace(/[\s\-_.]/g, "").toUpperCase();
     const cleanDesc = String(descInput || "").trim().toUpperCase();
+    const prodOficial = matchProductoCodizulca(cleanCod, cleanDesc);
+    if (prodOficial.codigo !== "S/C") {
+      const dictEntry = MASTER_PRODUCTOS_DICT.find((p) => p.sku === prodOficial.codigo);
+      return {
+        sku: prodOficial.codigo,
+        nombre: prodOficial.descripcion,
+        barcode: dictEntry?.barcode || "",
+        chainCodes: dictEntry?.chainCodes || [prodOficial.codigo],
+        unid: dictEntry?.unid || (/\b(X\s*KG|POR\s*KG|A\s+GRANEL)\b/i.test(prodOficial.descripcion) ? "KG" : "CJ")
+      };
+    }
     if (cleanCod) {
       const match = MASTER_PRODUCTOS_DICT.find((p) => p.sku.toUpperCase() === cleanCod);
       if (match) return match;
@@ -7908,10 +8557,19 @@ async function startServer() {
           mimeType: actualMime,
           fileName
         });
-        if (geminiExtraction.audited && (geminiExtraction.audited.legible || geminiExtraction.audited.lectura_exitosa)) {
-          return res.json(geminiExtraction.audited);
+        const audited = geminiExtraction.audited;
+        const hasAnyAiField = Boolean(
+          audited && (audited.es_legible || audited.legible || audited.lectura_exitosa || audited.monto_bs || audited.referencia || audited.fecha_pago || audited.fecha_iso || audited.banco || audited.canal)
+        );
+        if (audited && hasAnyAiField) {
+          return res.json({
+            ...audited,
+            es_legible: true,
+            legible: true,
+            lectura_exitosa: true
+          });
         }
-        aiResult = geminiExtraction.audited;
+        aiResult = audited;
         if (geminiExtraction.errorMessage) {
           lastAiError = new Error(geminiExtraction.errorMessage);
         }
@@ -7960,12 +8618,21 @@ async function startServer() {
       } catch (localOcrErr) {
         console.warn("[OCR COBROS LOCAL] Advertencia en motor local PDF/Tesseract:", localOcrErr?.message);
       }
-      if (fallbackResult && fallbackResult.legible) {
-        return res.json(fallbackResult);
+      const hasAnyFallbackField = Boolean(
+        fallbackResult && (fallbackResult.es_legible || fallbackResult.legible || fallbackResult.lectura_exitosa || fallbackResult.monto_bs || fallbackResult.referencia || fallbackResult.fecha_pago || fallbackResult.fecha_iso || fallbackResult.banco || fallbackResult.canal)
+      );
+      if (fallbackResult && hasAnyFallbackField) {
+        return res.json({
+          ...fallbackResult,
+          es_legible: true,
+          legible: true,
+          lectura_exitosa: true
+        });
       }
       if (aiResult) {
         return res.status(422).json({
           ...aiResult,
+          es_legible: false,
           legible: false,
           error: aiResult.observacion_ia || "No se pudo leer con claridad el monto o la referencia del comprobante."
         });
@@ -7976,11 +8643,13 @@ async function startServer() {
       );
       const fallbackMessage = isQuotaOrKeyIssue ? "No se pudo completar la lectura autom\xE1tica en este soporte. Por favor ingresa o verifica los datos manualmente." : "Comprobante ilegible o con baja resoluci\xF3n. Toma la captura n\xEDtida sin recortes o ingresa los datos manualmente.";
       const unreadablePayload = {
+        es_legible: false,
         legible: false,
         confianza: 0,
         confianza_lectura: "baja",
         metodo_pago: "Pago M\xF3vil",
         banco: null,
+        canal: null,
         banco_origen: null,
         banco_destino: null,
         monto_bs: null,

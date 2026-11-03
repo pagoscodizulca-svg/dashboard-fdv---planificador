@@ -37,10 +37,11 @@ const CobrosOCR = lazy(() => import('./components/CobrosOCR').then(m => ({ defau
 const TrazabilidadTab = lazy(() => import('./components/TrazabilidadTab').then(m => ({ default: m.TrazabilidadTab })));
 const DegustacionesTab = lazy(() => import('./components/DegustacionesTab').then(m => ({ default: m.DegustacionesTab })));
 const AlkostoTab = lazy(() => import('./components/AlkostoTab').then(m => ({ default: m.AlkostoTab })));
+const PlanificadorRutaTab = lazy(() => import('./components/PlanificadorRutaTab').then(m => ({ default: m.PlanificadorRutaTab })));
 import { subscribeDegustaciones } from './services/degustacionesService';
 import { Degustacion } from './types';
 
-type TabId = 'ACTIVACION_RUBRO' | 'VOLUMEN' | 'ACTIVACION_CLIENTES' | 'COBROS_OCR' | 'DEGUSTACIONES' | 'ALKOSTO' | 'TRAZABILIDAD';
+type TabId = 'ACTIVACION_RUBRO' | 'VOLUMEN' | 'ACTIVACION_CLIENTES' | 'RUTERO' | 'COBROS_OCR' | 'DEGUSTACIONES' | 'ALKOSTO' | 'TRAZABILIDAD';
 
 const isIncomingWhatsAppShare = (): boolean => {
   if (typeof window === 'undefined') return false;
@@ -807,6 +808,7 @@ export default function App() {
     { id: 'ACTIVACION_RUBRO' as TabId, label: 'Activación (Por rubro)', icon: Target },
     { id: 'VOLUMEN' as TabId, label: 'Volumen (SKU / KG)', icon: Package },
     { id: 'ACTIVACION_CLIENTES' as TabId, label: 'Activación (Clientes)', icon: Users },
+    { id: 'RUTERO' as TabId, label: 'Ruta (Planificador)', icon: Route },
     { id: 'COBROS_OCR' as TabId, label: 'Cobros (OCR)', icon: ScanText },
     { 
       id: 'DEGUSTACIONES' as TabId, 
@@ -1036,6 +1038,16 @@ export default function App() {
                 filteredActivacion={filteredActivacion} 
                 activeVendedorId={activeVendedorDisplayName}
                 vendedorFilter={activeVendedorId}
+              />
+            )}
+            {activeTab === 'RUTERO' && (
+              <PlanificadorRutaTab
+                filteredVolumen={filteredVolumen}
+                filteredActivacion={filteredActivacion}
+                activeVendedorDisplayName={activeVendedorDisplayName}
+                activeVendedorId={activeVendedorId}
+                userRole={userRole}
+                onNavigateToTab={(tab) => setActiveTab(tab as TabId)}
               />
             )}
             {activeTab === 'COBROS_OCR' && (
