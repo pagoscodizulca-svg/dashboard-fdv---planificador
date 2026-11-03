@@ -3447,13 +3447,179 @@ async function startServer() {
     }
   });
 
+  // Normaliza nombres de vendedores para cruzar con carpetas de Supabase Storage (ej. "maria briceños" -> "Mar_a_Brice_o")
+  const normalizeCobroVendorKey = (raw: string): string =>
+    String(raw || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/s\b/g, '')
+      .replace(/[^a-z0-9]/g, '');
+
+  const toVenezuelaDateIso = (isoStr?: string): string => {
+    if (!isoStr) return '';
+    const d = new Date(isoStr);
+    if (isNaN(d.getTime())) return String(isoStr).slice(0, 10);
+    // Venezuela UTC-4
+    return new Date(d.getTime() - 4 * 3600 * 1000).toISOString().slice(0, 10);
+  };
+
   app.get("/api/cobros", authenticateToken, async (req: any, res: any) => {
     try {
-      let list: any[] = [];
+      const vendedorFilter = String(req.query.vendedor || '').trim();
+      const dateFilter = String(req.query.date || '').trim(); // ej. "2026-11-03", "today", "2026-11-03_utc", "all"
+      const includeImages = req.query.includeImages === 'true';
+
+      const targetDateVe =
+        dateFilter === 'today'
+          ? toVenezuelaDateIso(new Date().toISOString())
+          : /^\d{4}-\d{2}-\d{2}$/.test(dateFilter)
+          ? dateFilter
+          : '';
+
+      const byId = new Map<string, any>();
+
+      // 1. Leer respaldo local en disco (cobros_registrados.json)
       if (fs.existsSync(COBROS_LOCAL_DB_PATH)) {
-        list = JSON.parse(fs.readFileSync(COBROS_LOCAL_DB_PATH, 'utf-8')) || [];
+        try {
+          const localList = JSON.parse(fs.readFileSync(COBROS_LOCAL_DB_PATH, 'utf-8')) || [];
+          for (const item of localList) {
+            if (item && item.id) byId.set(item.id, item);
+          }
+        } catch (_e) {}
       }
-      return res.json({ success: true, cobros: list });
+
+      // 2. Consultar directamente Supabase Storage (bucket comprobantes-cobros/registros)
+      if (supabase) {
+        try {
+          const { data: folders } = await supabase.storage.from(COBROS_BUCKET).list('registros', { limit: 100 });
+          const targetVendorKey = normalizeCobroVendorKey(vendedorFilter);
+
+          const matchingFolders = (folders || []).filter((f: any) => {
+            if (!f?.name) return false;
+            if (!targetVendorKey) return true;
+            const folderKey = normalizeCobroVendorKey(f.name.replace(/_/g, ' '));
+            return (
+              folderKey.includes(targetVendorKey) ||
+              targetVendorKey.includes(folderKey) ||
+              (targetVendorKey.includes('maria') && folderKey.includes('mar') && folderKey.includes('brice'))
+            );
+          });
+
+          for (const folder of matchingFolders) {
+            const { data: files } = await supabase.storage
+              .from(COBROS_BUCKET)
+              .list(`registros/${folder.name}`, {
+                limit: 300,
+                sortBy: { column: 'created_at', order: 'desc' },
+              });
+
+            const candidateFiles = (files || []).filter((fileObj: any) => {
+              if (!fileObj?.name || !fileObj.name.endsWith('.json')) return false;
+              if (!dateFilter || dateFilter === 'all') return true;
+              const createdAtStr = String(fileObj.created_at || '');
+              if (dateFilter.endsWith('_utc')) {
+                const utcDay = dateFilter.replace('_utc', '');
+                return createdAtStr.startsWith(utcDay);
+              }
+              if (targetDateVe) {
+                const fileVeDay = toVenezuelaDateIso(createdAtStr);
+                return fileVeDay === targetDateVe || createdAtStr.startsWith(targetDateVe);
+              }
+              return true;
+            });
+
+            // Descargar en paralelo (en lotes de 10) los metadatos JSON faltantes
+            const batchSize = 10;
+            for (let i = 0; i < candidateFiles.length; i += batchSize) {
+              const slice = candidateFiles.slice(i, i + batchSize);
+              await Promise.all(
+                slice.map(async (fileObj: any) => {
+                  const idGuess = fileObj.name.replace(/\.json$/, '');
+                  if (byId.has(idGuess)) return;
+                  try {
+                    const { data: blob } = await supabase.storage
+                      .from(COBROS_BUCKET)
+                      .download(`registros/${folder.name}/${fileObj.name}`);
+                    if (blob) {
+                      const rec = JSON.parse(await blob.text());
+                      if (rec && rec.id) {
+                        byId.set(rec.id, rec);
+                      }
+                    }
+                  } catch (_dlErr) {}
+                })
+              );
+            }
+          }
+        } catch (supaErr: any) {
+          console.warn('[COBROS RECOVER] Advertencia listando Supabase Storage:', supaErr?.message);
+        }
+      }
+
+      // 3. Filtrar por vendedor y por fecha solicitada
+      let list = Array.from(byId.values());
+
+      if (vendedorFilter) {
+        const targetVendorKey = normalizeCobroVendorKey(vendedorFilter);
+        list = list.filter((item: any) => {
+          const itemKey = normalizeCobroVendorKey(item.vendedor || '');
+          return (
+            itemKey.includes(targetVendorKey) ||
+            targetVendorKey.includes(itemKey) ||
+            (targetVendorKey.includes('maria') && itemKey.includes('maria') && itemKey.includes('briceno'))
+          );
+        });
+      }
+
+      if (dateFilter && dateFilter !== 'all') {
+        if (dateFilter.endsWith('_utc')) {
+          const utcDay = dateFilter.replace('_utc', '');
+          list = list.filter((item: any) =>
+            String(item.createdAt || item.syncedAt || '').startsWith(utcDay)
+          );
+        } else if (targetDateVe) {
+          list = list.filter((item: any) => {
+            const veDay = toVenezuelaDateIso(item.createdAt || item.syncedAt);
+            return veDay === targetDateVe;
+          });
+        }
+      }
+
+      // Ordenar cronológicamente (más recientes primero)
+      list.sort((a: any, b: any) =>
+        String(b.createdAt || b.syncedAt || '').localeCompare(String(a.createdAt || a.syncedAt || ''))
+      );
+
+      // 4. Si se solicitó includeImages=true, hidratar imágenes Base64 desde comprobante_url para exportación PDF
+      if (includeImages && list.length > 0) {
+        const imgBatchSize = 6;
+        for (let i = 0; i < list.length; i += imgBatchSize) {
+          const slice = list.slice(i, i + imgBatchSize);
+          await Promise.all(
+            slice.map(async (item: any) => {
+              if (item.image || !item.comprobante_url) return;
+              try {
+                const imgRes = await fetch(item.comprobante_url);
+                if (imgRes.ok) {
+                  const arrBuf = await imgRes.arrayBuffer();
+                  const mime = item.fileMimeType || imgRes.headers.get('content-type') || 'image/jpeg';
+                  const b64 = Buffer.from(arrBuf).toString('base64');
+                  const dataUrl = `data:${mime};base64,${b64}`;
+                  item.image = mime === 'application/pdf' ? undefined : dataUrl;
+                  item.fileDataUrl = dataUrl;
+                }
+              } catch (_imgErr) {}
+            })
+          );
+        }
+      }
+
+      return res.json({
+        success: true,
+        total: list.length,
+        cobros: list,
+      });
     } catch (err: any) {
       return res.status(500).json({ error: 'Error consultando cobros sincronizados' });
     }

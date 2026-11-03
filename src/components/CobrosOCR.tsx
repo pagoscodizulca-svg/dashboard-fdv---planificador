@@ -336,6 +336,110 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
     }
   };
 
+  // Recuperar carga de cobros sincronizados en Supabase Storage por vendedor y fecha
+  const handleRecuperarCargaNube = async (
+    vendedorTarget?: string,
+    dateTarget: string = 'today',
+    silent = false
+  ) => {
+    const targetVendor = (vendedorTarget || currentVendedor || 'María Briceño').trim();
+    try {
+      setIsSyncingCloud(true);
+      if (!silent) {
+        notifyUser('info', `Recuperando carga de cobros en la nube de ${targetVendor}...`, 3500);
+      }
+
+      const url = `/api/cobros?vendedor=${encodeURIComponent(targetVendor)}&date=${encodeURIComponent(dateTarget)}&includeImages=true`;
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          ...getAuthHeaders(),
+        },
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const cloudCobros: any[] = Array.isArray(data?.cobros) ? data.cobros : [];
+
+      if (cloudCobros.length === 0) {
+        if (!silent) {
+          notifyUser('info', `No se encontraron cobros en la nube para ${targetVendor} en el filtro seleccionado.`, 4500);
+        }
+        return;
+      }
+
+      const normalizedRecords: CobroRecord[] = cloudCobros.map((c: any) => ({
+        id: String(c.id || `pago-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`),
+        vendedor: String(c.vendedor || targetVendor),
+        vendedorEmail: c.vendedorEmail || undefined,
+        ruta: String(c.ruta || ruta || 'Ruta 1'),
+        metodo_pago: String(c.metodo_pago || 'Transferencia'),
+        banco: String(c.banco || 'No especificado'),
+        monto: Number(c.monto) || 0,
+        referencia: String(c.referencia || ''),
+        fecha_pago: String(c.fecha_pago || new Date().toISOString().split('T')[0]),
+        titular: String(c.titular || 'No especificado'),
+        rif: String(c.rif || ''),
+        tasa: Number(c.tasa) || 0,
+        codigo_cliente: String(c.codigo_cliente || 'N/A'),
+        nombre_cliente: String(c.nombre_cliente || 'Sin nombre'),
+        factura: String(c.factura || 'N/A'),
+        image: c.image || undefined,
+        fileDataUrl: c.fileDataUrl || c.image || undefined,
+        fileName: c.fileName || undefined,
+        fileMimeType: c.fileMimeType || 'image/jpeg',
+        comprobante_url: c.comprobante_url || undefined,
+        syncStatus: 'synced',
+        createdAt: c.createdAt || c.syncedAt || new Date().toISOString(),
+        syncedAt: c.syncedAt || new Date().toISOString(),
+      }));
+
+      for (const rec of normalizedRecords) {
+        await saveCobroToLocalDB(rec);
+      }
+
+      setPagosConsolidados((prev) => {
+        const byId = new Map<string, any>();
+        for (const item of normalizedRecords) {
+          byId.set(item.id, item);
+        }
+        for (const existing of prev) {
+          if (existing?.id && !byId.has(existing.id)) {
+            byId.set(existing.id, existing);
+          }
+        }
+        return Array.from(byId.values()).sort((a, b) =>
+          String(b.createdAt || b.syncedAt || '').localeCompare(String(a.createdAt || a.syncedAt || ''))
+        );
+      });
+
+      const totalBs = normalizedRecords.reduce((acc, r) => acc + (Number(r.monto) || 0), 0);
+      if (!silent) {
+        notifyUser(
+          'success',
+          `¡${normalizedRecords.length} cobros de ${normalizedRecords[0]?.vendedor || targetVendor} (Bs. ${formatMontoVenezolano(totalBs)}) recuperados con éxito!`,
+          5500
+        );
+      }
+    } catch (err: any) {
+      console.warn('Error recuperando cobros desde la nube:', err);
+      if (!silent) {
+        notifyUser('error', 'No se pudo recuperar la carga de cobros desde la nube.', 4500);
+      }
+    } finally {
+      setIsSyncingCloud(false);
+    }
+  };
+
+  // Si la relación local está vacía al abrir el módulo, hidratar automáticamente la carga de hoy del vendedor desde la nube
+  useEffect(() => {
+    if (pagosConsolidados.length === 0 && currentVendedor) {
+      handleRecuperarCargaNube(currentVendedor, 'today', true);
+    }
+  }, []);
+
   const [historialRelaciones, setHistorialRelaciones] = useState<any[]>(() => {
     try {
       const saved = localStorage.getItem('ocr_historial_relaciones');
@@ -2452,7 +2556,7 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
           {/* COLUMNA DERECHA: RELACIÓN DE COBROS ACTUAL */}
           <div className="border border-neutral-800 rounded-xl bg-neutral-950 flex flex-col h-[680px] shadow-sm overflow-hidden">
             {/* Header Relación */}
-            <div className="p-4 border-b border-neutral-800 bg-neutral-900/60 flex justify-between items-center">
+            <div className="p-4 border-b border-neutral-800 bg-neutral-900/60 flex flex-wrap justify-between items-center gap-2">
               <div>
                 <h3 className="text-xs font-sans font-bold text-neutral-300 uppercase tracking-wider">
                   Relación de Cobros Actual
@@ -2462,7 +2566,21 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
                 </p>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleRecuperarCargaNube('María Briceño', '2026-11-03')}
+                  disabled={isSyncingCloud}
+                  title="Recuperar los 17 cobros subidos hoy (03/11/2026) por María Briceño desde la nube"
+                  className="flex items-center gap-1.5 text-[11px] font-bold bg-sky-950/60 hover:bg-sky-900/70 active:scale-95 text-sky-300 px-2.5 py-1.5 rounded-lg border border-sky-800/70 transition-all uppercase tracking-wider shadow-sm cursor-pointer disabled:opacity-50"
+                >
+                  {isSyncingCloud ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-400" />
+                  ) : (
+                    <Cloud className="w-3.5 h-3.5 text-sky-400" />
+                  )}
+                  Recuperar María Briceño (Hoy)
+                </button>
                 {pagosConsolidados.length > 0 && (
                   <button 
                     onClick={generarRelacionPDF} 
@@ -2486,9 +2604,29 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
                     <FileText className="w-8 h-8 text-neutral-600" />
                   </div>
                   <p className="text-sm font-sans font-bold text-neutral-400 mb-1">No hay cobros en la relación actual</p>
-                  <p className="text-xs text-neutral-600 max-w-[240px]">
-                    Comparte el soporte (imagen o PDF) desde WhatsApp o completa los datos a la izquierda y presiona "Consolidar Pago".
+                  <p className="text-xs text-neutral-600 max-w-[260px] mb-4">
+                    Comparte el soporte (imagen o PDF) desde WhatsApp, completa los datos a la izquierda o recupera la carga respaldada en la nube.
                   </p>
+                  <div className="flex flex-col sm:flex-row items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleRecuperarCargaNube('María Briceño', '2026-11-03')}
+                      disabled={isSyncingCloud}
+                      className="flex items-center gap-1.5 text-xs font-bold bg-sky-600 hover:bg-sky-500 text-white px-3.5 py-2 rounded-lg transition-all shadow-sm cursor-pointer disabled:opacity-50"
+                    >
+                      <Cloud className="w-4 h-4" />
+                      Recuperar María Briceño Hoy (17 cobros)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleRecuperarCargaNube('María Briceño', '2026-11-03_utc')}
+                      disabled={isSyncingCloud}
+                      className="flex items-center gap-1.5 text-xs font-bold bg-neutral-800 hover:bg-neutral-700 text-neutral-200 px-3.5 py-2 rounded-lg border border-neutral-700 transition-all shadow-sm cursor-pointer disabled:opacity-50"
+                    >
+                      <History className="w-4 h-4 text-amber-400" />
+                      Jornada Completa 02/11 + 03/11 (35 cobros)
+                    </button>
+                  </div>
                 </div>
               ) : (
                 pagosConsolidados.map((pago: any) => {
