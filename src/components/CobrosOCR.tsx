@@ -37,6 +37,11 @@ import {
   fileToFullBase64,
   formatMontoVenezolano
 } from '../services/venezuelanReceiptParser';
+import {
+  getTasaBcvPorFecha,
+  normalizeBcvDateInput,
+  parseNumeroBcv
+} from '../services/bcvRateService';
 
 // Error Boundary específico para CobrosOCR para evitar que cualquier fallo deje la pantalla en blanco
 interface ErrorBoundaryProps {
@@ -187,6 +192,19 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
   const [factura, setFactura] = useState('');
   const [metodoPago, setMetodoPago] = useState<string>('Pago Móvil');
   const [tasa, setTasa] = useState('');
+  const [bcvRateStatus, setBcvRateStatus] = useState<{
+    loading: boolean;
+    status: 'idle' | 'applied' | 'error' | 'manual';
+    message: string;
+    fechaSolicitadaDisplay?: string;
+    fechaValorDisplay?: string;
+    esDiaHabilAnterior?: boolean;
+  }>({
+    loading: false,
+    status: 'idle',
+    message: '',
+  });
+  const bcvLookupSeqRef = useRef<number>(0);
   const [banco, setBanco] = useState('');
   const [cuentaCanal, setCuentaCanal] = useState('');
   const [montoDisplay, setMontoDisplay] = useState('');
@@ -378,24 +396,52 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
     }
   }, [historialRelaciones]);
 
-  // Cargar tasa BCV oficial actual por defecto si no hay tasa
-  useEffect(() => {
-    if (!tasa) {
-      fetch('/api/tasa-bcv?date=' + fechaPago)
-        .then(async res => {
-          if (!res.ok) return null;
-          const text = await res.text();
-          if (!text.trim().startsWith('{')) return null;
-          return JSON.parse(text);
-        })
-        .then(data => {
-          if (data && data.tasa) {
-            setTasa(data.tasa.toString());
-          }
-        })
-        .catch(err => console.log("No se pudo autocompletar tasa inicial:", err));
+  // Consulta y aplica la Tasa Oficial (BCV) histórica exacta para la fecha del comprobante
+  const aplicarTasaBcvPorFecha = async (fechaInput: string): Promise<number> => {
+    const { iso, display } = normalizeBcvDateInput(fechaInput);
+    const reqId = ++bcvLookupSeqRef.current;
+
+    setBcvRateStatus({
+      loading: true,
+      status: 'idle',
+      message: `Buscando tasa del ${display}...`,
+      fechaSolicitadaDisplay: display,
+    });
+
+    try {
+      const resultado = await getTasaBcvPorFecha(iso);
+      if (reqId !== bcvLookupSeqRef.current) return resultado.tasa;
+
+      const formattedRate = resultado.tasa.toFixed(2);
+      setTasa(formattedRate);
+      setBcvRateStatus({
+        loading: false,
+        status: 'applied',
+        message: resultado.esDiaHabilAnterior
+          ? `✓ Tasa BCV aplicada para el ${resultado.fechaSolicitadaDisplay} (día hábil: ${resultado.fechaValorDisplay})`
+          : `✓ Tasa BCV aplicada para el ${resultado.fechaSolicitadaDisplay}`,
+        fechaSolicitadaDisplay: resultado.fechaSolicitadaDisplay,
+        fechaValorDisplay: resultado.fechaValorDisplay,
+        esDiaHabilAnterior: resultado.esDiaHabilAnterior,
+      });
+      return resultado.tasa;
+    } catch (err) {
+      if (reqId !== bcvLookupSeqRef.current) return 0;
+      console.warn('No se pudo obtener tasa BCV para la fecha:', display, err);
+      setBcvRateStatus({
+        loading: false,
+        status: 'error',
+        message: `No se pudo conectar con BCV para el ${display} • Verifica la tasa manual`,
+        fechaSolicitadaDisplay: display,
+      });
+      return 0;
     }
-  }, [fechaPago]);
+  };
+
+  // Cargar tasa BCV oficial al abrir el módulo para la fecha inicial
+  useEffect(() => {
+    aplicarTasaBcvPorFecha(fechaPago);
+  }, []);
 
   // Limpiar y parsear montos en formato venezolano ("576.599,07" -> 576599.07) e internacional de forma 100% exacta
   const parseMontoExacto = (val: any): number => {
@@ -794,19 +840,9 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
       }
 
       if (parsed.fecha) {
-        try {
-          const rateRes = await fetch(`/api/tasa-bcv?date=${parsed.fecha}`);
-          if (rateRes.ok) {
-            const rateText = await rateRes.text();
-            if (rateText.trim().startsWith('{') || rateText.includes('```')) {
-              const rateData = safeExtractReceiptJson(rateText);
-              if (rateData && rateData.tasa) {
-                setTasa(rateData.tasa.toString());
-              }
-            }
-          }
-        } catch (rErr) {
-          console.warn('No se pudo autocompletar la tasa:', rErr);
+        const tasaAplicada = await aplicarTasaBcvPorFecha(parsed.fecha);
+        if (tasaAplicada > 0) {
+          camposCargados.push(`Tasa BCV: ${tasaAplicada.toFixed(2)}`);
         }
       }
 
@@ -1277,7 +1313,7 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
         }
       }
 
-      const tasaNum = parseFloat(tasa) || 0;
+      const tasaNum = parseNumeroBcv(tasa);
       const vendedorEmail = (currentVendedor.toUpperCase().includes('MIKELANGELO') || currentVendedor.toUpperCase().includes('SOTO'))
         ? 'Mikelangelodiaz@gmail.com'
         : undefined;
@@ -2188,17 +2224,46 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
                 </div>
 
                 <div>
-                  <label className="text-[10px] font-sans font-bold text-neutral-400 uppercase tracking-wider mb-1 block">
-                    Tasa Oficial (BCV) *
-                  </label>
+                  <div className="flex justify-between items-center mb-1 gap-1">
+                    <label className="text-[10px] font-sans font-bold text-neutral-400 uppercase tracking-wider block">
+                      Tasa Oficial (BCV) *
+                    </label>
+                    {bcvRateStatus.loading && (
+                      <span className="text-[10px] font-sans font-medium text-sky-400 flex items-center gap-1 animate-pulse">
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        {bcvRateStatus.message}
+                      </span>
+                    )}
+                  </div>
                   <input 
                     type="number" 
                     step="0.01" 
                     value={tasa} 
-                    onChange={e => setTasa(e.target.value)} 
+                    onChange={e => {
+                      setTasa(e.target.value);
+                      setBcvRateStatus((prev) => ({
+                        ...prev,
+                        loading: false,
+                        status: 'manual',
+                      }));
+                    }} 
                     placeholder="0.00" 
-                    className="w-full bg-neutral-900 border border-neutral-800 rounded-lg p-2.5 text-white text-sm focus:border-red-500 focus:outline-none transition-colors" 
+                    className={`w-full bg-neutral-900 border rounded-lg p-2.5 text-white text-sm focus:outline-none transition-colors ${
+                      bcvRateStatus.status === 'error'
+                        ? 'border-amber-500/80 focus:border-amber-400'
+                        : 'border-neutral-800 focus:border-red-500'
+                    }`} 
                   />
+                  {!bcvRateStatus.loading && bcvRateStatus.status === 'applied' && bcvRateStatus.message && (
+                    <p className="mt-1 text-[10px] font-sans font-semibold text-emerald-400 leading-tight">
+                      {bcvRateStatus.message}
+                    </p>
+                  )}
+                  {!bcvRateStatus.loading && bcvRateStatus.status === 'error' && bcvRateStatus.message && (
+                    <p className="mt-1 text-[10px] font-sans font-semibold text-amber-400 leading-tight">
+                      {bcvRateStatus.message}
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -2242,9 +2307,9 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
                       <span className="text-[10px] font-sans font-bold text-amber-400">
                         Completar manual
                       </span>
-                    ) : montoNumerico > 0 && parseFloat(tasa) > 0 ? (
+                    ) : montoNumerico > 0 && parseNumeroBcv(tasa) > 0 ? (
                       <span className="text-[11px] font-mono text-emerald-400 font-bold">
-                        ≈ ${(montoNumerico / parseFloat(tasa)).toFixed(2)} USD
+                        ≈ ${(montoNumerico / parseNumeroBcv(tasa)).toFixed(2)} USD
                       </span>
                     ) : null}
                   </div>
@@ -2309,9 +2374,11 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
                     type="date" 
                     value={fechaPago} 
                     onChange={e => {
-                      setFechaPago(e.target.value);
-                      if (e.target.value) {
+                      const nuevaFecha = e.target.value;
+                      setFechaPago(nuevaFecha);
+                      if (nuevaFecha) {
                         setMissingFields((prev) => ({ ...prev, fecha: false }));
+                        aplicarTasaBcvPorFecha(nuevaFecha);
                       }
                     }} 
                     className={`w-full bg-neutral-900 border rounded-lg p-2.5 text-white text-sm focus:outline-none transition-colors ${

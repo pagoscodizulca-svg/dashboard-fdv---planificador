@@ -3773,6 +3773,7 @@ module.exports = __toCommonJS(server_exports);
 var import_express = __toESM(require("express"), 1);
 var import_path = __toESM(require("path"), 1);
 var import_fs = __toESM(require("fs"), 1);
+var import_https = __toESM(require("https"), 1);
 var import_zlib = __toESM(require("zlib"), 1);
 var import_vite = require("vite");
 var import_dotenv = __toESM(require("dotenv"), 1);
@@ -5060,6 +5061,220 @@ async function extractSupportWithGemini(options) {
   };
 }
 
+// src/services/bcvRateService.ts
+var XLSX = __toESM(require("xlsx"), 1);
+var BCV_INDICE_INVERSION_URL = "https://www.bcv.org.ve/estadisticas/indice-de-inversion";
+var BCV_SMC_URL = "https://www.bcv.org.ve/estadisticas/tipo-cambio-de-referencia-smc";
+function normalizeBcvDateInput(fechaInput) {
+  const raw = String(fechaInput || "").trim();
+  const isoMatch = raw.match(/\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})\b/);
+  if (isoMatch) {
+    const yyyy = isoMatch[1];
+    const mm = isoMatch[2].padStart(2, "0");
+    const dd = isoMatch[3].padStart(2, "0");
+    return {
+      iso: `${yyyy}-${mm}-${dd}`,
+      display: `${dd}/${mm}/${yyyy}`
+    };
+  }
+  const dmyMatch = raw.match(/\b(\d{1,2})[-/](\d{1,2})[-/](20\d{2})\b/);
+  if (dmyMatch) {
+    const dd = dmyMatch[1].padStart(2, "0");
+    const mm = dmyMatch[2].padStart(2, "0");
+    const yyyy = dmyMatch[3];
+    return {
+      iso: `${yyyy}-${mm}-${dd}`,
+      display: `${dd}/${mm}/${yyyy}`
+    };
+  }
+  const compactMatch = raw.match(/^(\d{2})(\d{2})(20\d{2})$/);
+  if (compactMatch) {
+    const [, dd, mm, yyyy] = compactMatch;
+    return {
+      iso: `${yyyy}-${mm}-${dd}`,
+      display: `${dd}/${mm}/${yyyy}`
+    };
+  }
+  const todayIso = (/* @__PURE__ */ new Date()).toISOString().split("T")[0];
+  const [y, m, d] = todayIso.split("-");
+  return {
+    iso: todayIso,
+    display: `${d}/${m}/${y}`
+  };
+}
+function parseNumeroBcv(raw) {
+  if (typeof raw === "number") {
+    if (!Number.isFinite(raw) || raw <= 0) return 0;
+    return Math.round((raw + Number.EPSILON) * 100) / 100;
+  }
+  if (!raw || typeof raw !== "string") return 0;
+  const cleaned = raw.replace(/[^\d.,-]/g, "").trim();
+  if (!cleaned) return 0;
+  let numericValue = 0;
+  if (cleaned.includes(".") && cleaned.includes(",")) {
+    const lastDot = cleaned.lastIndexOf(".");
+    const lastComma = cleaned.lastIndexOf(",");
+    if (lastComma > lastDot) {
+      numericValue = parseFloat(cleaned.replace(/\./g, "").replace(",", ".")) || 0;
+    } else {
+      numericValue = parseFloat(cleaned.replace(/,/g, "")) || 0;
+    }
+  } else if (cleaned.includes(",")) {
+    numericValue = parseFloat(cleaned.replace(/\./g, "").replace(",", ".")) || 0;
+  } else {
+    numericValue = parseFloat(cleaned) || 0;
+  }
+  if (!Number.isFinite(numericValue) || numericValue <= 0) return 0;
+  return Math.round((numericValue + Number.EPSILON) * 100) / 100;
+}
+function parseBcvIndiceInversionHtml(html) {
+  const ratesByDate = {};
+  if (!html || typeof html !== "string") return ratesByDate;
+  const rowMatches = html.match(/<tr[\s\S]*?<\/tr>/gi) || [];
+  for (const rowHtml of rowMatches) {
+    if (/<th[\s>]/i.test(rowHtml) && !/<td[\s>]/i.test(rowHtml)) continue;
+    let dateIso = "";
+    const contentDateMatch = rowHtml.match(/content=["'](20\d{2}-\d{2}-\d{2})T/i);
+    if (contentDateMatch) {
+      dateIso = contentDateMatch[1];
+    } else {
+      const dateCellMatch = rowHtml.match(/views-field-field-fecha-del-indicador[^>]*>([\s\S]*?)<\/td>/i) || rowHtml.match(/<td[^>]*>([\s\S]*?)<\/td>/i);
+      if (dateCellMatch) {
+        const plainDate = dateCellMatch[1].replace(/<[^>]+>/g, " ").trim();
+        if (/\b\d{1,2}[-/]\d{1,2}[-/]20\d{2}\b/.test(plainDate) || /\b20\d{2}[-/]\d{1,2}[-/]\d{1,2}\b/.test(plainDate)) {
+          dateIso = normalizeBcvDateInput(plainDate).iso;
+        }
+      }
+    }
+    if (!dateIso || !/^\d{4}-\d{2}-\d{2}$/.test(dateIso)) continue;
+    let rateVal = 0;
+    const conditionalCellMatch = rowHtml.match(
+      /class=["'][^"']*views-field-views-conditional(?:\s|["'])[^>]*>([\s\S]*?)<\/td>/i
+    );
+    if (conditionalCellMatch) {
+      const cellText = conditionalCellMatch[1].replace(/<[^>]+>/g, " ").trim();
+      rateVal = parseNumeroBcv(cellText);
+    } else {
+      const tdMatches = [...rowHtml.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map(
+        (m) => m[1].replace(/<[^>]+>/g, " ").trim()
+      );
+      if (tdMatches.length >= 2) {
+        rateVal = parseNumeroBcv(tdMatches[1]);
+      }
+    }
+    if (rateVal > 0) {
+      ratesByDate[dateIso] = rateVal;
+    }
+  }
+  return ratesByDate;
+}
+function extractBcvExcelLinksFromHtml(html) {
+  if (!html || typeof html !== "string") return [];
+  const links = [];
+  const regex = /href=["']([^"']+\.(?:xls|xlsx)(?:\?[^"']*)?)["']/gi;
+  let match;
+  while ((match = regex.exec(html)) !== null) {
+    const rawHref = match[1].trim();
+    if (!rawHref) continue;
+    const fullUrl = rawHref.startsWith("http") ? rawHref : `https://www.bcv.org.ve${rawHref.startsWith("/") ? "" : "/"}${rawHref}`;
+    if (!links.includes(fullUrl)) {
+      links.push(fullUrl);
+    }
+  }
+  return links;
+}
+function parseBcvExcelBuffer(buffer) {
+  const ratesByDate = {};
+  try {
+    const workbook = XLSX.read(buffer, { type: "array" });
+    for (const sheetName of workbook.SheetNames) {
+      const sheet = workbook.Sheets[sheetName];
+      if (!sheet) continue;
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+      if (!Array.isArray(rows) || rows.length === 0) continue;
+      let sheetFechaValorIso = "";
+      let sheetFechaOperacionIso = "";
+      if (/^\d{8}$/.test(sheetName.trim())) {
+        sheetFechaOperacionIso = normalizeBcvDateInput(sheetName.trim()).iso;
+      }
+      for (const row of rows) {
+        if (!Array.isArray(row) || row.length === 0) continue;
+        const rowText = row.map((c) => String(c ?? "").trim()).join(" ");
+        const fvMatch = rowText.match(/Fecha\s+Valor\s*:\s*(\d{2}[-/]\d{2}[-/]20\d{2})/i);
+        if (fvMatch) {
+          sheetFechaValorIso = normalizeBcvDateInput(fvMatch[1]).iso;
+        }
+        const foMatch = rowText.match(/Fecha\s+Operaci[oó]n\s*:\s*(\d{2}[-/]\d{2}[-/]20\d{2})/i);
+        if (foMatch) {
+          sheetFechaOperacionIso = normalizeBcvDateInput(foMatch[1]).iso;
+        }
+        const firstCol = String(row[0] ?? "").trim().toUpperCase();
+        if (firstCol === "USD" && row.length >= 6) {
+          const askRate = parseNumeroBcv(row[5]) || parseNumeroBcv(row[4]);
+          if (askRate > 0) {
+            if (sheetFechaValorIso) {
+              ratesByDate[sheetFechaValorIso] = askRate;
+            }
+            if (sheetFechaOperacionIso && !ratesByDate[sheetFechaOperacionIso]) {
+              ratesByDate[sheetFechaOperacionIso] = askRate;
+            }
+          }
+          continue;
+        }
+        const cell0 = String(row[0] ?? "").trim();
+        if (/^\d{1,2}[-/]\d{1,2}[-/]20\d{2}$/.test(cell0) || /^20\d{2}[-/]\d{1,2}[-/]\d{1,2}$/.test(cell0)) {
+          const iso = normalizeBcvDateInput(cell0).iso;
+          const rateCandidate = parseNumeroBcv(row[1]);
+          if (iso && rateCandidate > 0) {
+            ratesByDate[iso] = rateCandidate;
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("[BCV EXCEL PARSER] Error procesando libro Excel del BCV:", err);
+  }
+  return ratesByDate;
+}
+function resolveBcvRateWithBusinessDayFallback(ratesMap, fechaInput, maxLookbackDays = 5, fuente = BCV_INDICE_INVERSION_URL) {
+  if (!ratesMap || typeof ratesMap !== "object") return null;
+  const { iso: targetIso, display: targetDisplay } = normalizeBcvDateInput(fechaInput);
+  const exactRate = ratesMap[targetIso];
+  if (typeof exactRate === "number" && exactRate > 0) {
+    return {
+      tasa: exactRate,
+      fechaValor: targetIso,
+      fechaValorDisplay: targetDisplay,
+      fechaSolicitada: targetIso,
+      fechaSolicitadaDisplay: targetDisplay,
+      fuente,
+      esDiaHabilAnterior: false
+    };
+  }
+  const baseDate = /* @__PURE__ */ new Date(`${targetIso}T12:00:00Z`);
+  if (isNaN(baseDate.getTime())) return null;
+  for (let offset = 1; offset <= maxLookbackDays; offset++) {
+    const prevDate = new Date(baseDate.getTime() - offset * 864e5);
+    const yyyy = prevDate.getUTCFullYear();
+    const mm = String(prevDate.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(prevDate.getUTCDate()).padStart(2, "0");
+    const prevIso = `${yyyy}-${mm}-${dd}`;
+    const candidateRate = ratesMap[prevIso];
+    if (typeof candidateRate === "number" && candidateRate > 0) {
+      return {
+        tasa: candidateRate,
+        fechaValor: prevIso,
+        fechaValorDisplay: `${dd}/${mm}/${yyyy}`,
+        fechaSolicitada: targetIso,
+        fechaSolicitadaDisplay: targetDisplay,
+        fuente,
+        esDiaHabilAnterior: true
+      };
+    }
+  }
+  return null;
+}
+
 // server.ts
 init_firebase();
 
@@ -5778,16 +5993,16 @@ function parseTruthySheetFlag(raw) {
   const norm = normalizeHeaderKey(raw);
   return norm === "si" || norm === "yes" || norm === "true" || norm === "1" || norm === "activo" || norm === "x";
 }
-function extractSheetRows(XLSX, sheet) {
+function extractSheetRows(XLSX2, sheet) {
   if (!sheet) return [];
-  return XLSX.utils.sheet_to_json(sheet, {
+  return XLSX2.utils.sheet_to_json(sheet, {
     header: 1,
     defval: null,
     blankrows: true,
     raw: true
   });
 }
-function parseWorkbookFull(XLSX, workbook, options) {
+function parseWorkbookFull(XLSX2, workbook, options) {
   const { periodo, masterClients = [] } = options;
   const warnings = [];
   const metrics = {};
@@ -5795,7 +6010,7 @@ function parseWorkbookFull(XLSX, workbook, options) {
   const volumenApiRows = [];
   const volResolved = resolveSheetByAliases(workbook, ["volumen_por_sku"], ["volumen", "sku"]);
   if (volResolved) {
-    const rows = extractSheetRows(XLSX, volResolved.sheet);
+    const rows = extractSheetRows(XLSX2, volResolved.sheet);
     const tabMetric = {
       sheetName: volResolved.sheetName,
       totalRowsInSheet: rows.length,
@@ -5926,7 +6141,7 @@ function parseWorkbookFull(XLSX, workbook, options) {
       ["grid", "volumen", "activacion_por_cliente", "usuarios", "degustaciones"]
     );
     if (!resolved) return clientMap;
-    const rows = extractSheetRows(XLSX, resolved.sheet);
+    const rows = extractSheetRows(XLSX2, resolved.sheet);
     const tabMetric = {
       sheetName: resolved.sheetName,
       totalRowsInSheet: rows.length,
@@ -5989,7 +6204,7 @@ function parseWorkbookFull(XLSX, workbook, options) {
   );
   const sheetClientsByCanonical = /* @__PURE__ */ new Map();
   if (actResolved) {
-    const rows = extractSheetRows(XLSX, actResolved.sheet);
+    const rows = extractSheetRows(XLSX2, actResolved.sheet);
     const tabMetric = {
       sheetName: actResolved.sheetName,
       totalRowsInSheet: rows.length,
@@ -6208,7 +6423,7 @@ function parseWorkbookFull(XLSX, workbook, options) {
     ["grid_de_activacion", "grid"]
   );
   if (gridResolved) {
-    const rows = extractSheetRows(XLSX, gridResolved.sheet);
+    const rows = extractSheetRows(XLSX2, gridResolved.sheet);
     const tabMetric = {
       sheetName: gridResolved.sheetName,
       totalRowsInSheet: rows.length,
@@ -6301,7 +6516,7 @@ function parseWorkbookFull(XLSX, workbook, options) {
   const usuariosRows = [];
   const usrResolved = resolveSheetByAliases(workbook, ["usuarios"], ["usuario"]);
   if (usrResolved) {
-    const rows = extractSheetRows(XLSX, usrResolved.sheet);
+    const rows = extractSheetRows(XLSX2, usrResolved.sheet);
     const tabMetric = {
       sheetName: usrResolved.sheetName,
       totalRowsInSheet: rows.length,
@@ -6353,7 +6568,7 @@ function parseWorkbookFull(XLSX, workbook, options) {
   const degustacionesRows = [];
   const degResolved = resolveSheetByAliases(workbook, ["degustaciones"], ["degustacion"]);
   if (degResolved) {
-    const rows = extractSheetRows(XLSX, degResolved.sheet);
+    const rows = extractSheetRows(XLSX2, degResolved.sheet);
     const tabMetric = {
       sheetName: degResolved.sheetName,
       totalRowsInSheet: rows.length,
@@ -6621,12 +6836,12 @@ async function getWorkbook(force = false) {
   if (!force && cachedWorkbook && Date.now() - lastFetchTime < CACHE_TTL) {
     return cachedWorkbook;
   }
-  const XLSX = await import("xlsx");
+  const XLSX2 = await import("xlsx");
   const sheetId = getGoogleSheetId();
   try {
     const exportUrl = buildGoogleSheetExportUrl(sheetId, "xlsx");
     const buffer = await fetchGoogleSheetWithRetry(exportUrl, 3);
-    cachedWorkbook = XLSX.read(buffer, { type: "array", raw: true });
+    cachedWorkbook = XLSX2.read(buffer, { type: "array", raw: true });
     lastFetchTime = Date.now();
     lastSuccessfulSheetSyncAt = (/* @__PURE__ */ new Date()).toISOString();
     lastSheetSource = "live_google_sheet";
@@ -6642,7 +6857,7 @@ async function getWorkbook(force = false) {
   const localPath = import_path.default.join(process.cwd(), "sheet.xlsx");
   if (import_fs.default.existsSync(localPath)) {
     try {
-      cachedWorkbook = XLSX.readFile(localPath);
+      cachedWorkbook = XLSX2.readFile(localPath);
       lastFetchTime = Date.now();
       lastSheetSource = "local_backup";
       if (!lastSuccessfulSheetSyncAt) {
@@ -9269,71 +9484,261 @@ async function startServer() {
       return res.status(500).json({ error: "Error consultando cobros sincronizados" });
     }
   });
-  app2.get("/api/tasa-bcv", async (req, res) => {
-    try {
-      const dateStr = req.query.date;
-      if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-        return res.json({ tasa: cachedBcvRate });
-      }
-      const [year, month, day] = dateStr.split("-");
-      const m = parseInt(month, 10);
-      const d = parseInt(day, 10);
-      const historicalUrl = `https://rates.dolarvzla.com/bcv/${year}/${m}/${d}.json`;
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 3e3);
-        const histRes = await fetch(historicalUrl, { signal: controller.signal });
-        clearTimeout(timeoutId);
-        if (histRes.ok) {
-          const histData = await histRes.json();
-          if (histData && typeof histData.usd === "number" && histData.usd > 0) {
-            cachedBcvRate = Number(histData.usd.toFixed(2));
-            return res.json({ tasa: cachedBcvRate });
+  const BCV_LOCAL_CACHE_PATH = import_path.default.join(process.cwd(), "bcv_rates_history_cache.json");
+  const bcvHttpsAgent = new import_https.default.Agent({ rejectUnauthorized: false, keepAlive: true });
+  let bcvRatesHistoryMap = {};
+  let lastBcvScrapeTimestamp = 0;
+  const BCV_SCRAPE_TTL_MS = 10 * 60 * 1e3;
+  try {
+    if (import_fs.default.existsSync(BCV_LOCAL_CACHE_PATH)) {
+      const rawJson = JSON.parse(import_fs.default.readFileSync(BCV_LOCAL_CACHE_PATH, "utf-8"));
+      if (rawJson && typeof rawJson === "object") {
+        for (const [k, v] of Object.entries(rawJson)) {
+          const num = typeof v === "number" ? v : v?.tasa;
+          const clean = parseNumeroBcv(num);
+          if (clean > 0 && /^\d{4}-\d{2}-\d{2}$/.test(k)) {
+            bcvRatesHistoryMap[k] = clean;
           }
         }
-      } catch (err) {
       }
-      const targetDate = /* @__PURE__ */ new Date(`${dateStr}T12:00:00Z`);
-      for (let i = 1; i <= 3; i++) {
-        const prevDate = new Date(targetDate);
-        prevDate.setDate(targetDate.getDate() - i);
-        const py = prevDate.getUTCFullYear();
-        const pm = prevDate.getUTCMonth() + 1;
-        const pd = prevDate.getUTCDate();
+    }
+  } catch (_e) {
+  }
+  const persistBcvRatesCache = async () => {
+    try {
+      import_fs.default.writeFileSync(BCV_LOCAL_CACHE_PATH, JSON.stringify(bcvRatesHistoryMap, null, 2), "utf-8");
+    } catch (_e) {
+    }
+    if (supabase) {
+      try {
+        await ensureCobrosBucket();
+        const payload = Buffer.from(JSON.stringify(bcvRatesHistoryMap, null, 2), "utf-8");
+        await supabase.storage.from(COBROS_BUCKET).upload("config/bcv_rates_history_cache.json", payload, {
+          contentType: "application/json",
+          upsert: true
+        });
+      } catch (_supaErr) {
+      }
+    }
+  };
+  const fetchBcvBuffer = (targetUrl, timeoutMs = 7e3, redirectsLeft = 3) => {
+    return new Promise((resolve, reject) => {
+      const req = import_https.default.get(
+        targetUrl,
+        {
+          agent: bcvHttpsAgent,
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "es-VE,es;q=0.9,en;q=0.8"
+          }
+        },
+        (resp) => {
+          const status = resp.statusCode || 0;
+          if ([301, 302, 303, 307, 308].includes(status) && resp.headers.location && redirectsLeft > 0) {
+            const nextUrl = resp.headers.location.startsWith("http") ? resp.headers.location : `https://www.bcv.org.ve${resp.headers.location.startsWith("/") ? "" : "/"}${resp.headers.location}`;
+            resp.resume();
+            fetchBcvBuffer(nextUrl, timeoutMs, redirectsLeft - 1).then(resolve).catch(reject);
+            return;
+          }
+          if (status < 200 || status >= 300) {
+            resp.resume();
+            reject(new Error(`HTTP ${status} desde ${targetUrl}`));
+            return;
+          }
+          const chunks = [];
+          resp.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+          resp.on("end", () => resolve(Buffer.concat(chunks)));
+          resp.on("error", reject);
+        }
+      );
+      req.setTimeout(timeoutMs, () => {
+        req.destroy(new Error(`Timeout (${timeoutMs}ms) consultando ${targetUrl}`));
+      });
+      req.on("error", reject);
+    });
+  };
+  const syncBcvRatesForDate = async (targetIso) => {
+    const now = Date.now();
+    const alreadyResolved = resolveBcvRateWithBusinessDayFallback(bcvRatesHistoryMap, targetIso, 5);
+    if (alreadyResolved && !alreadyResolved.esDiaHabilAnterior) {
+      return;
+    }
+    if (alreadyResolved && now - lastBcvScrapeTimestamp < BCV_SCRAPE_TTL_MS) {
+      return;
+    }
+    let updated = false;
+    try {
+      const page0Buf = await fetchBcvBuffer(BCV_INDICE_INVERSION_URL, 7e3);
+      const page0Html = page0Buf.toString("utf-8");
+      const page0Rates = parseBcvIndiceInversionHtml(page0Html);
+      const extractedDates = Object.keys(page0Rates).sort();
+      if (extractedDates.length > 0) {
+        Object.assign(bcvRatesHistoryMap, page0Rates);
+        lastBcvScrapeTimestamp = now;
+        updated = true;
+      }
+      if (!resolveBcvRateWithBusinessDayFallback(bcvRatesHistoryMap, targetIso, 5)) {
+        const excelLinks = extractBcvExcelLinksFromHtml(page0Html);
+        for (const xlsUrl of excelLinks.slice(0, 2)) {
+          try {
+            const xlsBuf = await fetchBcvBuffer(xlsUrl, 7e3);
+            const xlsRates = parseBcvExcelBuffer(new Uint8Array(xlsBuf));
+            if (Object.keys(xlsRates).length > 0) {
+              Object.assign(bcvRatesHistoryMap, xlsRates);
+              updated = true;
+            }
+          } catch (_xlsErr) {
+          }
+        }
+      }
+      const oldestPage0 = extractedDates[0];
+      if (oldestPage0 && targetIso < oldestPage0 && !resolveBcvRateWithBusinessDayFallback(bcvRatesHistoryMap, targetIso, 5)) {
+        const diffDays = Math.max(
+          1,
+          Math.round(
+            ((/* @__PURE__ */ new Date(`${oldestPage0}T12:00:00Z`)).getTime() - (/* @__PURE__ */ new Date(`${targetIso}T12:00:00Z`)).getTime()) / 864e5
+          )
+        );
+        const startPage = Math.max(1, Math.floor(diffDays / 70));
+        const pagesToTry = Array.from(/* @__PURE__ */ new Set([startPage, startPage + 1, 1, 2])).slice(0, 3);
+        for (const pageNum of pagesToTry) {
+          try {
+            const pagedBuf = await fetchBcvBuffer(`${BCV_INDICE_INVERSION_URL}?page=${pageNum}`, 6e3);
+            const pagedRates = parseBcvIndiceInversionHtml(pagedBuf.toString("utf-8"));
+            if (Object.keys(pagedRates).length > 0) {
+              Object.assign(bcvRatesHistoryMap, pagedRates);
+              updated = true;
+              if (resolveBcvRateWithBusinessDayFallback(bcvRatesHistoryMap, targetIso, 5)) {
+                break;
+              }
+            }
+          } catch (_pErr) {
+          }
+        }
+      }
+      if (!resolveBcvRateWithBusinessDayFallback(bcvRatesHistoryMap, targetIso, 5)) {
         try {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 2e3);
-          const prevRes = await fetch(`https://rates.dolarvzla.com/bcv/${py}/${pm}/${pd}.json`, { signal: controller.signal });
-          clearTimeout(timeoutId);
-          if (prevRes.ok) {
-            const prevData = await prevRes.json();
-            if (prevData && typeof prevData.usd === "number" && prevData.usd > 0) {
-              cachedBcvRate = Number(prevData.usd.toFixed(2));
-              return res.json({ tasa: cachedBcvRate });
+          const smcBuf = await fetchBcvBuffer(BCV_SMC_URL, 6e3);
+          const smcExcelLinks = extractBcvExcelLinksFromHtml(smcBuf.toString("utf-8"));
+          if (smcExcelLinks.length > 0) {
+            const firstXlsBuf = await fetchBcvBuffer(smcExcelLinks[0], 7e3);
+            const smcRates = parseBcvExcelBuffer(new Uint8Array(firstXlsBuf));
+            if (Object.keys(smcRates).length > 0) {
+              Object.assign(bcvRatesHistoryMap, smcRates);
+              updated = true;
             }
           }
-        } catch (e) {
+        } catch (_smcErr) {
         }
       }
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 3e3);
-        const currRes = await fetch("https://ve.dolarapi.com/v1/dolares/oficial", { signal: controller.signal });
-        clearTimeout(timeoutId);
-        if (currRes.ok) {
-          const data = await currRes.json();
-          if (data && typeof data.promedio === "number" && data.promedio > 0) {
-            cachedBcvRate = Number(data.promedio.toFixed(2));
-            return res.json({ tasa: cachedBcvRate });
-          }
-        }
-      } catch (e) {
-      }
-      return res.json({ tasa: cachedBcvRate });
-    } catch (err) {
-      return res.json({ tasa: cachedBcvRate });
+    } catch (bcvErr) {
+      console.warn("[BCV SCRAPER] Advertencia conectando con bcv.org.ve:", bcvErr?.message);
     }
-  });
+    if (updated) {
+      const latestDates = Object.keys(bcvRatesHistoryMap).sort();
+      if (latestDates.length > 0) {
+        cachedBcvRate = bcvRatesHistoryMap[latestDates[latestDates.length - 1]];
+      }
+      persistBcvRatesCache().catch(() => {
+      });
+    }
+  };
+  const handleBcvRateRequest = async (req, res) => {
+    try {
+      const rawDate = String(req.query.date || req.query.fecha || "").trim();
+      const todayIso = (/* @__PURE__ */ new Date()).toISOString().split("T")[0];
+      const { iso: targetIso, display: targetDisplay } = normalizeBcvDateInput(rawDate || todayIso);
+      await syncBcvRatesForDate(targetIso);
+      const resolved = resolveBcvRateWithBusinessDayFallback(
+        bcvRatesHistoryMap,
+        targetIso,
+        5,
+        BCV_INDICE_INVERSION_URL
+      );
+      if (resolved) {
+        return res.json({
+          ...resolved,
+          serieReciente: bcvRatesHistoryMap
+        });
+      }
+      const baseDate = /* @__PURE__ */ new Date(`${targetIso}T12:00:00Z`);
+      for (let offset = 0; offset <= 5; offset++) {
+        const checkDate = new Date(baseDate.getTime() - offset * 864e5);
+        const py = checkDate.getUTCFullYear();
+        const pm = checkDate.getUTCMonth() + 1;
+        const pd = checkDate.getUTCDate();
+        const checkIso = `${py}-${String(pm).padStart(2, "0")}-${String(pd).padStart(2, "0")}`;
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 2500);
+          const extRes = await fetch(`https://rates.dolarvzla.com/bcv/${py}/${pm}/${pd}.json`, {
+            signal: controller.signal
+          });
+          clearTimeout(timeoutId);
+          if (extRes.ok) {
+            const extData = await extRes.json();
+            const usdVal = parseNumeroBcv(extData?.usd);
+            if (usdVal > 0) {
+              bcvRatesHistoryMap[checkIso] = usdVal;
+              persistBcvRatesCache().catch(() => {
+              });
+              return res.json({
+                tasa: usdVal,
+                fechaValor: checkIso,
+                fechaValorDisplay: `${String(pd).padStart(2, "0")}/${String(pm).padStart(2, "0")}/${py}`,
+                fechaSolicitada: targetIso,
+                fechaSolicitadaDisplay: targetDisplay,
+                esDiaHabilAnterior: offset > 0,
+                fuente: "https://www.bcv.org.ve/estadisticas/indice-de-inversion",
+                serieReciente: bcvRatesHistoryMap
+              });
+            }
+          }
+        } catch (_extErr) {
+        }
+      }
+      if (targetIso === todayIso) {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 2500);
+          const currRes = await fetch("https://ve.dolarapi.com/v1/dolares/oficial", {
+            signal: controller.signal
+          });
+          clearTimeout(timeoutId);
+          if (currRes.ok) {
+            const data = await currRes.json();
+            const prom = parseNumeroBcv(data?.promedio);
+            if (prom > 0) {
+              bcvRatesHistoryMap[todayIso] = prom;
+              return res.json({
+                tasa: prom,
+                fechaValor: todayIso,
+                fechaValorDisplay: targetDisplay,
+                fechaSolicitada: targetIso,
+                fechaSolicitadaDisplay: targetDisplay,
+                esDiaHabilAnterior: false,
+                fuente: "https://ve.dolarapi.com/v1/dolares/oficial",
+                serieReciente: bcvRatesHistoryMap
+              });
+            }
+          }
+        } catch (_e) {
+        }
+      }
+      return res.status(503).json({
+        error: `No se pudo conectar con BCV para el ${targetDisplay}`,
+        fechaSolicitada: targetIso,
+        fechaSolicitadaDisplay: targetDisplay
+      });
+    } catch (err) {
+      return res.status(503).json({
+        error: err?.message || "No se pudo consultar la tasa del BCV"
+      });
+    }
+  };
+  app2.get("/api/bcv-rate", handleBcvRateRequest);
+  app2.get("/api/tasa-bcv", handleBcvRateRequest);
   app2.get("/api/sheets-structure", async (req, res) => {
     try {
       const authHeader = req.headers.authorization;
@@ -9382,8 +9787,8 @@ async function startServer() {
   app2.get("/api/usuarios", async (req, res) => {
     try {
       const workbook = await getWorkbook(req.query.force === "true");
-      const XLSX = await import("xlsx");
-      const parsed = parseWorkbookFull(XLSX, workbook, { periodo: metasPeriodoActual() });
+      const XLSX2 = await import("xlsx");
+      const parsed = parseWorkbookFull(XLSX2, workbook, { periodo: metasPeriodoActual() });
       setNoCacheSyncHeaders(res);
       return res.json(parsed.usuariosRows);
     } catch (err) {
@@ -9427,11 +9832,11 @@ async function startServer() {
       if (!clientFound) {
         try {
           const workbook = await getWorkbook(false);
-          const XLSX = await import("xlsx");
+          const XLSX2 = await import("xlsx");
           const sheetName = workbook.SheetNames.find((s) => /activacion|clientes/i.test(s));
           if (sheetName) {
             const sheet = workbook.Sheets[sheetName];
-            const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+            const rows = XLSX2.utils.sheet_to_json(sheet, { header: 1 });
             for (let r = 1; r < rows.length; r++) {
               const row = rows[r];
               if (!row || !row[0]) continue;
@@ -9474,7 +9879,7 @@ async function startServer() {
     }
   });
   async function syncWorkbookToSupabase(workbook) {
-    const XLSX = await import("xlsx");
+    const XLSX2 = await import("xlsx");
     const periodo = metasPeriodoActual();
     let masterClients = [];
     let hadDbClients = false;
@@ -9533,7 +9938,7 @@ async function startServer() {
     if (masterClients.length === 0) {
       masterClients = loadLocalMasterClientSeed();
     }
-    const parsed = parseWorkbookFull(XLSX, workbook, {
+    const parsed = parseWorkbookFull(XLSX2, workbook, {
       periodo,
       masterClients
     });
@@ -10539,8 +10944,8 @@ async function startServer() {
   });
   const hydrateParsedCachesFromWorkbookFallback = async () => {
     const workbook = await getWorkbook(false);
-    const XLSX = await import("xlsx");
-    const parsed = parseWorkbookFull(XLSX, workbook, {
+    const XLSX2 = await import("xlsx");
+    const parsed = parseWorkbookFull(XLSX2, workbook, {
       periodo: metasPeriodoActual(),
       masterClients: loadLocalMasterClientSeed()
     });

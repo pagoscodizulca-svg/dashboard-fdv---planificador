@@ -1,6 +1,7 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
+import https from "https";
 import zlib from "zlib";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
@@ -47,6 +48,16 @@ import {
   inferirBancoVenezolano,
   AuditedReceiptResult
 } from "./src/services/venezuelanReceiptAuditor";
+import {
+  BCV_INDICE_INVERSION_URL,
+  BCV_SMC_URL,
+  normalizeBcvDateInput,
+  parseNumeroBcv,
+  parseBcvIndiceInversionHtml,
+  extractBcvExcelLinksFromHtml,
+  parseBcvExcelBuffer,
+  resolveBcvRateWithBusinessDayFallback
+} from "./src/services/bcvRateService";
 
 dotenv.config();
 
@@ -3448,78 +3459,295 @@ async function startServer() {
     }
   });
 
-  // TASA OFICIAL BCV CON MÚLTIPLES CAPAS DE FALLBACK Y RESILIENCIA
-  app.get("/api/tasa-bcv", async (req, res) => {
-    try {
-      const dateStr = req.query.date as string;
-      if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
-        return res.json({ tasa: cachedBcvRate });
-      }
+  // ============================================================================
+  // SERVICIO Y SCRAPER OFICIAL BCV: https://www.bcv.org.ve/estadisticas/indice-de-inversion
+  // Soporta tablas HTML + paginación + archivos .xls/.xlsx + regla de día hábil (5 días)
+  // ============================================================================
+  const BCV_LOCAL_CACHE_PATH = path.join(process.cwd(), "bcv_rates_history_cache.json");
+  const bcvHttpsAgent = new https.Agent({ rejectUnauthorized: false, keepAlive: true });
+  let bcvRatesHistoryMap: Record<string, number> = {};
+  let lastBcvScrapeTimestamp = 0;
+  const BCV_SCRAPE_TTL_MS = 10 * 60 * 1000; // 10 minutos
 
-      const [year, month, day] = dateStr.split('-');
-      const m = parseInt(month, 10);
-      const d = parseInt(day, 10);
-
-      // 1. Histórico de dolarvzla para la fecha solicitada
-      const historicalUrl = `https://rates.dolarvzla.com/bcv/${year}/${m}/${d}.json`;
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 3000);
-        const histRes = await fetch(historicalUrl, { signal: controller.signal });
-        clearTimeout(timeoutId);
-        if (histRes.ok) {
-          const histData = await histRes.json();
-          if (histData && typeof histData.usd === 'number' && histData.usd > 0) {
-            cachedBcvRate = Number(histData.usd.toFixed(2));
-            return res.json({ tasa: cachedBcvRate });
+  // Cargar caché de tasas históricas BCV desde disco al iniciar
+  try {
+    if (fs.existsSync(BCV_LOCAL_CACHE_PATH)) {
+      const rawJson = JSON.parse(fs.readFileSync(BCV_LOCAL_CACHE_PATH, "utf-8"));
+      if (rawJson && typeof rawJson === "object") {
+        for (const [k, v] of Object.entries(rawJson)) {
+          const num = typeof v === "number" ? v : (v as any)?.tasa;
+          const clean = parseNumeroBcv(num);
+          if (clean > 0 && /^\d{4}-\d{2}-\d{2}$/.test(k)) {
+            bcvRatesHistoryMap[k] = clean;
           }
         }
-      } catch (err) {}
+      }
+    }
+  } catch (_e) {}
 
-      // 2. Si no encontró (por ej. fin de semana o feriado bancario), buscar hasta 3 días hacia atrás
-      const targetDate = new Date(`${dateStr}T12:00:00Z`);
-      for (let i = 1; i <= 3; i++) {
-        const prevDate = new Date(targetDate);
-        prevDate.setDate(targetDate.getDate() - i);
-        const py = prevDate.getUTCFullYear();
-        const pm = prevDate.getUTCMonth() + 1;
-        const pd = prevDate.getUTCDate();
+  // Hidratar y sincronizar diccionario de tasas históricas BCV con Supabase Storage
+  const persistBcvRatesCache = async () => {
+    try {
+      fs.writeFileSync(BCV_LOCAL_CACHE_PATH, JSON.stringify(bcvRatesHistoryMap, null, 2), "utf-8");
+    } catch (_e) {}
+    if (supabase) {
+      try {
+        await ensureCobrosBucket();
+        const payload = Buffer.from(JSON.stringify(bcvRatesHistoryMap, null, 2), "utf-8");
+        await supabase.storage
+          .from(COBROS_BUCKET)
+          .upload("config/bcv_rates_history_cache.json", payload, {
+            contentType: "application/json",
+            upsert: true,
+          });
+      } catch (_supaErr) {}
+    }
+  };
+
+  // Descarga binaria/texto desde www.bcv.org.ve ignorando cadena SSL incompleta
+  const fetchBcvBuffer = (targetUrl: string, timeoutMs = 7000, redirectsLeft = 3): Promise<Buffer> => {
+    return new Promise((resolve, reject) => {
+      const req = https.get(
+        targetUrl,
+        {
+          agent: bcvHttpsAgent,
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "es-VE,es;q=0.9,en;q=0.8",
+          },
+        },
+        (resp) => {
+          const status = resp.statusCode || 0;
+          if ([301, 302, 303, 307, 308].includes(status) && resp.headers.location && redirectsLeft > 0) {
+            const nextUrl = resp.headers.location.startsWith("http")
+              ? resp.headers.location
+              : `https://www.bcv.org.ve${resp.headers.location.startsWith("/") ? "" : "/"}${resp.headers.location}`;
+            resp.resume();
+            fetchBcvBuffer(nextUrl, timeoutMs, redirectsLeft - 1).then(resolve).catch(reject);
+            return;
+          }
+          if (status < 200 || status >= 300) {
+            resp.resume();
+            reject(new Error(`HTTP ${status} desde ${targetUrl}`));
+            return;
+          }
+          const chunks: Buffer[] = [];
+          resp.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+          resp.on("end", () => resolve(Buffer.concat(chunks)));
+          resp.on("error", reject);
+        }
+      );
+      req.setTimeout(timeoutMs, () => {
+        req.destroy(new Error(`Timeout (${timeoutMs}ms) consultando ${targetUrl}`));
+      });
+      req.on("error", reject);
+    });
+  };
+
+  // Scraper de https://www.bcv.org.ve/estadisticas/indice-de-inversion (tablas HTML + paginación + .xls/.xlsx)
+  const syncBcvRatesForDate = async (targetIso: string): Promise<void> => {
+    const now = Date.now();
+    const alreadyResolved = resolveBcvRateWithBusinessDayFallback(bcvRatesHistoryMap, targetIso, 5);
+    if (alreadyResolved && !alreadyResolved.esDiaHabilAnterior) {
+      return;
+    }
+    if (alreadyResolved && now - lastBcvScrapeTimestamp < BCV_SCRAPE_TTL_MS) {
+      return;
+    }
+
+    let updated = false;
+
+    try {
+      // 1. Descargar página principal de https://www.bcv.org.ve/estadisticas/indice-de-inversion
+      const page0Buf = await fetchBcvBuffer(BCV_INDICE_INVERSION_URL, 7000);
+      const page0Html = page0Buf.toString("utf-8");
+      const page0Rates = parseBcvIndiceInversionHtml(page0Html);
+      const extractedDates = Object.keys(page0Rates).sort();
+
+      if (extractedDates.length > 0) {
+        Object.assign(bcvRatesHistoryMap, page0Rates);
+        lastBcvScrapeTimestamp = now;
+        updated = true;
+      }
+
+      // 2. Si la página enlaza archivos .xls / .xlsx y aún no tenemos la fecha objetivo, procesarlos con `xlsx`
+      if (!resolveBcvRateWithBusinessDayFallback(bcvRatesHistoryMap, targetIso, 5)) {
+        const excelLinks = extractBcvExcelLinksFromHtml(page0Html);
+        for (const xlsUrl of excelLinks.slice(0, 2)) {
+          try {
+            const xlsBuf = await fetchBcvBuffer(xlsUrl, 7000);
+            const xlsRates = parseBcvExcelBuffer(new Uint8Array(xlsBuf));
+            if (Object.keys(xlsRates).length > 0) {
+              Object.assign(bcvRatesHistoryMap, xlsRates);
+              updated = true;
+            }
+          } catch (_xlsErr) {}
+        }
+      }
+
+      // 3. Si la fecha solicitada es anterior a la más antigua de la página 0, explorar páginas históricas (?page=1..5)
+      const oldestPage0 = extractedDates[0];
+      if (
+        oldestPage0 &&
+        targetIso < oldestPage0 &&
+        !resolveBcvRateWithBusinessDayFallback(bcvRatesHistoryMap, targetIso, 5)
+      ) {
+        const diffDays = Math.max(
+          1,
+          Math.round(
+            (new Date(`${oldestPage0}T12:00:00Z`).getTime() - new Date(`${targetIso}T12:00:00Z`).getTime()) / 86400000
+          )
+        );
+        const startPage = Math.max(1, Math.floor(diffDays / 70));
+        const pagesToTry = Array.from(new Set([startPage, startPage + 1, 1, 2])).slice(0, 3);
+
+        for (const pageNum of pagesToTry) {
+          try {
+            const pagedBuf = await fetchBcvBuffer(`${BCV_INDICE_INVERSION_URL}?page=${pageNum}`, 6000);
+            const pagedRates = parseBcvIndiceInversionHtml(pagedBuf.toString("utf-8"));
+            if (Object.keys(pagedRates).length > 0) {
+              Object.assign(bcvRatesHistoryMap, pagedRates);
+              updated = true;
+              if (resolveBcvRateWithBusinessDayFallback(bcvRatesHistoryMap, targetIso, 5)) {
+                break;
+              }
+            }
+          } catch (_pErr) {}
+        }
+      }
+
+      // 4. Respaldo estadístico Excel oficial del BCV (/estadisticas/tipo-cambio-de-referencia-smc)
+      if (!resolveBcvRateWithBusinessDayFallback(bcvRatesHistoryMap, targetIso, 5)) {
         try {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 2000);
-          const prevRes = await fetch(`https://rates.dolarvzla.com/bcv/${py}/${pm}/${pd}.json`, { signal: controller.signal });
-          clearTimeout(timeoutId);
-          if (prevRes.ok) {
-            const prevData = await prevRes.json();
-            if (prevData && typeof prevData.usd === 'number' && prevData.usd > 0) {
-              cachedBcvRate = Number(prevData.usd.toFixed(2));
-              return res.json({ tasa: cachedBcvRate });
+          const smcBuf = await fetchBcvBuffer(BCV_SMC_URL, 6000);
+          const smcExcelLinks = extractBcvExcelLinksFromHtml(smcBuf.toString("utf-8"));
+          if (smcExcelLinks.length > 0) {
+            const firstXlsBuf = await fetchBcvBuffer(smcExcelLinks[0], 7000);
+            const smcRates = parseBcvExcelBuffer(new Uint8Array(firstXlsBuf));
+            if (Object.keys(smcRates).length > 0) {
+              Object.assign(bcvRatesHistoryMap, smcRates);
+              updated = true;
             }
           }
-        } catch (e) {}
+        } catch (_smcErr) {}
+      }
+    } catch (bcvErr: any) {
+      console.warn("[BCV SCRAPER] Advertencia conectando con bcv.org.ve:", bcvErr?.message);
+    }
+
+    if (updated) {
+      const latestDates = Object.keys(bcvRatesHistoryMap).sort();
+      if (latestDates.length > 0) {
+        cachedBcvRate = bcvRatesHistoryMap[latestDates[latestDates.length - 1]];
+      }
+      persistBcvRatesCache().catch(() => {});
+    }
+  };
+
+  const handleBcvRateRequest = async (req: express.Request, res: express.Response) => {
+    try {
+      const rawDate = String(req.query.date || req.query.fecha || "").trim();
+      const todayIso = new Date().toISOString().split("T")[0];
+      const { iso: targetIso, display: targetDisplay } = normalizeBcvDateInput(rawDate || todayIso);
+
+      // 1. Sincronizar desde https://www.bcv.org.ve/estadisticas/indice-de-inversion
+      await syncBcvRatesForDate(targetIso);
+
+      // 2. Resolver tasa exacta o último día hábil inmediato (hasta 5 días previos para sábados/domingos/feriados)
+      const resolved = resolveBcvRateWithBusinessDayFallback(
+        bcvRatesHistoryMap,
+        targetIso,
+        5,
+        BCV_INDICE_INVERSION_URL
+      );
+
+      if (resolved) {
+        return res.json({
+          ...resolved,
+          serieReciente: bcvRatesHistoryMap,
+        });
       }
 
-      // 3. Fallback: tasa actual oficial en ve.dolarapi.com
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 3000);
-        const currRes = await fetch("https://ve.dolarapi.com/v1/dolares/oficial", { signal: controller.signal });
-        clearTimeout(timeoutId);
-        if (currRes.ok) {
-          const data = await currRes.json();
-          if (data && typeof data.promedio === 'number' && data.promedio > 0) {
-            cachedBcvRate = Number(data.promedio.toFixed(2));
-            return res.json({ tasa: cachedBcvRate });
+      // 3. Respaldo externo (rates.dolarvzla.com) con ventana de hasta 5 días hábiles previos
+      const baseDate = new Date(`${targetIso}T12:00:00Z`);
+      for (let offset = 0; offset <= 5; offset++) {
+        const checkDate = new Date(baseDate.getTime() - offset * 86400000);
+        const py = checkDate.getUTCFullYear();
+        const pm = checkDate.getUTCMonth() + 1;
+        const pd = checkDate.getUTCDate();
+        const checkIso = `${py}-${String(pm).padStart(2, "0")}-${String(pd).padStart(2, "0")}`;
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 2500);
+          const extRes = await fetch(`https://rates.dolarvzla.com/bcv/${py}/${pm}/${pd}.json`, {
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
+          if (extRes.ok) {
+            const extData = await extRes.json();
+            const usdVal = parseNumeroBcv(extData?.usd);
+            if (usdVal > 0) {
+              bcvRatesHistoryMap[checkIso] = usdVal;
+              persistBcvRatesCache().catch(() => {});
+              return res.json({
+                tasa: usdVal,
+                fechaValor: checkIso,
+                fechaValorDisplay: `${String(pd).padStart(2, "0")}/${String(pm).padStart(2, "0")}/${py}`,
+                fechaSolicitada: targetIso,
+                fechaSolicitadaDisplay: targetDisplay,
+                esDiaHabilAnterior: offset > 0,
+                fuente: "https://www.bcv.org.ve/estadisticas/indice-de-inversion",
+                serieReciente: bcvRatesHistoryMap,
+              });
+            }
           }
-        }
-      } catch (e) {}
+        } catch (_extErr) {}
+      }
 
-      // 4. Retornar último valor conocido en caché sin arrojar error 500
-      return res.json({ tasa: cachedBcvRate });
+      // 4. Solo si la fecha solicitada es HOY y BCV no respondió, permitir fallback a ve.dolarapi.com
+      if (targetIso === todayIso) {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 2500);
+          const currRes = await fetch("https://ve.dolarapi.com/v1/dolares/oficial", {
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
+          if (currRes.ok) {
+            const data = await currRes.json();
+            const prom = parseNumeroBcv(data?.promedio);
+            if (prom > 0) {
+              bcvRatesHistoryMap[todayIso] = prom;
+              return res.json({
+                tasa: prom,
+                fechaValor: todayIso,
+                fechaValorDisplay: targetDisplay,
+                fechaSolicitada: targetIso,
+                fechaSolicitadaDisplay: targetDisplay,
+                esDiaHabilAnterior: false,
+                fuente: "https://ve.dolarapi.com/v1/dolares/oficial",
+                serieReciente: bcvRatesHistoryMap,
+              });
+            }
+          }
+        } catch (_e) {}
+      }
+
+      return res.status(503).json({
+        error: `No se pudo conectar con BCV para el ${targetDisplay}`,
+        fechaSolicitada: targetIso,
+        fechaSolicitadaDisplay: targetDisplay,
+      });
     } catch (err: any) {
-      return res.json({ tasa: cachedBcvRate });
+      return res.status(503).json({
+        error: err?.message || "No se pudo consultar la tasa del BCV",
+      });
     }
-  });
+  };
+
+  app.get("/api/bcv-rate", handleBcvRateRequest);
+  app.get("/api/tasa-bcv", handleBcvRateRequest);
 
   app.get("/api/sheets-structure", async (req, res) => {
     try {
