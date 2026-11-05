@@ -10,7 +10,7 @@ import {
 import { db } from '../lib/firebase';
 import { AlkostoOrder, EstadoPedidoAlkosto, AlkostoOrderItem, ParsedOrdenCompraAlkosto } from '../types';
 import { getAuthHeaders } from './authService';
-import { PRODUCTOS_CODIZULCA, matchProductoCodizulca, toSafeNumber } from './productosCodizulca';
+import { PRODUCTOS_CODIZULCA, matchProductoCodizulca, toSafeNumber, hasPrimaryNounConflict, isBrandOrPresentationToken } from './productosCodizulca';
 
 export const ALKOSTO_COLLECTION = 'alkosto_orders';
 const STORAGE_KEY = 'dashboard_fdv_alkosto_orders_cache';
@@ -750,6 +750,30 @@ export const CATALOGO_ALKOSTO: CatalogoAlkostoItem[] = [
     unidadSugerida: 'CJ'
   },
   {
+    sku: '1642',
+    producto: 'ARVEJAS VENCAMPO 25 UND X 400GR',
+    categoria: 'GRANOS / BASICOS',
+    presentacion: 'Bulto (25 und x 400g)',
+    kilosPorCaja: 10.0,
+    precioSugeridoUSD: 20.00,
+    codigoBarra: '7590377000411',
+    codigosCadena: ['1642', '001642', '7590377000411'],
+    sinonimos: ['ARVEJAS VERDES VENCAMPO 400GR', 'ARVEJAS VENCAMPO 25 UND X 400GR', 'ARVEJAS VENCAMPO 400GR', '1642', '7590377000411'],
+    unidadSugerida: 'CJ'
+  },
+  {
+    sku: '1644',
+    producto: 'CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR',
+    categoria: 'GRANOS / BASICOS',
+    presentacion: 'Bulto (25 und x 400g)',
+    kilosPorCaja: 10.0,
+    precioSugeridoUSD: 20.00,
+    codigoBarra: '7590377000459',
+    codigosCadena: ['1644', '001644', '7590377000459'],
+    sinonimos: ['CARAOTAS NEGRAS VENCAMPO 400GR', 'CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR', 'CARAOTAS VENCAMPO 400GR', '1644', '7590377000459'],
+    unidadSugerida: 'CJ'
+  },
+  {
     sku: '1572',
     producto: 'CAJAS DE PIZZA 1X100',
     categoria: 'EMPAQUES',
@@ -810,28 +834,28 @@ export function resolverProductoPorCodigoODescripcion(
 
   if (!codNorm && !descNorm) return undefined;
 
-  // 1. Coincidencia exacta por SKU
-  if (codNorm) {
-    const match = CATALOGO_ALKOSTO.find(p => p.sku.toUpperCase() === codNorm);
-    if (match) return match;
-  }
-
-  // 2. Coincidencia por código de barra (EAN-13)
+  // 1. Coincidencia por código de barra (EAN-13) — máxima prioridad
   if (codNorm) {
     const match = CATALOGO_ALKOSTO.find(p => p.codigoBarra && normalizarCodigoProducto(p.codigoBarra) === codNorm);
-    if (match) return match;
+    if (match && (!descNorm || !hasPrimaryNounConflict(match.producto, descNorm))) return match;
+  }
+
+  // 2. Coincidencia exacta por SKU (validando que no contradiga el sustantivo principal de la descripción)
+  if (codNorm) {
+    const match = CATALOGO_ALKOSTO.find(p => p.sku.toUpperCase() === codNorm);
+    if (match && (!descNorm || !hasPrimaryNounConflict(match.producto, descNorm))) return match;
   }
 
   // 3. Coincidencia por códigos de cadenas (ej. Alkosto / Familia Center)
   if (codNorm) {
     const match = CATALOGO_ALKOSTO.find(p => p.codigosCadena && p.codigosCadena.some(c => normalizarCodigoProducto(c).toUpperCase() === codNorm));
-    if (match) return match;
+    if (match && (!descNorm || !hasPrimaryNounConflict(match.producto, descNorm))) return match;
   }
 
   // 4. Coincidencia por sinónimos exactos en el código
   if (codNorm) {
     const match = CATALOGO_ALKOSTO.find(p => p.sinonimos && p.sinonimos.some(s => normalizarCodigoProducto(s).toUpperCase() === codNorm));
-    if (match) return match;
+    if (match && (!descNorm || !hasPrimaryNounConflict(match.producto, descNorm))) return match;
   }
 
   // GUARDARRAÍL CRÍTICO: Si el documento trae un código numérico/EAN explícito (>= 4 dígitos)
@@ -839,21 +863,22 @@ export function resolverProductoPorCodigoODescripcion(
   // o sinónimo coincide de forma exacta completa, NUNCA por coincidencia difusa de palabras sueltas.
   const hasExplicitUnmatchedNumericCode = codNorm.length >= 4 && /^\d+$/.test(codNorm);
 
-  // 5. Coincidencia por descripción si existe
+  // 5. Coincidencia por descripción si existe (con validación obligatoria de sustantivo principal)
   if (descNorm) {
     // Coincidencia exacta de nombre de producto o sinónimo completo
     let match = CATALOGO_ALKOSTO.find(
       p => p.producto.toUpperCase() === descNorm ||
            (p.sinonimos && p.sinonimos.some(s => s.toUpperCase() === descNorm))
     );
-    if (match) return match;
+    if (match && !hasPrimaryNounConflict(match.producto, descNorm)) return match;
 
     if (hasExplicitUnmatchedNumericCode) {
       return undefined;
     }
 
-    // Coincidencia por inclusión de frase completa (solo cuando no hay código numérico distinto)
+    // Coincidencia por inclusión de frase completa (solo cuando no hay código numérico distinto y coincide el sustantivo principal)
     match = CATALOGO_ALKOSTO.find(p => {
+      if (hasPrimaryNounConflict(p.producto, descNorm)) return false;
       const pNorm = p.producto.toUpperCase();
       if (descNorm.includes(pNorm) || pNorm.includes(descNorm)) return true;
       if (p.sinonimos && p.sinonimos.some(s => s.length >= 6 && descNorm.includes(s.toUpperCase()))) return true;
@@ -861,10 +886,13 @@ export function resolverProductoPorCodigoODescripcion(
     });
     if (match) return match;
 
-    // Coincidencia por tokens principales (solo cuando el usuario busca por texto sin código numérico conflictivo)
-    const tokens = descNorm.split(/\s+/).filter(t => t.length > 2 && !['POR', 'CON', 'DEL', 'LOS', 'LAS', 'PARA', 'MAS'].includes(t));
+    // Coincidencia por tokens principales (solo cuando coincide obligatoriamente el sustantivo principal y excluyendo marcas/gramajes)
+    const tokens = descNorm
+      .split(/\s+/)
+      .filter(t => t.length > 2 && !['POR', 'CON', 'DEL', 'LOS', 'LAS', 'PARA', 'MAS'].includes(t) && !isBrandOrPresentationToken(t));
     if (tokens.length > 0) {
       match = CATALOGO_ALKOSTO.find(p => {
+        if (hasPrimaryNounConflict(p.producto, descNorm)) return false;
         const pNorm = p.producto.toUpperCase();
         const matchesCount = tokens.filter(t => pNorm.includes(t)).length;
         const requiredMatches = tokens.length <= 2 ? tokens.length : Math.max(2, Math.ceil(tokens.length * 0.75));
@@ -1293,11 +1321,12 @@ export function sanitizarPedidoSucursalAntesDeEnviar(pedido: AlkostoOrder): Alko
 
       const isForbiddenAlpha = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(rawSku);
       const productoOficial = matchProductoCodizulca(isForbiddenAlpha ? '' : rawSku, rawProd);
-      const skuClean = (isForbiddenAlpha && productoOficial.codigo !== 'S/C')
+      const hasExactMatch = productoOficial.matchExacto !== false && productoOficial.codigo !== 'S/C' && productoOficial.codigo !== 'PENDIENTE';
+      const skuClean = hasExactMatch
         ? productoOficial.codigo
-        : (rawSku || productoOficial.codigo);
-      const prodClean = (isForbiddenAlpha && productoOficial.codigo !== 'S/C')
-        ? productoOficial.descripcion
+        : (!isForbiddenAlpha && rawSku && rawSku !== 'S/C' && !/^\d{8,14}$/.test(rawSku) ? rawSku : 'PENDIENTE');
+      const prodClean = hasExactMatch
+        ? (rawProd && !isForbiddenAlpha ? rawProd : productoOficial.descripcion)
         : (rawProd || productoOficial.descripcion);
 
       const precioBruto = toSafeNumber(it.precioBrutoUSD ?? it.precio_bruto);
@@ -1369,11 +1398,12 @@ export function sanitizarPedidoSucursalAntesDeEnviar(pedido: AlkostoOrder): Alko
 
       const isForbiddenAlpha = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(rawCodigo);
       const productoOficial = matchProductoCodizulca(isForbiddenAlpha ? '' : rawCodigo, rawDescripcion);
-      const codigo = (isForbiddenAlpha && productoOficial.codigo !== 'S/C')
+      const hasExactMatch = productoOficial.matchExacto !== false && productoOficial.codigo !== 'S/C' && productoOficial.codigo !== 'PENDIENTE';
+      const codigo = hasExactMatch
         ? productoOficial.codigo
-        : (rawCodigo || productoOficial.codigo);
-      const descripcion = (isForbiddenAlpha && productoOficial.codigo !== 'S/C')
-        ? productoOficial.descripcion
+        : (!isForbiddenAlpha && rawCodigo && rawCodigo !== 'S/C' && !/^\d{8,14}$/.test(rawCodigo) ? rawCodigo : 'PENDIENTE');
+      const descripcion = hasExactMatch
+        ? (rawDescripcion && !isForbiddenAlpha ? rawDescripcion : productoOficial.descripcion)
         : (rawDescripcion || productoOficial.descripcion);
 
       const precioBruto = toSafeNumber(r.precio_bruto ?? r.precioBrutoUSD);

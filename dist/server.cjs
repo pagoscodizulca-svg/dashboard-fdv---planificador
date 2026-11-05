@@ -78,7 +78,7 @@ function toSafeNumber(val, fallback = 0) {
     return Number.isFinite(val) && !Number.isNaN(val) ? val : fallback;
   }
   if (val === null || val === void 0) return fallback;
-  let s = String(val).trim().replace(/(?:US\$|\$|Bs\.?|USD|VES|EUR|%)/gi, "").replace(/\s+/g, "");
+  let s = String(val).trim().replace(/(\d+):(\d{2})\b/g, "$1.$2").replace(/(?:US\$|\$|Bs\.?|USD|VES|EUR|%)/gi, "").replace(/\s+/g, "");
   if (!s) return fallback;
   if (s.includes(".") && s.includes(",")) {
     const lastDot = s.lastIndexOf(".");
@@ -151,14 +151,143 @@ function extractPresentationFeatures(descNorm) {
     isPerKg
   };
 }
+function isBrandOrPresentationToken(token) {
+  const clean = String(token || "").trim().toUpperCase().replace(/[().,/]/g, "");
+  if (!clean) return true;
+  if (BRAND_AND_GENERIC_TOKENS.has(clean)) return true;
+  if (/^\d+(?:[.,]\d+)?$/.test(clean)) return true;
+  if (/^(?:\d+(?:UND|UNI)?X)?\d+(?:[.,]\d+)?(?:KG|KGS|GR|GRS|GM|G|LT|LTS|LTRS|L|ML|ND|UND|UNI|PZA|PZAS)$/i.test(clean)) {
+    return true;
+  }
+  if (/^(?:KG|KGS|KILO|KILOS|GR|GRS|GM|LT|LTS|LTRS|ML|UND|UNI|UNID|PZA|CJ|CJA|CAJA|BLT|BULTO|PAQ|PAQUETE|SACO|LATA|GALON|BOLSA|BARRA|GRANEL)$/i.test(clean)) {
+    return true;
+  }
+  return false;
+}
+function extractPrimaryProductNouns(descRaw) {
+  if (!descRaw) return [];
+  const d = normalizeEncodingEspeciales(descRaw).toUpperCase();
+  const nouns = [];
+  const rules = [
+    ["ARVEJAS", /\bARVEJAS?\b/],
+    ["CARAOTAS", /\bCARAOTAS?\b/],
+    ["LENTEJAS", /\bLENTEJAS?\b/],
+    ["GARBANZOS", /\bGARBANZOS?\b/],
+    ["FRIJOLES", /\bFRIJOL(?:ES)?\b/],
+    ["MAIZ", /\bMAIZ\b/],
+    ["MAIZINA", /\bMAIZINA\b/],
+    ["AVENA", /\bAVENA\b/],
+    ["CEBADA", /\bCEBADA\b/],
+    ["CREMA_LECHE", /\bCREMA\s+DE\s+LECHE\b/],
+    ["MORTADELA", /\bMORT(?:ADELA|ADELITA|\.)?\b/],
+    ["QUESO", /\bQUESO\b/],
+    ["RICOTA", /\bRICOTA\b/],
+    ["PATATAS", /\b(?:PATATAS?|PAPAS?)\b/],
+    ["NUGGET", /\bNUGGETS?\b/],
+    ["ARROZ", /\bARROZ\b/],
+    ["AZUCAR", /\bAZUCAR\b/],
+    ["ACEITE", /\bACEITE\b/],
+    ["HARINA", /\bHARINA\b/],
+    ["PASTA", /\b(?:PASTA|FIDEOS?|ESPAGUETIS?)\b/],
+    ["HUEVOS", /\bHUEVOS?\b/],
+    ["JUGO", /\bJUGOS?\b/],
+    ["NECTAR", /\bNECTAR\b/],
+    ["REFRESCO", /\bREFRESCOS?\b/],
+    ["AGUA", /\bAGUA\b/],
+    ["TE", /\bTE\b/],
+    ["VINO", /\bVINOS?\b/],
+    ["PONCHE", /\bPONCHE\b/],
+    ["MANTEQUILLA", /\bMANTEQUILLA\b/],
+    ["MARGARINA", /\bMARGARINA\b/],
+    ["MAYONESA", /\bMAYONESA\b/],
+    ["KETCHUP", /\bKETCHUP\b/],
+    ["MOSTAZA", /\bMOSTAZA\b/],
+    ["SALSA", /\bSALSAS?\b/],
+    ["VINAGRE", /\bVINAGRE\b/],
+    ["MIEL", /\bMIEL\b/],
+    ["ATUN", /\bATUN\b/],
+    ["SALMON", /\bSALMON\b/],
+    ["PESCADERIA", /\b(?:PESCADERIA|CAMARON|CALAMAR|MEJILLON|PULPO|MERLUZA|SIERRA|PARGO)\b/],
+    ["JAMON", /\bJAMON\b/],
+    ["ESPALDA", /\bESPAL(?:DA|\.)\b/],
+    ["LOMO", /\bLOMO\b/],
+    ["PULPA", /\bPULPA\b/],
+    ["CARNE", /\bCARNE\b/],
+    ["PUNTA", /\bPUNTA\b/],
+    ["BIFE", /\bBIFE\b/],
+    ["SALCHICHA", /\bSALCHICHAS?\b/],
+    ["SALCHICHON", /\bSALCHICHON\b/],
+    ["SALAMI", /\b(?:SALAMI|PEPERONI)\b/],
+    ["CHORIZO", /\bCHORIZOS?\b/],
+    ["TOCINETA", /\bTOCINETA\b/],
+    ["TOCINO", /\bTOCINO\b/],
+    ["CHULETA", /\bCHULETA\b/],
+    ["CAJAS", /\bCAJAS?\b/],
+    ["BANDEJA", /\bBANDEJAS?\b/],
+    ["GALLINA", /\bGALLINA\b/],
+    ["HIGADO", /\bHIGADO\b/],
+    ["MOLLEJA", /\bMOLLEJAS?\b/],
+    ["CAFE", /\bCAFE\b/],
+    ["CACAO", /\bCACAO\b/],
+    ["CHOCOLATE", /\bCHOCOLATE\b/],
+    ["CONFITERIA", /\b(?:CONFITERIA|TORONTO|BOLERO|TURRON)\b/],
+    ["CEREALES", /\bCEREAL(?:ES)?\b/],
+    ["PAN", /\bPAN\b/],
+    ["LUMPIAS", /\bLUMPIAS?\b/],
+    ["TOMATE", /\bTOMATES?\b/],
+    ["LEVADURA", /\bLEVADURA\b/],
+    ["CHAMPINONES", /\bCHAMPI[ÑN]ONES?\b/],
+    ["PALMITO", /\bPALMITOS?\b/],
+    ["SERVILLETAS", /\b(?:SERVILLETAS?|TOALLIN)\b/],
+    ["UTENSILIOS", /\bUTENSILIOS?\b/],
+    ["QUIMICOS", /\b(?:QUIMICOS?|CLORO|DESENGRASANTE|DESINFECTANTE)\b/],
+    ["TETERAS", /\bTETERAS?\b/],
+    ["ESENCIAS", /\bESENCIAS?\b/]
+  ];
+  for (const [key, regex] of rules) {
+    if (regex.test(d)) {
+      nouns.push(key);
+    }
+  }
+  if (/\bLECHE\b/.test(d) && !/\bCREMA\s+DE\s+LECHE\b/.test(d) && !/\bLECHE\s+DE\s+COCO\b/.test(d)) {
+    nouns.push("LECHE");
+  }
+  if (!nouns.includes("MORTADELA")) {
+    if (/\bPECHUGA\b|\bFILET(?:E)?\b/.test(d)) nouns.push("PECHUGA");
+    if (/\bMUSLO\b|\bCUADRIL\b/.test(d)) nouns.push("MUSLO");
+    if (/\bALAS\b/.test(d)) nouns.push("ALAS");
+    if (/\bPOLLO\b/.test(d) && !nouns.includes("PECHUGA")) nouns.push("POLLO");
+  }
+  if (nouns.length === 0) {
+    const stopWords = /* @__PURE__ */ new Set(["DE", "DEL", "LA", "EL", "LOS", "LAS", "EN", "CON", "POR", "PARA", "TIPO", "SIN", "FS", "UR"]);
+    const tokens = d.replace(/\s*\/\s*\d+(?:[.,]\d+)?\s*$/, "").replace(/[()/.,\-]/g, " ").split(/\s+/).map((t) => t.trim()).filter((t) => t.length >= 3 && !stopWords.has(t) && !isBrandOrPresentationToken(t));
+    if (tokens.length > 0) {
+      nouns.push(tokens[0]);
+    }
+  }
+  return nouns;
+}
+function hasPrimaryNounConflict(candidateDesc, inputDesc) {
+  if (!inputDesc || !candidateDesc) return false;
+  const inputNouns = extractPrimaryProductNouns(inputDesc);
+  const candNouns = extractPrimaryProductNouns(candidateDesc);
+  if (inputNouns.length === 0 || candNouns.length === 0) return true;
+  return !inputNouns.some((n) => candNouns.includes(n));
+}
 function hasExplicitGramajeConflict(candidate, descNorm) {
   if (!descNorm) return false;
+  if (hasPrimaryNounConflict(candidate.descripcion, descNorm)) {
+    return true;
+  }
   const inputFeat = extractPresentationFeatures(descNorm);
   const candFeat = extractPresentationFeatures(candidate.descripcion);
   if (inputFeat.packWeight && candFeat.packWeight && inputFeat.packWeight !== candFeat.packWeight) {
     return true;
   }
   if (inputFeat.unitWeightGrams !== null && candFeat.unitWeightGrams !== null && inputFeat.unitWeightGrams !== candFeat.unitWeightGrams) {
+    return true;
+  }
+  if (inputFeat.unitWeightGrams !== null && !inputFeat.isPerKg && candFeat.isPerKg && candFeat.unitWeightGrams === null) {
     return true;
   }
   return false;
@@ -181,98 +310,95 @@ function matchProductoCodizulca(codigoLeido, descripcionLeida) {
   const rawCod = String(codigoLeido ?? "").trim();
   const cleanCod = rawCod.replace(/[\s\-_.]/g, "").toUpperCase();
   const cleanCodNoZeros = /^\d+$/.test(cleanCod) ? String(parseInt(cleanCod, 10)) : cleanCod;
-  const descNorm = normalizeEncodingEspeciales(String(descripcionLeida ?? "")).replace(/\s*\/\s*\d+(?:[.,]\d+)?\s*$/, "").replace(/\s+/g, " ").trim().toUpperCase();
+  const rawDescPreserved = normalizeEncodingEspeciales(String(descripcionLeida ?? "")).replace(/\s+/g, " ").trim().toUpperCase();
+  const descNorm = rawDescPreserved.replace(/\s*\/\s*\d+(?:[.,]\d+)?\s*$/, "").replace(/\s+/g, " ").trim().toUpperCase();
   const isForbiddenAlpha = CODIGOS_ALFABETICOS_PROHIBIDOS.has(cleanCod);
-  const isLechePolvoVencampo = cleanCod === "LPV" || descNorm.includes("LECHE") && descNorm.includes("POLVO") && !descNorm.includes("PURISIMA") && (descNorm.includes("VENCAMPO") || descNorm.includes("400GR") || descNorm.includes("900GR") || descNorm.includes("10X"));
-  if (isLechePolvoVencampo && cleanCod !== "7590377000503" && cleanCod !== "7590377000510") {
-    if (MAPA_PRODUCTOS_CODIZULCA.has(cleanCodNoZeros)) {
-      const candidate = MAPA_PRODUCTOS_CODIZULCA.get(cleanCodNoZeros);
-      if (!hasExplicitGramajeConflict(candidate, descNorm)) {
-        return candidate;
-      }
-    }
-    return matchLecheVencampoByGramaje(descNorm);
-  }
   if (!isForbiddenAlpha && cleanCod) {
-    const exact158 = MAPA_PRODUCTOS_CODIZULCA.get(cleanCod) || MAPA_PRODUCTOS_CODIZULCA.get(cleanCodNoZeros);
-    if (exact158 && !hasExplicitGramajeConflict(exact158, descNorm)) {
-      return exact158;
-    }
     const byBarcodeOrPlu = HOMOLOGACION_EAN_PLU_ALKOSTO[cleanCod] || HOMOLOGACION_EAN_PLU_ALKOSTO[cleanCodNoZeros];
-    if (byBarcodeOrPlu) {
-      return byBarcodeOrPlu;
+    if (byBarcodeOrPlu && (!descNorm || !hasPrimaryNounConflict(byBarcodeOrPlu.descripcion, descNorm))) {
+      return { ...byBarcodeOrPlu, matchExacto: true };
+    }
+    const exactCatalog = MAPA_PRODUCTOS_CODIZULCA.get(cleanCod) || MAPA_PRODUCTOS_CODIZULCA.get(cleanCodNoZeros);
+    if (exactCatalog && !hasExplicitGramajeConflict(exactCatalog, descNorm)) {
+      return { ...exactCatalog, matchExacto: true };
     }
     const byHist = PRODUCTOS_HISTORICOS_COMPLEMENTARIOS[cleanCod] || PRODUCTOS_HISTORICOS_COMPLEMENTARIOS[cleanCodNoZeros];
-    if (byHist) {
-      return byHist;
+    if (byHist && !hasExplicitGramajeConflict(byHist, descNorm)) {
+      return { ...byHist, matchExacto: true };
     }
   }
-  if (cleanCod === "UTH" || cleanCod === "UHT" || descNorm.includes("LECHE") && (descNorm.includes("UHT") || descNorm.includes("UTH") || descNorm.includes("LIQUIDA"))) {
-    if (descNorm.includes("DESCREMADA")) return MAPA_PRODUCTOS_CODIZULCA.get("180");
-    if (descNorm.includes("DESLACTOSADA")) return MAPA_PRODUCTOS_CODIZULCA.get("242");
-    if (descNorm.includes("BARISTA")) return MAPA_PRODUCTOS_CODIZULCA.get("1268");
-    return MAPA_PRODUCTOS_CODIZULCA.get("179");
+  const inputNouns = extractPrimaryProductNouns(descNorm);
+  const isLechePolvoVencampo = cleanCod === "LPV" && (inputNouns.length === 0 || inputNouns.includes("LECHE")) || inputNouns.includes("LECHE") && descNorm.includes("POLVO") && !descNorm.includes("PURISIMA") && (descNorm.includes("VENCAMPO") || descNorm.includes("400GR") || descNorm.includes("900GR") || descNorm.includes("10X"));
+  if (isLechePolvoVencampo) {
+    return { ...matchLecheVencampoByGramaje(descNorm), matchExacto: true };
   }
-  if (cleanCod === "QS") {
-    if (descNorm.includes("MI FINCA") || descNorm.includes("EDAM")) return MAPA_PRODUCTOS_CODIZULCA.get("1591");
-    return MAPA_PRODUCTOS_CODIZULCA.get("1057");
+  if ((cleanCod === "UTH" || cleanCod === "UHT" || inputNouns.includes("LECHE") && (descNorm.includes("UHT") || descNorm.includes("UTH") || descNorm.includes("LIQUIDA"))) && (inputNouns.length === 0 || inputNouns.includes("LECHE"))) {
+    if (descNorm.includes("DESCREMADA")) return { ...MAPA_PRODUCTOS_CODIZULCA.get("180"), matchExacto: true };
+    if (descNorm.includes("DESLACTOSADA")) return { ...MAPA_PRODUCTOS_CODIZULCA.get("242"), matchExacto: true };
+    if (descNorm.includes("BARISTA")) return { ...MAPA_PRODUCTOS_CODIZULCA.get("1268"), matchExacto: true };
+    return { ...MAPA_PRODUCTOS_CODIZULCA.get("179"), matchExacto: true };
   }
-  if (cleanCod === "JUGOS") {
-    if (descNorm.includes("PASTERIZADO") || descNorm.includes("250ML")) return MAPA_PRODUCTOS_CODIZULCA.get("1587");
-    if (descNorm.includes("200ML")) return MAPA_PRODUCTOS_CODIZULCA.get("1098");
-    return MAPA_PRODUCTOS_CODIZULCA.get("181");
+  if (cleanCod === "QS" && (inputNouns.length === 0 || inputNouns.includes("QUESO"))) {
+    if (descNorm.includes("MI FINCA") || descNorm.includes("EDAM")) return { ...MAPA_PRODUCTOS_CODIZULCA.get("1591"), matchExacto: true };
+    return { ...MAPA_PRODUCTOS_CODIZULCA.get("1057"), matchExacto: true };
+  }
+  if (cleanCod === "JUGOS" && (inputNouns.length === 0 || inputNouns.includes("JUGO"))) {
+    if (descNorm.includes("PASTERIZADO") || descNorm.includes("250ML")) return { ...MAPA_PRODUCTOS_CODIZULCA.get("1587"), matchExacto: true };
+    if (descNorm.includes("200ML")) return { ...MAPA_PRODUCTOS_CODIZULCA.get("1098"), matchExacto: true };
+    return { ...MAPA_PRODUCTOS_CODIZULCA.get("181"), matchExacto: true };
   }
   if (descNorm) {
     const exactDesc = PRODUCTOS_CODIZULCA.find((p) => p.descripcion.toUpperCase() === descNorm);
-    if (exactDesc) return exactDesc;
-    if (descNorm.includes("MORTADELA") && descNorm.includes("ASTURIA") && (descNorm.includes("500GR") || descNorm.includes("20UNDX500"))) {
-      return PRODUCTOS_HISTORICOS_COMPLEMENTARIOS["1497"];
+    if (exactDesc) return { ...exactDesc, matchExacto: true };
+    if (inputNouns.includes("MORTADELA") && descNorm.includes("ASTURIA") && (descNorm.includes("500GR") || descNorm.includes("20UNDX500") || descNorm.includes("20X500"))) {
+      return { ...MAPA_PRODUCTOS_CODIZULCA.get("1624") || PRODUCTOS_HISTORICOS_COMPLEMENTARIOS["1497"], matchExacto: true };
     }
-    if (descNorm.includes("NUGGET") && descNorm.includes("CORRAL") && (descNorm.includes("460") || descNorm.includes("462"))) {
-      return PRODUCTOS_HISTORICOS_COMPLEMENTARIOS["047"];
+    if (inputNouns.includes("NUGGET") && descNorm.includes("CORRAL") && (descNorm.includes("460") || descNorm.includes("462"))) {
+      return { ...PRODUCTOS_HISTORICOS_COMPLEMENTARIOS["047"], matchExacto: true };
     }
     if (descNorm.includes("PECHUGA") && descNorm.includes("PAVO") && descNorm.includes("ASTURIA")) {
-      return MAPA_PRODUCTOS_CODIZULCA.get("1512");
+      return { ...MAPA_PRODUCTOS_CODIZULCA.get("1512"), matchExacto: true };
     }
     if (descNorm.includes("PECHUGA") && descNorm.includes("POLLO") && descNorm.includes("ASTURIA")) {
-      return MAPA_PRODUCTOS_CODIZULCA.get("1511");
+      return { ...MAPA_PRODUCTOS_CODIZULCA.get("1511"), matchExacto: true };
     }
-    if (descNorm.includes("PAPAS") && descNorm.includes("MARQUISE")) {
-      return MAPA_PRODUCTOS_CODIZULCA.get("1360");
+    if (inputNouns.includes("PATATAS") && descNorm.includes("MARQUISE")) {
+      return { ...MAPA_PRODUCTOS_CODIZULCA.get("1360"), matchExacto: true };
     }
-    if (descNorm.includes("QUESO") && descNorm.includes("CORLASA")) {
-      return MAPA_PRODUCTOS_CODIZULCA.get("1575");
+    if (inputNouns.includes("QUESO") && descNorm.includes("CORLASA") && !descNorm.includes("KG")) {
+      return { ...MAPA_PRODUCTOS_CODIZULCA.get("1575"), matchExacto: true };
     }
     const inputFeat = extractPresentationFeatures(descNorm);
     const stopWords = /* @__PURE__ */ new Set(["DE", "DEL", "LA", "EL", "LOS", "LAS", "EN", "CON", "POR", "PARA", "TIPO", "UND", "UNI", "GRS", "GR"]);
     const queryTokens = descNorm.replace(/[()/.,]/g, " ").split(/\s+/).filter((t) => t.length >= 2 && !stopWords.has(t));
+    const leadingNounToken = queryTokens[0] || "";
     let bestProduct = null;
     let bestScore = -Infinity;
     for (const candidate of PRODUCTOS_CODIZULCA) {
       const candDesc = candidate.descripcion.toUpperCase();
+      if (inputNouns.length > 0) {
+        if (hasPrimaryNounConflict(candDesc, descNorm)) {
+          continue;
+        }
+      } else if (leadingNounToken.length >= 4 && !candDesc.includes(leadingNounToken)) {
+        continue;
+      }
+      if (hasExplicitGramajeConflict(candidate, descNorm)) {
+        continue;
+      }
       const candFeat = extractPresentationFeatures(candDesc);
-      let score = 0;
+      let score = 180;
       if (candDesc.includes(descNorm) || descNorm.includes(candDesc)) {
         score += 300;
       }
-      if (inputFeat.packWeight && candFeat.packWeight) {
-        if (inputFeat.packWeight === candFeat.packWeight) {
-          score += 260;
-        } else {
-          score -= 180;
-        }
+      if (inputFeat.packWeight && candFeat.packWeight && inputFeat.packWeight === candFeat.packWeight) {
+        score += 260;
       }
-      if (inputFeat.unitWeightGrams !== null && candFeat.unitWeightGrams !== null) {
-        if (inputFeat.unitWeightGrams === candFeat.unitWeightGrams) {
-          score += 160;
-        } else {
-          score -= 140;
-        }
+      if (inputFeat.unitWeightGrams !== null && candFeat.unitWeightGrams !== null && inputFeat.unitWeightGrams === candFeat.unitWeightGrams) {
+        score += 160;
       }
       if (inputFeat.isPerKg && candFeat.isPerKg) {
         score += 80;
-      } else if (inputFeat.isPerKg !== candFeat.isPerKg && (inputFeat.unitWeightGrams !== null || candFeat.unitWeightGrams !== null)) {
-        score -= 40;
       }
       let matchedTokens = 0;
       for (const token of queryTokens) {
@@ -291,6 +417,9 @@ function matchProductoCodizulca(codigoLeido, descripcionLeida) {
         } else if (token === "PAPAS" && candDesc.includes("PATATAS")) {
           matchedTokens++;
           score += 65;
+        } else if (token === "NEGRAS" && candDesc.includes("NEG.")) {
+          matchedTokens++;
+          score += 65;
         }
       }
       if (matchedTokens > 0 && score > bestScore) {
@@ -298,22 +427,23 @@ function matchProductoCodizulca(codigoLeido, descripcionLeida) {
         bestProduct = candidate;
       }
     }
-    if (bestProduct && bestScore >= 45) {
-      return bestProduct;
+    if (bestProduct && bestScore >= 220) {
+      return { ...bestProduct, matchExacto: true };
     }
   }
-  if (!isForbiddenAlpha && /^\d+$/.test(cleanCod) && descNorm) {
-    return {
-      codigo: cleanCod,
-      descripcion: descNorm
-    };
-  }
-  return MAPA_PRODUCTOS_CODIZULCA.get("1536");
+  const isUnmatchedBarcode = /^\d{8,14}$/.test(cleanCod);
+  const fallbackCodigo = !isForbiddenAlpha && cleanCod && !isUnmatchedBarcode ? cleanCod : "PENDIENTE";
+  const fallbackDescripcion = rawDescPreserved || descNorm || "PRODUCTO POR HOMOLOGAR (EDITAR SKU)";
+  return {
+    codigo: fallbackCodigo,
+    descripcion: fallbackDescripcion,
+    matchExacto: false
+  };
 }
 function formatCatalogoCodizulcaForPrompt() {
   return PRODUCTOS_CODIZULCA.map((p) => `${p.codigo} - ${p.descripcion}`).join("\n");
 }
-var PRODUCTOS_CODIZULCA, MAPA_PRODUCTOS_CODIZULCA, PRODUCTOS_HISTORICOS_COMPLEMENTARIOS, HOMOLOGACION_EAN_PLU_ALKOSTO, CODIGOS_ALFABETICOS_PROHIBIDOS;
+var PRODUCTOS_CODIZULCA, MAPA_PRODUCTOS_CODIZULCA, PRODUCTOS_HISTORICOS_COMPLEMENTARIOS, HOMOLOGACION_EAN_PLU_ALKOSTO, CODIGOS_ALFABETICOS_PROHIBIDOS, BRAND_AND_GENERIC_TOKENS;
 var init_productosCodizulca = __esm({
   "src/services/productosCodizulca.ts"() {
     PRODUCTOS_CODIZULCA = [
@@ -474,35 +604,100 @@ var init_productosCodizulca = __esm({
       { codigo: "1589", descripcion: "QUESO PECORINO DE MI FINCA X KG" },
       { codigo: "1590", descripcion: "QUESO PECORINO CON PIMIENTA DE MI FINCA X KG" },
       { codigo: "1591", descripcion: "QUESO AMARILLO TIPO EDAM BARRA DE MI FINCA X KG" },
-      { codigo: "1592", descripcion: "SALMON POR KILO" }
+      { codigo: "1592", descripcion: "SALMON POR KILO" },
+      { codigo: "1593", descripcion: "NECTAR DE JUCOSA TB DURAZNO 12X1L" },
+      { codigo: "1594", descripcion: "NECTAR VARIADO 12X1L" },
+      { codigo: "1595", descripcion: "NECTAR JUCOSA TB PERA 12X1L" },
+      { codigo: "1596", descripcion: "HARINA POR KG" },
+      { codigo: "1597", descripcion: "PAN DE SANDWICH BLANCO E INTEGRAL POR PAQUETE" },
+      { codigo: "1598", descripcion: "PAN ARABE Y CASABE POR PAQUETE" },
+      { codigo: "1599", descripcion: "MORT. NAVIDE\xD1A SALPICAO X KG" },
+      { codigo: "1600", descripcion: "FS QUESO AMARILLO TIPO EDAM BARRA DE MI FINCA X KG" },
+      { codigo: "1601", descripcion: "BANDEJAS VARIAS REFERENCIAS CT1 / JT1" },
+      { codigo: "1602", descripcion: "QUESO MOZARELLA POR KG" },
+      { codigo: "1603", descripcion: "SALCHICHON POR KG" },
+      { codigo: "1604", descripcion: "SALAMI Y PEPERONI POR KG" },
+      { codigo: "1605", descripcion: "QUESO DE MANO POR KG" },
+      { codigo: "1606", descripcion: "QUESO GUAYANES - AMARILLO - PAISA POR KG" },
+      { codigo: "1607", descripcion: "PULPA DE CERDO POR KG" },
+      { codigo: "1608", descripcion: "QUESO BLANCO MOZZARELLA MI FINCA" },
+      { codigo: "1609", descripcion: "PESCADERIA (CAMARON,CALAMAR,MEJILLON,PULPO,PEPITONA,MERLUZA) POR KG" },
+      { codigo: "1610", descripcion: "CHAMPI\xD1ONES Y ACEITUNAS NEGRAS" },
+      { codigo: "1611", descripcion: "PALMITO Y PEPINILLOS" },
+      { codigo: "1612", descripcion: "RICOTA SIN SAL, QUESO PALMITA POR KG" },
+      { codigo: "1613", descripcion: "FILET DE PECHUGA INDUST. LIGHT POR KG" },
+      { codigo: "1614", descripcion: "FILET DE PECHUGA A GRANEL TROPICAL POR KG" },
+      { codigo: "1616", descripcion: "PAN DE PERRO CALIENTE POR PAQUETE" },
+      { codigo: "1617", descripcion: "PAPAS RALLADAS PARA PERRO CALIENTE POR PAQUETE" },
+      { codigo: "1618", descripcion: "SERVILLETAS, TOALLIN Y LANILLA" },
+      { codigo: "1619", descripcion: "TE DE MANZANILLA Y FRUTOS ROJOS" },
+      { codigo: "1620", descripcion: "VINAGRE POR GALON" },
+      { codigo: "1621", descripcion: "QUESO DURO POR KG" },
+      { codigo: "1622", descripcion: "LECHE EN POLVO VENCAMPO 24X125GR" },
+      { codigo: "1623", descripcion: "MINI TOCINO ASTURIAS X POR KG" },
+      { codigo: "1624", descripcion: "MORT. ESP D/POLLO ASTURIAS 20X500GR" },
+      { codigo: "1625", descripcion: "MORTADELA ESP D/POLLO SALPICAO 20UNDX500GR" },
+      { codigo: "1626", descripcion: "CHOCOLATE OSCURO - BLANCO BITTER" },
+      { codigo: "1627", descripcion: "LLUVIA DE CHOCOLATE - LLUVIA DE COLORES - GOTAS DE CHOCOLATE" },
+      { codigo: "1628", descripcion: "VINO BLANCO - VINO TINTO POR LITRO" },
+      { codigo: "1629", descripcion: "LEVADURA, POLVO DE HORNEAR Y BICABORNATO DE SODIO POR KG" },
+      { codigo: "1630", descripcion: "PAN JUMBO DELI BLANCO - DELI OREGANO POR PAQ" },
+      { codigo: "1631", descripcion: "PAN CAPILLA POR UND" },
+      { codigo: "1632", descripcion: "PAN RALLADO POR KG" },
+      { codigo: "1633", descripcion: "CACAO Y CHOCOLATE EN POLVO POR KG" },
+      { codigo: "1634", descripcion: "TOMATE ENTERO PELADO POR LATA" },
+      { codigo: "1635", descripcion: "MAIZINA POR KG" },
+      { codigo: "1636", descripcion: "ESENCIAS VARIAS" },
+      { codigo: "1637", descripcion: "QUESO PARMESANO RALLADO POR KG" },
+      { codigo: "1638", descripcion: "QUESO PAISA POR KG" },
+      { codigo: "1639", descripcion: "SIERRA EN RUEDA Y PARGO ENTERO POR KG" },
+      { codigo: "1640", descripcion: "UTENSILIOS DE LIMPIEZA (CEPILLO, ESPONJA,GUANTES,GORROS,PA\xD1OS)" },
+      { codigo: "1641", descripcion: "QUIMICOS (CLORO, DESENGRASANTE,DESINFECTANTE,JABON)" },
+      { codigo: "1642", descripcion: "ARVEJAS VENCAMPO 25 UND X 400GR" },
+      { codigo: "1643", descripcion: "LOMO DE CERDO AHUM. SALPICAO POR KG" },
+      { codigo: "1644", descripcion: "CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR" },
+      { codigo: "1646", descripcion: "ACEITE DE MAIZ POR LITRO" },
+      { codigo: "1647", descripcion: "TETERAS POR UND VARIAS REFERENCIAS" },
+      { codigo: "1648", descripcion: "MIEL POR LITRO" },
+      { codigo: "1649", descripcion: "LUMPIAS CONGELADAS POR UND" },
+      { codigo: "1650", descripcion: "CEREALES VARIOS POR UND" },
+      { codigo: "1651", descripcion: "SALSAS VARIAS REFERENCIAS POR UND" },
+      { codigo: "1654", descripcion: "PONCHE DE CREMA - RON A\xD1EJO - LECHE DE COCO" },
+      { codigo: "1655", descripcion: "AZUCAR VENPORT 1X20ND" },
+      { codigo: "1659", descripcion: "PUNTA TRASERA POR KG (UR)" },
+      { codigo: "1660", descripcion: "CARNE MOLIDA PICADO DE BOVINO XKG (UR)" },
+      { codigo: "1661", descripcion: "BIFE ANCHO RYBEYE (UR) POR KG" },
+      { codigo: "1662", descripcion: "CONFITERIA (TORONTO, BOLERO, TURRON, ETC)" }
     ];
     MAPA_PRODUCTOS_CODIZULCA = new Map(
-      PRODUCTOS_CODIZULCA.map((p) => [p.codigo, p])
+      PRODUCTOS_CODIZULCA.map((p) => [p.codigo, { ...p, matchExacto: true }])
     );
     PRODUCTOS_HISTORICOS_COMPLEMENTARIOS = {
-      "1497": { codigo: "1497", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 20UNDX500GR" },
-      "047": { codigo: "047", descripcion: "NUGGET CORRAL DE 460GM" },
-      "47": { codigo: "047", descripcion: "NUGGET CORRAL DE 460GM" },
-      "270": { codigo: "270", descripcion: "NUGGETS CORRAL 12X0.460GR" },
-      "1599": { codigo: "1599", descripcion: "MORT. NAVIDE\xD1A SALPICAO X KG" }
+      "1497": { codigo: "1497", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 20UNDX500GR", matchExacto: true },
+      "047": { codigo: "047", descripcion: "NUGGET CORRAL DE 460GM", matchExacto: true },
+      "47": { codigo: "047", descripcion: "NUGGET CORRAL DE 460GM", matchExacto: true },
+      "270": { codigo: "270", descripcion: "NUGGETS CORRAL 12X0.460GR", matchExacto: true },
+      "1599": { codigo: "1599", descripcion: "MORT. NAVIDE\xD1A SALPICAO X KG", matchExacto: true }
     };
     HOMOLOGACION_EAN_PLU_ALKOSTO = {
-      "7590377000503": { codigo: "1574", descripcion: "LECHE EN POLVO VENCAMPO 10X400GR" },
-      "7590377000510": { codigo: "1556", descripcion: "LECHE EN POLVO VENCAMPO 10X900GR" },
-      "7590377000077": { codigo: "1496", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR" },
-      "7590377000589": { codigo: "1497", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 20UNDX500GR" },
-      "7591289609129": { codigo: "21", descripcion: "MORTADELA ESP D/POLLO CORRAL 1X12UNI" },
-      "7591289400023": { codigo: "047", descripcion: "NUGGET CORRAL DE 460GM" },
-      "5412873178161": { codigo: "1360", descripcion: "PATATAS FRESCAS MARQUISE 4X2.5KG" },
-      "7591210000513": { codigo: "1091", descripcion: "CREMA DE LECHE PURISIMA 6 X 500 GRS" },
-      "7591210000544": { codigo: "1089", descripcion: "CREMA DE LECHE PURISIMA 12X250GRS" },
-      "021000061778": { codigo: "1577", descripcion: "QUESO CREMA KRAFT 226 GR X 36 UND" },
-      "21000061778": { codigo: "1577", descripcion: "QUESO CREMA KRAFT 226 GR X 36 UND" },
-      "100881": { codigo: "1512", descripcion: "MORT DE PAVO ASTURIAS X KG" },
-      "100882": { codigo: "1511", descripcion: "MORT. PECHUGA DE POLLO ASTURIAS X KG" },
-      "100929": { codigo: "1463", descripcion: "MORT. SUPERIOR ASTURIAS X KG" },
-      "100281": { codigo: "1575", descripcion: "QUESO MOZZARELLA CORLASA 3.5KG X 4 UND" },
-      "100253": { codigo: "46", descripcion: "NUGGETS INSTITUCIONAL CORRAL POR KG" }
+      "7590377000411": { codigo: "1642", descripcion: "ARVEJAS VENCAMPO 25 UND X 400GR", matchExacto: true },
+      "7590377000459": { codigo: "1644", descripcion: "CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR", matchExacto: true },
+      "7590377000503": { codigo: "1574", descripcion: "LECHE EN POLVO VENCAMPO 10X400GR", matchExacto: true },
+      "7590377000510": { codigo: "1556", descripcion: "LECHE EN POLVO VENCAMPO 10X900GR", matchExacto: true },
+      "7590377000077": { codigo: "1496", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR", matchExacto: true },
+      "7590377000589": { codigo: "1497", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 20UNDX500GR", matchExacto: true },
+      "7591289609129": { codigo: "21", descripcion: "MORTADELA ESP D/POLLO CORRAL 1X12UNI", matchExacto: true },
+      "7591289400023": { codigo: "047", descripcion: "NUGGET CORRAL DE 460GM", matchExacto: true },
+      "5412873178161": { codigo: "1360", descripcion: "PATATAS FRESCAS MARQUISE 4X2.5KG", matchExacto: true },
+      "7591210000513": { codigo: "1091", descripcion: "CREMA DE LECHE PURISIMA 6 X 500 GRS", matchExacto: true },
+      "7591210000544": { codigo: "1089", descripcion: "CREMA DE LECHE PURISIMA 12X250GRS", matchExacto: true },
+      "021000061778": { codigo: "1577", descripcion: "QUESO CREMA KRAFT 226 GR X 36 UND", matchExacto: true },
+      "21000061778": { codigo: "1577", descripcion: "QUESO CREMA KRAFT 226 GR X 36 UND", matchExacto: true },
+      "100881": { codigo: "1512", descripcion: "MORT DE PAVO ASTURIAS X KG", matchExacto: true },
+      "100882": { codigo: "1511", descripcion: "MORT. PECHUGA DE POLLO ASTURIAS X KG", matchExacto: true },
+      "100929": { codigo: "1463", descripcion: "MORT. SUPERIOR ASTURIAS X KG", matchExacto: true },
+      "100281": { codigo: "1575", descripcion: "QUESO MOZZARELLA CORLASA 3.5KG X 4 UND", matchExacto: true },
+      "100253": { codigo: "46", descripcion: "NUGGETS INSTITUCIONAL CORRAL POR KG", matchExacto: true }
     };
     CODIGOS_ALFABETICOS_PROHIBIDOS = /* @__PURE__ */ new Set([
       "LPV",
@@ -547,6 +742,60 @@ var init_productosCodizulca = __esm({
       "KILO",
       "KILOS"
     ]);
+    BRAND_AND_GENERIC_TOKENS = /* @__PURE__ */ new Set([
+      "VENCAMPO",
+      "VENPORT",
+      "PURISIMA",
+      "ASTURIAS",
+      "ASTURIA",
+      "SALPICAO",
+      "CORRAL",
+      "MARQUISE",
+      "CORLASA",
+      "KRAFT",
+      "FINCA",
+      "JUCOSA",
+      "SIMON",
+      "SAN",
+      "MONTANA",
+      "TORONDOY",
+      "FRESCAMPO",
+      "AURORA",
+      "PRADERA",
+      "VALLE",
+      "HONDO",
+      "FLORA",
+      "DONA",
+      "DO\xD1A",
+      "TROPICAL",
+      "DELI",
+      "JUMBO",
+      "COMPLETA",
+      "ESPECIAL",
+      "ESP",
+      "SUPERIOR",
+      "EXTRA",
+      "ESTANDAR",
+      "ECONOM",
+      "ECONOMICA",
+      "INSTITUCIONAL",
+      "INDUSTRIAL",
+      "INDUST",
+      "BLANCO",
+      "BLANCA",
+      "BLANCAS",
+      "NEGRO",
+      "NEGRA",
+      "NEGRAS",
+      "NEG",
+      "VERDE",
+      "VERDES",
+      "ROJO",
+      "ROJA",
+      "ROJAS",
+      "AMARILLO",
+      "AMARILLA"
+    ]);
   }
 });
 
@@ -569,40 +818,42 @@ function resolverProductoPorCodigoODescripcion(codigoInput, descripcionInput) {
   const descNorm = String(descripcionInput || "").replace(/\s+\/\s*\d+(?:[.,]\d+)?\s*$/, "").replace(/\s+/g, " ").trim().toUpperCase();
   if (!codNorm && !descNorm) return void 0;
   if (codNorm) {
-    const match = CATALOGO_ALKOSTO.find((p) => p.sku.toUpperCase() === codNorm);
-    if (match) return match;
+    const match = CATALOGO_ALKOSTO.find((p) => p.codigoBarra && normalizarCodigoProducto(p.codigoBarra) === codNorm);
+    if (match && (!descNorm || !hasPrimaryNounConflict(match.producto, descNorm))) return match;
   }
   if (codNorm) {
-    const match = CATALOGO_ALKOSTO.find((p) => p.codigoBarra && normalizarCodigoProducto(p.codigoBarra) === codNorm);
-    if (match) return match;
+    const match = CATALOGO_ALKOSTO.find((p) => p.sku.toUpperCase() === codNorm);
+    if (match && (!descNorm || !hasPrimaryNounConflict(match.producto, descNorm))) return match;
   }
   if (codNorm) {
     const match = CATALOGO_ALKOSTO.find((p) => p.codigosCadena && p.codigosCadena.some((c) => normalizarCodigoProducto(c).toUpperCase() === codNorm));
-    if (match) return match;
+    if (match && (!descNorm || !hasPrimaryNounConflict(match.producto, descNorm))) return match;
   }
   if (codNorm) {
     const match = CATALOGO_ALKOSTO.find((p) => p.sinonimos && p.sinonimos.some((s) => normalizarCodigoProducto(s).toUpperCase() === codNorm));
-    if (match) return match;
+    if (match && (!descNorm || !hasPrimaryNounConflict(match.producto, descNorm))) return match;
   }
   const hasExplicitUnmatchedNumericCode = codNorm.length >= 4 && /^\d+$/.test(codNorm);
   if (descNorm) {
     let match = CATALOGO_ALKOSTO.find(
       (p) => p.producto.toUpperCase() === descNorm || p.sinonimos && p.sinonimos.some((s) => s.toUpperCase() === descNorm)
     );
-    if (match) return match;
+    if (match && !hasPrimaryNounConflict(match.producto, descNorm)) return match;
     if (hasExplicitUnmatchedNumericCode) {
       return void 0;
     }
     match = CATALOGO_ALKOSTO.find((p) => {
+      if (hasPrimaryNounConflict(p.producto, descNorm)) return false;
       const pNorm = p.producto.toUpperCase();
       if (descNorm.includes(pNorm) || pNorm.includes(descNorm)) return true;
       if (p.sinonimos && p.sinonimos.some((s) => s.length >= 6 && descNorm.includes(s.toUpperCase()))) return true;
       return false;
     });
     if (match) return match;
-    const tokens = descNorm.split(/\s+/).filter((t) => t.length > 2 && !["POR", "CON", "DEL", "LOS", "LAS", "PARA", "MAS"].includes(t));
+    const tokens = descNorm.split(/\s+/).filter((t) => t.length > 2 && !["POR", "CON", "DEL", "LOS", "LAS", "PARA", "MAS"].includes(t) && !isBrandOrPresentationToken(t));
     if (tokens.length > 0) {
       match = CATALOGO_ALKOSTO.find((p) => {
+        if (hasPrimaryNounConflict(p.producto, descNorm)) return false;
         const pNorm = p.producto.toUpperCase();
         const matchesCount = tokens.filter((t) => pNorm.includes(t)).length;
         const requiredMatches = tokens.length <= 2 ? tokens.length : Math.max(2, Math.ceil(tokens.length * 0.75));
@@ -1293,6 +1544,30 @@ var init_alkostoService = __esm({
         unidadSugerida: "CJ"
       },
       {
+        sku: "1642",
+        producto: "ARVEJAS VENCAMPO 25 UND X 400GR",
+        categoria: "GRANOS / BASICOS",
+        presentacion: "Bulto (25 und x 400g)",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 20,
+        codigoBarra: "7590377000411",
+        codigosCadena: ["1642", "001642", "7590377000411"],
+        sinonimos: ["ARVEJAS VERDES VENCAMPO 400GR", "ARVEJAS VENCAMPO 25 UND X 400GR", "ARVEJAS VENCAMPO 400GR", "1642", "7590377000411"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "1644",
+        producto: "CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR",
+        categoria: "GRANOS / BASICOS",
+        presentacion: "Bulto (25 und x 400g)",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 20,
+        codigoBarra: "7590377000459",
+        codigosCadena: ["1644", "001644", "7590377000459"],
+        sinonimos: ["CARAOTAS NEGRAS VENCAMPO 400GR", "CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR", "CARAOTAS VENCAMPO 400GR", "1644", "7590377000459"],
+        unidadSugerida: "CJ"
+      },
+      {
         sku: "1572",
         producto: "CAJAS DE PIZZA 1X100",
         categoria: "EMPAQUES",
@@ -1340,10 +1615,13 @@ Eres un motor experto en extracci\xF3n de datos contables y comerciales (OCR + C
 TAREA PRINCIPAL:
 Analiza minuciosamente la imagen, captura o documento PDF adjunto correspondiente a una Orden de Compra de ALKOSTO / FAMILIA CENTER en TODAS sus p\xE1ginas. Extrae la totalidad de los datos de cabecera, todos los renglones de productos, c\xF3digos, el desglose de cantidades por tienda/sucursal y los montos financieros, sin omitir ni resumir ning\xFAn \xEDtem.
 
-REGLA OBLIGATORIA DE CAT\xC1LOGO OFICIAL DE CODIZULCA (158 PRODUCTOS):
-"PROHIBIDO inventar c\xF3digos alfab\xE9ticos o siglas (como 'LPV'). Debes buscar cada producto de la Orden de Compra dentro del Cat\xE1logo Oficial de Codizulca adjunto y asignar su \`codigo\` num\xE9rico exacto (del 9 al 1592) y su \`descripcion\` oficial exacta, prestando m\xE1xima atenci\xF3n a la presentaci\xF3n/gramaje (ej. diferenciar entre 10X1KG [c\xF3d 1536], 10X900GR [c\xF3d 1556], 10X400GR [c\xF3d 1574] y 10X500GR [c\xF3d 1579])."
+REGLA OBLIGATORIA DE CAT\xC1LOGO OFICIAL DE CODIZULCA Y PROHIBICI\xD3N DE ALUCINACI\xD3N DE SKU:
+- PROHIBIDO inventar c\xF3digos alfab\xE9ticos o siglas (como 'LPV').
+- PROHIBIDO asignar un SKU por coincidencia parcial de marca + gramaje (ej. NUNCA asignes el c\xF3digo 1555 "LECHE EN POLVO VENCAMPO 20X400GR" a "ARVEJAS VERDES VENCAMPO 400GR" ni a "CARAOTAS NEGRAS VENCAMPO 400GR" solo porque comparten "VENCAMPO" y "400GR").
+- Prioriza el match por: 1) C\xF3digo EAN/Barra exacto (7590377000411 -> 1642, 7590377000459 -> 1644), 2) Coincidencia OBLIGATORIA del sustantivo principal del producto (ARVEJAS, CARAOTAS, LECHE, MORTADELA, QUESO, etc.) + gramaje.
+- Si un producto del PDF no tiene coincidencia exacta de sustantivo principal o EAN en el cat\xE1logo, conserva la descripci\xF3n original del PDF (ej. "ARVEJAS VERDES VENCAMPO 400GR/1.00") y el c\xF3digo EAN o marca el SKU como "PENDIENTE" en lugar de sobreescribirlo con otro producto.
 
-CAT\xC1LOGO OFICIAL DE CODIZULCA (158 PRODUCTOS: codigo - descripcion):
+CAT\xC1LOGO OFICIAL DE CODIZULCA (codigo - descripcion):
 ${catalogoOficial158Str}
 
 17 TIENDAS V\xC1LIDAS SINCRONIZADAS EN BASE DE DATOS (\xDANICAS PERMITIDAS):
@@ -1361,6 +1639,8 @@ REGLAS ESTRICTAS DE EXTRACCI\xD3N Y NORMALIZACI\xD3N:
 3. CONSOLIDACI\xD3N POR C\xD3DIGO DE PRODUCTO SIN DUPLICADOS Y HOMOLOGACI\xD3N:
    - Si el mismo c\xF3digo de producto aparece en la p\xE1gina de ALKOSTO (AK01..AK10) y en la p\xE1gina de FAMILIA CENTER (FC01..FC07), consolida sus cantidades por tienda en un \xFAnico rengl\xF3n por producto dentro de \`tiendas\` y en \`distribucion_tiendas\` / \`desglosePorTienda\`, evitando claves o filas duplicadas.
    - Homologaci\xF3n directa de EAN/PLU frecuentes en \xD3rdenes de Compra de Alkosto hacia el Cat\xE1logo Oficial de Codizulca:
+     * 7590377000411 (ARVEJAS VERDES VENCAMPO 400GR) -> codigo: "1642", descripcion: "ARVEJAS VENCAMPO 25 UND X 400GR", unidad: "BULTO"
+     * 7590377000459 (CARAOTAS NEGRAS VENCAMPO 400GR) -> codigo: "1644", descripcion: "CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR", unidad: "BULTO"
      * 7590377000503 (LECHE EN POLVO COMPLETA VENCAMPO 400GR) -> codigo: "1574", descripcion: "LECHE EN POLVO VENCAMPO 10X400GR", unidad: "BULTO"
      * 7590377000510 (LECHE EN POLVO COMPLETA VENCAMPO 900GR) -> codigo: "1556", descripcion: "LECHE EN POLVO VENCAMPO 10X900GR", unidad: "BULTO"
      * LECHE EN POLVO VENCAMPO 10X1KG -> codigo: "1536", descripcion: "LECHE EN POLVO VENCAMPO 10X1KG", unidad: "BULTO"
@@ -1378,11 +1658,12 @@ REGLAS ESTRICTAS DE EXTRACCI\xD3N Y NORMALIZACI\xD3N:
      * 100281 -> codigo: "1575", descripcion: "QUESO MOZZARELLA CORLASA 3.5KG X 4 UND", unidad: "KG"
      * 7591210000513 -> codigo: "1091", descripcion: "CREMA DE LECHE PURISIMA 6 X 500 GRS", unidad: "CJ"
      * 7591210000544 -> codigo: "1089", descripcion: "CREMA DE LECHE PURISIMA 12X250GRS", unidad: "CJ"
-   - Elimina siempre el sufijo de PVP sugerido tras la barra en la descripci\xF3n (ej. quitar "/ 2.40", "/ 6.88").
-4. EXTRACCI\xD3N QUIR\xDARGICA DE \`valorUnitarioOC\` Y FORMATO NUM\xC9RICO EST\xC1NDAR (CR\xCDTICO):
+   - Elimina siempre el sufijo de PVP sugerido tras la barra en la descripci\xF3n (ej. quitar "/ 2.40", "/ 6.88") cuando el producto s\xED tiene match exacto en el cat\xE1logo.
+4. EXTRACCI\xD3N QUIR\xDARGICA DE \`valorUnitarioOC\` Y SANITIZACI\xD3N DE ARTEFACTOS OCR (\`15:00\` -> \`15.00\`):
    - Extrae con precisi\xF3n quir\xFArgica el \`valorUnitarioOC\` (Precio/Valor Unitario impreso en la Orden de Compra por cada unidad de empaque solicitada, sin confundirlo con el subtotal ni con impuestos).
    - El sistema NUNCA debe inventar precios ni alterar el Valor Unitario que viene en la Orden de Compra. Calcula \`subtotal\` = \`cantidad * valorUnitarioOC\`.
-   - Normaliza todos los n\xFAmeros eliminando comas de miles ("9,600.00" -> 9600, "46,150.00" -> 46150) y reduciendo costos de 4 decimales ("40.0000" -> 40, "90.0000" -> 90).
+   - Si en alguna columna de tienda el PDF/OCR muestra dos puntos en lugar de punto decimal (ej. "15:00" en AK03 o "0:00" en AK08), corr\xEDgelo a "15.00" y "0.00".
+   - Normaliza todos los n\xFAmeros eliminando comas de miles ("9,600.00" -> 9600, "1,900.00" -> 1900) y reduciendo costos de 4 decimales ("20.0000" -> 20, "40.0000" -> 40).
    - Usa punto \`.\` exclusivamente como separador decimal y elimina s\xEDmbolos de moneda \`$\`, \`Bs\`, \`%\`.
 5. CABECERA COMPLETA Y VALIDACI\xD3N ARITM\xC9TICA:
    - Extrae la cabecera completa: \`numero_orden\`, \`fecha_emision\`, \`fecha_entrega\`, \`dias_credito\`, \`tasa_cambio\` y \`observaciones\`.
@@ -1702,7 +1983,7 @@ function parseNumeroEstricto(val, defaultVal = 0) {
     return Number.isFinite(val) ? val : defaultVal;
   }
   if (val === null || val === void 0) return defaultVal;
-  const raw = String(val).trim();
+  const raw = String(val).trim().replace(/(\d+):(\d{2})\b/g, "$1.$2");
   if (!raw) return defaultVal;
   const cleaned = raw.replace(/(?:Bs\.?|USD|US\$|\$|%|€|\s)+/gi, "");
   if (!cleaned || !/\d/.test(cleaned)) return defaultVal;
@@ -1995,9 +2276,33 @@ function mapNumericCellsToRow(rawTokens, pageChain, explicitStoreHeaders) {
     totalRenglon
   };
 }
+function sanitizeAlkostoRawPdfText(rawText) {
+  if (!rawText) return "";
+  const colonFixed = rawText.replace(/(?<![:\d])(\d+)[;:](\d{2})(?![:\d]|\s*(?:A\.?\s*M\.?|P\.?\s*M\.?)\b)/gi, "$1.$2");
+  const rawLines = colonFixed.split(/\r?\n/);
+  const normalizedLines = [];
+  for (let i = 0; i < rawLines.length; i++) {
+    const curr = rawLines[i].trim();
+    if (!curr) continue;
+    const next = (rawLines[i + 1] || "").trim();
+    if (/^\d{4,14}$/.test(curr) && next && /^[A-ZÁÉÍÓÚÑ]/i.test(next) && !/^SubTotal/i.test(next)) {
+      normalizedLines.push(`${curr} ${next}`);
+      i++;
+      continue;
+    }
+    if (/^\d{4,14}\s+[A-ZÁÉÍÓÚÑ]/i.test(curr) && (curr.match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || []).length < 8 && next && !/^\d{4,14}\s+[A-ZÁÉÍÓÚÑ]/i.test(next) && !/^SubTotal/i.test(next) && (/^\/?\s*\d+(?:\.\d+)?\b/.test(next) || /^[A-ZÁÉÍÓÚÑ0-9\s.,/-]+?\b(?:GR|GRS|KG|KGS|LT|LTS|ML|UND|UNI|PZA)\s*\/\s*\d+(?:\.\d+)?/i.test(next))) {
+      normalizedLines.push(`${curr} ${next}`);
+      i++;
+      continue;
+    }
+    normalizedLines.push(curr);
+  }
+  return normalizedLines.join("\n");
+}
 function parseAlkostoRawText(rawText) {
   assertValidInputPayload(rawText, "parseAlkostoRawText");
-  const pageChunks = splitTextIntoPages(rawText);
+  const sanitizedRawText = sanitizeAlkostoRawPdfText(rawText);
+  const pageChunks = splitTextIntoPages(sanitizedRawText);
   let ordenNro = "";
   let sede = "AKOP";
   let fechaEmision = "";
@@ -2077,16 +2382,52 @@ function parseAlkostoRawText(rawText) {
       if (rawCode === "409876136" || /^267319/.test(rawCode) || rawDescPart.toUpperCase().startsWith("CODIZULCA")) {
         continue;
       }
-      let nextLineIdx = i + 1;
-      let nextLine = lines[nextLineIdx] || "";
-      let numTokens = nextLine.match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || [];
-      if (numTokens.length < 8 && nextLine && !/^(\d{4,14})\s+[A-ZÁÉÍÓÚÑ]/i.test(nextLine) && !/^SubTotal/i.test(nextLine) && lines[i + 2]) {
-        const secondNextTokens = lines[i + 2].match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || [];
-        if (secondNextTokens.length >= 8) {
-          rawDescPart = `${rawDescPart} ${nextLine}`.trim();
-          nextLineIdx = i + 2;
-          nextLine = lines[nextLineIdx];
-          numTokens = secondNextTokens;
+      let nextLineIdx = i;
+      let numTokens = [];
+      const inlineNumericTail = rawDescPart.match(/^([A-ZÁÉÍÓÚÑ0-9\s.,/()-]+?(?:\s*\/\s*\d+(?:\.\d+)?|\b(?:GR|GRS|KG|KGS|LT|LTS|ML|UND|UNI|PZA)|[A-ZÁÉÍÓÚÑ)]))\s+((?:-?\d+(?:,\d{3})*(?:\.\d+)?\s*){8,})$/i);
+      if (inlineNumericTail) {
+        rawDescPart = inlineNumericTail[1].trim();
+        numTokens = inlineNumericTail[2].match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || [];
+      }
+      const expectedMinCols = pageChain === "ALKOSTO" ? 21 : 16;
+      if (numTokens.length < expectedMinCols) {
+        let cursor = i + 1;
+        if (numTokens.length === 0) {
+          while (cursor < lines.length) {
+            const candidateLine = lines[cursor];
+            if (!candidateLine || /^(\d{4,14})\s+[A-ZÁÉÍÓÚÑ]/i.test(candidateLine) || /^SubTotal/i.test(candidateLine)) {
+              break;
+            }
+            const inlineCandidate = candidateLine.match(/^([A-ZÁÉÍÓÚÑ0-9\s.,/()-]+?(?:\s*\/\s*\d+(?:\.\d+)?|\b(?:GR|GRS|KG|KGS|LT|LTS|ML|UND|UNI|PZA)|[A-ZÁÉÍÓÚÑ)]))\s+((?:-?\d+(?:,\d{3})*(?:\.\d+)?\s*){8,})$/i);
+            if (inlineCandidate) {
+              rawDescPart = `${rawDescPart} ${inlineCandidate[1].trim()}`.trim();
+              numTokens.push(...inlineCandidate[2].match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || []);
+              nextLineIdx = cursor;
+              cursor++;
+              break;
+            }
+            const tokensInLine = candidateLine.match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || [];
+            const hasAlphaWords = /[A-ZÁÉÍÓÚÑ]{2,}/i.test(candidateLine);
+            if (tokensInLine.length < 6 && (hasAlphaWords || /^\/\s*\d+(?:\.\d+)?$/.test(candidateLine))) {
+              rawDescPart = `${rawDescPart} ${candidateLine}`.trim();
+              nextLineIdx = cursor;
+              cursor++;
+            } else {
+              break;
+            }
+          }
+        }
+        while (cursor < lines.length && numTokens.length < expectedMinCols) {
+          const candidateLine = lines[cursor];
+          if (!candidateLine || /^(\d{4,14})\s+[A-ZÁÉÍÓÚÑ]/i.test(candidateLine) || /^SubTotal/i.test(candidateLine)) {
+            break;
+          }
+          const tokensInLine = candidateLine.match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || [];
+          if (tokensInLine.length === 0) break;
+          if (numTokens.length >= 8 && /[A-ZÁÉÍÓÚÑ]{3,}/i.test(candidateLine)) break;
+          numTokens.push(...tokensInLine);
+          nextLineIdx = cursor;
+          cursor++;
         }
       }
       if (numTokens.length < 8) continue;
@@ -2095,10 +2436,13 @@ function parseAlkostoRawText(rawText) {
       i = nextLineIdx;
       const cleanDesc = limpiarDescripcionAlkosto(rawDescPart);
       const catalogMatch = resolverProductoPorCodigoODescripcion(rawCode, cleanDesc);
-      const finalSku = catalogMatch ? catalogMatch.sku : rawCode;
-      const finalBarcode = catalogMatch?.codigoBarra || (/^\d{12,14}$/.test(rawCode) ? rawCode : void 0);
+      const strictMatch = matchProductoCodizulca(rawCode, rawDescPart || cleanDesc);
+      const hasExactMatch = Boolean(catalogMatch || strictMatch.matchExacto !== false);
+      const finalSku = catalogMatch ? catalogMatch.sku : strictMatch.matchExacto !== false ? strictMatch.codigo : strictMatch.codigo || "PENDIENTE";
+      const finalBarcode = catalogMatch?.codigoBarra || (/^\d{8,14}$/.test(rawCode) ? rawCode : void 0);
       const finalCodigoInternoAlkosto = /^100\d{3}$/.test(rawCode) ? rawCode : null;
-      const finalUnid = normalizarUnidadMedidaAlkosto(void 0, cleanDesc, mapped.emp, catalogMatch?.unidadSugerida);
+      const finalDescripcion = catalogMatch ? catalogMatch.producto : strictMatch.matchExacto !== false ? strictMatch.descripcion : rawDescPart.replace(/\s+/g, " ").replace(/\s*\/\s*/g, "/").trim().toUpperCase();
+      const finalUnid = normalizarUnidadMedidaAlkosto(void 0, hasExactMatch ? finalDescripcion : cleanDesc, mapped.emp, catalogMatch?.unidadSugerida);
       const existing = itemsByCode.get(rawCode);
       if (existing) {
         for (const [tk, tv] of Object.entries(mapped.tiendas)) {
@@ -2120,7 +2464,7 @@ function parseAlkostoRawText(rawText) {
           codigoBarra: finalBarcode,
           codigoEan: finalBarcode || null,
           codigoInternoAlkosto: finalCodigoInternoAlkosto,
-          descripcion: cleanDesc,
+          descripcion: finalDescripcion,
           iva: mapped.iva,
           emp: mapped.emp,
           unid: finalUnid,
@@ -2188,19 +2532,20 @@ function splitTextIntoPages(rawText) {
 }
 function parseAlkostoFlexibleOcrText(rawText) {
   if (!rawText || typeof rawText !== "string" || rawText.trim().length < 20) return null;
+  const sanitizedText = sanitizeAlkostoRawPdfText(rawText);
   try {
-    return parseAlkostoRawText(rawText);
+    return parseAlkostoRawText(sanitizedText);
   } catch {
   }
-  const upper = rawText.toUpperCase();
+  const upper = sanitizedText.toUpperCase();
   const isFamilia = upper.includes("FAMILIA CENTER") || /\bFC0[1-7]\b/.test(upper);
   const clienteCadena = isFamilia ? "FAMILIA_CENTER" : "ALKOSTO";
-  const ocMatch = rawText.match(/Orden\s*(?:de\s*Compra|Nro\.?)?\s*:?\s*#?\s*(\d{4,12})/i) || rawText.match(/\b(0000\d{5,8})\b/);
+  const ocMatch = sanitizedText.match(/Orden\s*(?:de\s*Compra|Nro\.?)?\s*:?\s*#?\s*(\d{4,12})/i) || sanitizedText.match(/\b(0000\d{5,8})\b/);
   const ordenNro = ocMatch ? ocMatch[1].trim() : "S/N";
-  const datesFound = rawText.match(/\b(\d{2}[/-]\d{2}[/-]\d{4})\b/g) || [];
+  const datesFound = sanitizedText.match(/\b(\d{2}[/-]\d{2}[/-]\d{4})\b/g) || [];
   const fechaEmision = datesFound[0] ? normalizarFechaAlkosto(datesFound[0].replace(/-/g, "/")) : "";
   const fechaEntrega = datesFound[1] ? normalizarFechaAlkosto(datesFound[1].replace(/-/g, "/")) : fechaEmision;
-  const lines = rawText.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length >= 6);
+  const lines = sanitizedText.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length >= 6);
   const items = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -2212,11 +2557,12 @@ function parseAlkostoFlexibleOcrText(rawText) {
     const restText = m[4].trim();
     if (rawCode === "409876136" || /^267319/.test(rawCode)) continue;
     const trailingNums = restText.match(/-?\d+(?:[.,]\d+)?/g) || [];
-    const descOnly = limpiarDescripcionAlkosto(
-      restText.replace(/(?:\s+-?\d+(?:[.,]\d+)?){2,}\s*$/, "").trim()
-    );
+    const rawDescOnly = restText.replace(/(?:\s+-?\d+(?:[.,]\d+)?){2,}\s*$/, "").trim();
+    const descOnly = limpiarDescripcionAlkosto(rawDescOnly);
     const catalogMatch = resolverProductoPorCodigoODescripcion(rawCode, descOnly);
-    if (!catalogMatch && trailingNums.length < 2 && cantHint <= 0) continue;
+    const strictMatch = matchProductoCodizulca(rawCode, rawDescOnly || descOnly);
+    const hasExactMatch = Boolean(catalogMatch || strictMatch.matchExacto !== false);
+    if (!hasExactMatch && trailingNums.length < 2 && cantHint <= 0) continue;
     let totalCantidad = cantHint;
     let costoUnitario = catalogMatch?.precioSugeridoUSD || 0;
     let totalRenglon = 0;
@@ -2242,13 +2588,15 @@ function parseAlkostoFlexibleOcrText(rawText) {
     if (!totalRenglon && costoUnitario > 0) {
       totalRenglon = Number((totalCantidad * costoUnitario).toFixed(2));
     }
+    const finalSku = catalogMatch ? catalogMatch.sku : strictMatch.matchExacto !== false ? strictMatch.codigo : strictMatch.codigo || "PENDIENTE";
+    const finalDescripcion = catalogMatch ? catalogMatch.producto : strictMatch.matchExacto !== false ? strictMatch.descripcion : rawDescOnly.replace(/\s+/g, " ").replace(/\s*\/\s*/g, "/").trim().toUpperCase();
     items.push({
       renglon: items.length + 1,
-      codigo: catalogMatch?.sku || rawCode,
-      skuCodizulca: catalogMatch?.sku || rawCode,
-      codigoBarra: catalogMatch?.codigoBarra || (/^\d{12,14}$/.test(rawCode) ? rawCode : void 0),
-      descripcion: catalogMatch?.producto || descOnly,
-      unid: normalizarUnidadMedidaAlkosto(unidHint, catalogMatch?.producto || descOnly, void 0, catalogMatch?.unidadSugerida),
+      codigo: finalSku,
+      skuCodizulca: finalSku,
+      codigoBarra: catalogMatch?.codigoBarra || (/^\d{8,14}$/.test(rawCode) ? rawCode : void 0),
+      descripcion: finalDescripcion,
+      unid: normalizarUnidadMedidaAlkosto(unidHint, hasExactMatch ? finalDescripcion : descOnly, void 0, catalogMatch?.unidadSugerida),
       totalCantidad,
       costoUnitario,
       totalRenglon
@@ -2586,15 +2934,16 @@ function validateAndNormalizeAlkostoOC(rawInput, options = {}) {
       return;
     }
     const isForbiddenAlphaCode = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(cleanCod);
-    const officialMatchIfAlpha = isForbiddenAlphaCode ? matchProductoCodizulca(cleanCod, cleanDesc) : void 0;
-    const match = (!isForbiddenAlphaCode ? resolverProductoPorCodigoODescripcion(cleanCod, cleanDesc) : void 0) || (cleanCodEanInput ? resolverProductoPorCodigoODescripcion(cleanCodEanInput, cleanDesc) : void 0) || (cleanCodAlkostoInput ? resolverProductoPorCodigoODescripcion(cleanCodAlkostoInput, cleanDesc) : void 0);
-    const finalSku = (officialMatchIfAlpha ? officialMatchIfAlpha.codigo : "") || (match ? match.sku : "") || (it.skuCodizulca ? normalizarCodigoProducto(it.skuCodizulca) : "") || normalizarCodigoProducto(rawCodPrincipal) || cleanCod;
-    const finalCodigo = finalSku || cleanCod || (match?.codigoBarra ?? "");
-    const resolvedEan = cleanCodEanInput || (/^\d{12,14}$/.test(cleanCod) ? cleanCod : "") || match?.codigoBarra || null;
+    const match = (cleanCodEanInput ? resolverProductoPorCodigoODescripcion(cleanCodEanInput, cleanDesc) : void 0) || (!isForbiddenAlphaCode ? resolverProductoPorCodigoODescripcion(cleanCod, cleanDesc) : void 0) || (cleanCodAlkostoInput ? resolverProductoPorCodigoODescripcion(cleanCodAlkostoInput, cleanDesc) : void 0);
+    const strictMatch = matchProductoCodizulca(cleanCodEanInput || cleanCod, rawDesc || cleanDesc);
+    const finalSku = (match ? match.sku : "") || (strictMatch.matchExacto !== false ? strictMatch.codigo : "") || strictMatch.codigo || "PENDIENTE";
+    const finalCodigo = finalSku || "PENDIENTE";
+    const resolvedEan = cleanCodEanInput || (/^\d{8,14}$/.test(cleanCod) ? cleanCod : "") || match?.codigoBarra || null;
     const catalogAlkostoPlu = match?.codigosCadena?.find((c) => /^100\d{3}$/.test(normalizarCodigoProducto(c))) || null;
     const resolvedCodigoAlkosto = cleanCodAlkostoInput || (/^100\d{3}$/.test(cleanCod) ? cleanCod : "") || catalogAlkostoPlu || null;
     const finalBarcode = resolvedEan || void 0;
-    const finalDesc = (officialMatchIfAlpha ? officialMatchIfAlpha.descripcion : "") || cleanDesc || (match ? match.producto : "");
+    const hasExactCatalogDesc = Boolean(match || strictMatch.matchExacto !== false);
+    const finalDesc = hasExactCatalogDesc ? (isForbiddenAlphaCode && strictMatch.matchExacto !== false ? strictMatch.descripcion : "") || cleanDesc || (match ? match.producto : "") || (strictMatch.matchExacto !== false ? strictMatch.descripcion : "") : (rawDesc ? rawDesc.replace(/\s+/g, " ").replace(/\s*\/\s*/g, "/").trim().toUpperCase() : "") || cleanDesc;
     if (!finalCodigo) {
       issues.push({
         field: `items[${idx}].codigo`,
@@ -2956,7 +3305,8 @@ function validateAndNormalizeAlkostoOC(rawInput, options = {}) {
   const mergedByCodeMap = /* @__PURE__ */ new Map();
   for (const item of rawNormalizedItems) {
     const hasStores = item.tiendas && Object.keys(item.tiendas).length > 0;
-    const key = hasStores ? item.codigo : `${item.codigo}#${item.renglon}`;
+    const isPendingCode = item.codigo === "PENDIENTE" || item.codigo === "S/C";
+    const key = hasStores ? isPendingCode ? `${item.codigo}#${item.codigoBarra || item.descripcion || item.renglon}` : item.codigo : `${item.codigo}#${item.renglon}`;
     const existing = mergedByCodeMap.get(key);
     if (existing && hasStores) {
       const mergedTiendas = { ...existing.tiendas || {} };
@@ -3246,6 +3596,8 @@ function normalizeOrderForCodizulca(rawData) {
       }
     }
     const codeKey = safeStr(it.codigo || it.codigoPrincipal || it.codigoProducto || it.skuCodizulca || it.codigoBarra, `ITEM_${i + 1}`);
+    const isPendingCodeKey = codeKey === "PENDIENTE" || codeKey === "S/C";
+    const mergeMapKey = isPendingCodeKey ? `${codeKey}#${safeStr(it.codigoBarra || it.codigoEan || it.descripcion, String(i + 1))}` : codeKey;
     const costoUnit = safeNum(it.valorUnitarioOC ?? it.costoUnitario ?? it.precioUnitario, 0);
     const costoBruto = safeNum(it.costoBruto, costoUnit);
     const sumAk = Object.entries(cleanStores).filter(([tk]) => tk.startsWith("AK")).reduce((acc, [, v]) => acc + v, 0);
@@ -3253,7 +3605,7 @@ function normalizeOrderForCodizulca(rawData) {
     const fallbackCant = safeNum(it.totalCantidad ?? it.cantidadTotal, 0);
     const effectiveCant = sumAk > 0 ? sumAk : sumAll > 0 ? sumAll : fallbackCant;
     const effectiveTotal = Number((effectiveCant * costoUnit).toFixed(2));
-    const existing = mergedItemsMap.get(codeKey);
+    const existing = mergedItemsMap.get(mergeMapKey);
     if (existing && Object.keys(cleanStores).length > 0) {
       const mergedTiendas = { ...existing.tiendas || {} };
       for (const [tk, tv] of Object.entries(cleanStores)) {
@@ -3274,7 +3626,7 @@ function normalizeOrderForCodizulca(rawData) {
       existing.totalRenglon = Number((primaryCant * existing.costoUnitario).toFixed(2));
       existing.subtotal = Number((primaryCant * existing.costoUnitario).toFixed(2));
     } else {
-      mergedItemsMap.set(codeKey, {
+      mergedItemsMap.set(mergeMapKey, {
         renglon: mergedItemsMap.size + 1,
         codigo: codeKey,
         codigoPrincipal: safeStr(it.codigoPrincipal, codeKey),
@@ -3607,17 +3959,17 @@ var init_alkostoOcParser = __esm({
             properties: {
               codigo: {
                 type: "STRING",
-                description: 'C\xF3digo num\xE9rico oficial de Codizulca del 9 al 1592 (PROHIBIDO inventar siglas alfab\xE9ticas como LPV; ej. "1536", "1556", "1574", "1579").'
+                description: 'C\xF3digo num\xE9rico oficial de Codizulca del 9 al 1662 cuando hay coincidencia exacta de EAN o sustantivo principal (ej. "1642" para EAN 7590377000411 ARVEJAS VENCAMPO, "1644" para EAN 7590377000459 CARAOTAS NEGRAS VENCAMPO, "1574" para EAN 7590377000503 LECHE VENCAMPO 10X400GR), o "PENDIENTE" si el producto no tiene coincidencia exacta de sustantivo principal en el cat\xE1logo. PROHIBIDO inventar siglas como LPV o asignar 1555 por coincidencia parcial de marca/gramaje.'
               },
               codigoProducto: {
                 type: "STRING",
                 nullable: true,
-                description: "C\xF3digo principal o SKU del producto homologado a Codizulca."
+                description: 'C\xF3digo principal o SKU del producto homologado a Codizulca (o "PENDIENTE" si requiere asignaci\xF3n manual).'
               },
               ean: {
                 type: "STRING",
                 nullable: true,
-                description: 'C\xF3digo de barras EAN-13 impreso en la OC si est\xE1 presente (ej. "7590377000503").'
+                description: 'C\xF3digo de barras EAN-13 impreso en la OC si est\xE1 presente (ej. "7590377000411", "7590377000459").'
               },
               codigoInternoAlkosto: {
                 type: "STRING",
@@ -3626,7 +3978,7 @@ var init_alkostoOcParser = __esm({
               },
               descripcion: {
                 type: "STRING",
-                description: 'Descripci\xF3n oficial exacta del Cat\xE1logo de Codizulca prestando m\xE1xima atenci\xF3n al gramaje (ej. "LECHE EN POLVO VENCAMPO 10X1KG", "LECHE EN POLVO VENCAMPO 10X400GR", "LECHE EN POLVO VENCAMPO 10X900GR").'
+                description: 'Descripci\xF3n del producto: si tiene coincidencia exacta de EAN o sustantivo principal en el cat\xE1logo de Codizulca, usa su descripci\xF3n oficial (ej. "ARVEJAS VENCAMPO 25 UND X 400GR", "CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR"); si NO tiene coincidencia exacta en el cat\xE1logo, conserva intacta la descripci\xF3n original del PDF (ej. "ARVEJAS VERDES VENCAMPO 400GR/1.00").'
               },
               unidad: {
                 type: "STRING",
@@ -3778,6 +4130,7 @@ var import_zlib = __toESM(require("zlib"), 1);
 var import_vite = require("vite");
 var import_dotenv = __toESM(require("dotenv"), 1);
 init_alkostoOcParser();
+init_productosCodizulca();
 
 // src/services/venezuelanReceiptAuditor.ts
 var import_genai = require("@google/genai");
@@ -7880,9 +8233,11 @@ async function startServer() {
       const isForbiddenAlpha = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(rawCod);
       const desc = limpiarDescripcionAlkosto((rawDesc || "PRODUCTO").toUpperCase());
       const productoOficial = matchProductoCodizulca(isForbiddenAlpha ? "" : rawCod, desc);
-      const resolvedProd = resolverProductoBackend(isForbiddenAlpha ? "" : rawCod, desc);
-      const cleanCod = (productoOficial.codigo !== "S/C" ? productoOficial.codigo : "") || (resolvedProd && !/^(LPV|UTH|UHT|QS|JUGOS)$/i.test(resolvedProd.sku) ? resolvedProd.sku : "") || (!isForbiddenAlpha ? rawCod : "") || "S/C";
-      const cleanDesc = (productoOficial.codigo !== "S/C" ? productoOficial.descripcion : "") || (resolvedProd ? resolvedProd.nombre : "") || desc;
+      const hasExactOficial = productoOficial.matchExacto !== false && productoOficial.codigo !== "S/C" && productoOficial.codigo !== "PENDIENTE";
+      const resolvedProd = hasExactOficial ? null : resolverProductoBackend(isForbiddenAlpha ? "" : rawCod, desc);
+      const hasExactCatalogMatch = Boolean(hasExactOficial || resolvedProd);
+      const cleanCod = (hasExactOficial ? productoOficial.codigo : "") || (resolvedProd && !/^(LPV|UTH|UHT|QS|JUGOS)$/i.test(resolvedProd.sku) ? resolvedProd.sku : "") || (!isForbiddenAlpha && rawCod && rawCod !== "S/C" && !(!hasExactCatalogMatch && /^\d{8,14}$/.test(rawCod)) ? rawCod : "") || "PENDIENTE";
+      const cleanDesc = hasExactCatalogMatch ? (hasExactOficial ? productoOficial.descripcion : "") || (resolvedProd ? resolvedProd.nombre : "") || desc : String(rawDesc || desc || "PRODUCTO").trim().toUpperCase();
       const cant = toSafeNumber(
         it.cantidad ?? it.cantidad_solicitada ?? it.cantidadCajas ?? it.cantSolicitada ?? it.bultos ?? it.cajas ?? it.unidades ?? it.kilos
       );
@@ -7989,6 +8344,8 @@ async function startServer() {
       ...sucursalTagClean ? { sucursal_tag: sucursalTagClean } : {},
       cadena: cadenaNorm,
       numero_oc: numeroOcClean,
+      orden_compra: numeroOcClean,
+      orden_de_compra: numeroOcClean,
       direccion_despacho: direccionDespachoClean,
       observacion_formateada: observacionFormateada,
       vendedor: vendedorHomologado,
@@ -8123,9 +8480,9 @@ async function startServer() {
       }
     }
     if (!confirmedId) {
-      confirmedId = orderId;
-      console.log(
-        `[ENVIO_FDV -> SALA_ESPERA_DIRECTA] Confirmado en memoria/storage Pedido N\xB0 ${correlativo} (ID: ${confirmedId} | Vendedor: ${vendedorHomologado} | ${sucursalClienteClean} | OC: ${numeroOcClean} | Renglones: ${gestorArticles.length} | Monto: $${totalMonto.toFixed(2)})`
+      throw lastExternalErr || new AlkostoHttpError(
+        502,
+        `No se pudo confirmar la inserci\xF3n del pedido N\xB0 ${correlativo} (${sucursalClienteClean}) en Supabase Sala de Espera.`
       );
     }
     try {
@@ -8533,6 +8890,8 @@ async function startServer() {
     { sku: "1556", nombre: "LECHE EN POLVO VENCAMPO 10X900GR", barcode: "7590377000510", chainCodes: ["1556", "7590377000510"], unid: "CJ" },
     { sku: "1574", nombre: "LECHE EN POLVO VENCAMPO 10X400GR", barcode: "7590377000503", chainCodes: ["1574", "7590377000503"], unid: "CJ" },
     { sku: "1579", nombre: "LECHE EN POLVO VENCAMPO 10X500GR", barcode: "", chainCodes: ["1579"], unid: "CJ" },
+    { sku: "1642", nombre: "ARVEJAS VENCAMPO 25 UND X 400GR", barcode: "7590377000411", chainCodes: ["1642", "001642", "7590377000411"], unid: "CJ" },
+    { sku: "1644", nombre: "CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR", barcode: "7590377000459", chainCodes: ["1644", "001644", "7590377000459"], unid: "CJ" },
     { sku: "1572", nombre: "CAJAS DE PIZZA 1X100", barcode: "", chainCodes: ["1572"], unid: "BLT" },
     ...PRODUCTOS_CODIZULCA.map((p) => ({
       sku: p.codigo,
@@ -8548,7 +8907,7 @@ async function startServer() {
     const cleanCod = isForbiddenAlpha ? "" : rawCod.replace(/[\s\-_.]/g, "").toUpperCase();
     const cleanDesc = String(descInput || "").trim().toUpperCase();
     const prodOficial = matchProductoCodizulca(cleanCod, cleanDesc);
-    if (prodOficial.codigo !== "S/C") {
+    if (prodOficial.matchExacto !== false && prodOficial.codigo !== "S/C" && prodOficial.codigo !== "PENDIENTE") {
       const dictEntry = MASTER_PRODUCTOS_DICT.find((p) => p.sku === prodOficial.codigo);
       return {
         sku: prodOficial.codigo,
@@ -8559,28 +8918,40 @@ async function startServer() {
       };
     }
     if (cleanCod) {
-      const match = MASTER_PRODUCTOS_DICT.find((p) => p.sku.toUpperCase() === cleanCod);
+      const match = MASTER_PRODUCTOS_DICT.find(
+        (p) => p.barcode && p.barcode.replace(/[\s\-_.]/g, "") === cleanCod && (!cleanDesc || !hasPrimaryNounConflict(p.nombre, cleanDesc))
+      );
       if (match) return match;
     }
-    if (cleanCod) {
-      const match = MASTER_PRODUCTOS_DICT.find((p) => p.barcode && p.barcode.replace(/[\s\-_.]/g, "") === cleanCod);
+    if (cleanCod && cleanCod !== "PENDIENTE" && cleanCod !== "S/C") {
+      const match = MASTER_PRODUCTOS_DICT.find(
+        (p) => p.sku.toUpperCase() === cleanCod && (!cleanDesc || !hasPrimaryNounConflict(p.nombre, cleanDesc))
+      );
       if (match) return match;
     }
-    if (cleanCod) {
-      const match = MASTER_PRODUCTOS_DICT.find((p) => p.chainCodes && p.chainCodes.some((c) => c.toUpperCase() === cleanCod));
+    if (cleanCod && cleanCod !== "PENDIENTE" && cleanCod !== "S/C") {
+      const match = MASTER_PRODUCTOS_DICT.find(
+        (p) => p.chainCodes && p.chainCodes.some((c) => c.toUpperCase() === cleanCod) && (!cleanDesc || !hasPrimaryNounConflict(p.nombre, cleanDesc))
+      );
       if (match) return match;
+    }
+    if (cleanCod.length >= 4 && /^\d+$/.test(cleanCod)) {
+      return null;
     }
     if (cleanDesc) {
       const match = MASTER_PRODUCTOS_DICT.find((p) => {
+        if (hasPrimaryNounConflict(p.nombre, cleanDesc)) return false;
         const pNorm = p.nombre.toUpperCase();
         return cleanDesc.includes(pNorm) || pNorm.includes(cleanDesc);
       });
       if (match) return match;
-      const tokens = cleanDesc.split(/\s+/).filter((t) => t.length > 2 && !["POR", "CON", "DEL", "LOS", "LAS", "PARA"].includes(t));
+      const tokens = cleanDesc.split(/\s+/).filter((t) => t.length > 2 && !["POR", "CON", "DEL", "LOS", "LAS", "PARA"].includes(t) && !isBrandOrPresentationToken(t));
       if (tokens.length > 0) {
         const tokenMatch = MASTER_PRODUCTOS_DICT.find((p) => {
+          if (hasPrimaryNounConflict(p.nombre, cleanDesc)) return false;
           const pNorm = p.nombre.toUpperCase();
-          return tokens.filter((t) => pNorm.includes(t)).length >= Math.min(2, tokens.length);
+          const required = tokens.length <= 2 ? tokens.length : Math.max(2, Math.ceil(tokens.length * 0.75));
+          return tokens.filter((t) => pNorm.includes(t)).length >= required;
         });
         if (tokenMatch) return tokenMatch;
       }

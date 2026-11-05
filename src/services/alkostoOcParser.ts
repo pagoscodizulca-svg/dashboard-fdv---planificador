@@ -145,10 +145,13 @@ Eres un motor experto en extracción de datos contables y comerciales (OCR + Com
 TAREA PRINCIPAL:
 Analiza minuciosamente la imagen, captura o documento PDF adjunto correspondiente a una Orden de Compra de ALKOSTO / FAMILIA CENTER en TODAS sus páginas. Extrae la totalidad de los datos de cabecera, todos los renglones de productos, códigos, el desglose de cantidades por tienda/sucursal y los montos financieros, sin omitir ni resumir ningún ítem.
 
-REGLA OBLIGATORIA DE CATÁLOGO OFICIAL DE CODIZULCA (158 PRODUCTOS):
-"PROHIBIDO inventar códigos alfabéticos o siglas (como 'LPV'). Debes buscar cada producto de la Orden de Compra dentro del Catálogo Oficial de Codizulca adjunto y asignar su \`codigo\` numérico exacto (del 9 al 1592) y su \`descripcion\` oficial exacta, prestando máxima atención a la presentación/gramaje (ej. diferenciar entre 10X1KG [cód 1536], 10X900GR [cód 1556], 10X400GR [cód 1574] y 10X500GR [cód 1579])."
+REGLA OBLIGATORIA DE CATÁLOGO OFICIAL DE CODIZULCA Y PROHIBICIÓN DE ALUCINACIÓN DE SKU:
+- PROHIBIDO inventar códigos alfabéticos o siglas (como 'LPV').
+- PROHIBIDO asignar un SKU por coincidencia parcial de marca + gramaje (ej. NUNCA asignes el código 1555 "LECHE EN POLVO VENCAMPO 20X400GR" a "ARVEJAS VERDES VENCAMPO 400GR" ni a "CARAOTAS NEGRAS VENCAMPO 400GR" solo porque comparten "VENCAMPO" y "400GR").
+- Prioriza el match por: 1) Código EAN/Barra exacto (7590377000411 -> 1642, 7590377000459 -> 1644), 2) Coincidencia OBLIGATORIA del sustantivo principal del producto (ARVEJAS, CARAOTAS, LECHE, MORTADELA, QUESO, etc.) + gramaje.
+- Si un producto del PDF no tiene coincidencia exacta de sustantivo principal o EAN en el catálogo, conserva la descripción original del PDF (ej. "ARVEJAS VERDES VENCAMPO 400GR/1.00") y el código EAN o marca el SKU como "PENDIENTE" en lugar de sobreescribirlo con otro producto.
 
-CATÁLOGO OFICIAL DE CODIZULCA (158 PRODUCTOS: codigo - descripcion):
+CATÁLOGO OFICIAL DE CODIZULCA (codigo - descripcion):
 ${catalogoOficial158Str}
 
 17 TIENDAS VÁLIDAS SINCRONIZADAS EN BASE DE DATOS (ÚNICAS PERMITIDAS):
@@ -166,6 +169,8 @@ REGLAS ESTRICTAS DE EXTRACCIÓN Y NORMALIZACIÓN:
 3. CONSOLIDACIÓN POR CÓDIGO DE PRODUCTO SIN DUPLICADOS Y HOMOLOGACIÓN:
    - Si el mismo código de producto aparece en la página de ALKOSTO (AK01..AK10) y en la página de FAMILIA CENTER (FC01..FC07), consolida sus cantidades por tienda en un único renglón por producto dentro de \`tiendas\` y en \`distribucion_tiendas\` / \`desglosePorTienda\`, evitando claves o filas duplicadas.
    - Homologación directa de EAN/PLU frecuentes en Órdenes de Compra de Alkosto hacia el Catálogo Oficial de Codizulca:
+     * 7590377000411 (ARVEJAS VERDES VENCAMPO 400GR) -> codigo: "1642", descripcion: "ARVEJAS VENCAMPO 25 UND X 400GR", unidad: "BULTO"
+     * 7590377000459 (CARAOTAS NEGRAS VENCAMPO 400GR) -> codigo: "1644", descripcion: "CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR", unidad: "BULTO"
      * 7590377000503 (LECHE EN POLVO COMPLETA VENCAMPO 400GR) -> codigo: "1574", descripcion: "LECHE EN POLVO VENCAMPO 10X400GR", unidad: "BULTO"
      * 7590377000510 (LECHE EN POLVO COMPLETA VENCAMPO 900GR) -> codigo: "1556", descripcion: "LECHE EN POLVO VENCAMPO 10X900GR", unidad: "BULTO"
      * LECHE EN POLVO VENCAMPO 10X1KG -> codigo: "1536", descripcion: "LECHE EN POLVO VENCAMPO 10X1KG", unidad: "BULTO"
@@ -183,11 +188,12 @@ REGLAS ESTRICTAS DE EXTRACCIÓN Y NORMALIZACIÓN:
      * 100281 -> codigo: "1575", descripcion: "QUESO MOZZARELLA CORLASA 3.5KG X 4 UND", unidad: "KG"
      * 7591210000513 -> codigo: "1091", descripcion: "CREMA DE LECHE PURISIMA 6 X 500 GRS", unidad: "CJ"
      * 7591210000544 -> codigo: "1089", descripcion: "CREMA DE LECHE PURISIMA 12X250GRS", unidad: "CJ"
-   - Elimina siempre el sufijo de PVP sugerido tras la barra en la descripción (ej. quitar "/ 2.40", "/ 6.88").
-4. EXTRACCIÓN QUIRÚRGICA DE \`valorUnitarioOC\` Y FORMATO NUMÉRICO ESTÁNDAR (CRÍTICO):
+   - Elimina siempre el sufijo de PVP sugerido tras la barra en la descripción (ej. quitar "/ 2.40", "/ 6.88") cuando el producto sí tiene match exacto en el catálogo.
+4. EXTRACCIÓN QUIRÚRGICA DE \`valorUnitarioOC\` Y SANITIZACIÓN DE ARTEFACTOS OCR (\`15:00\` -> \`15.00\`):
    - Extrae con precisión quirúrgica el \`valorUnitarioOC\` (Precio/Valor Unitario impreso en la Orden de Compra por cada unidad de empaque solicitada, sin confundirlo con el subtotal ni con impuestos).
    - El sistema NUNCA debe inventar precios ni alterar el Valor Unitario que viene en la Orden de Compra. Calcula \`subtotal\` = \`cantidad * valorUnitarioOC\`.
-   - Normaliza todos los números eliminando comas de miles ("9,600.00" -> 9600, "46,150.00" -> 46150) y reduciendo costos de 4 decimales ("40.0000" -> 40, "90.0000" -> 90).
+   - Si en alguna columna de tienda el PDF/OCR muestra dos puntos en lugar de punto decimal (ej. "15:00" en AK03 o "0:00" en AK08), corrígelo a "15.00" y "0.00".
+   - Normaliza todos los números eliminando comas de miles ("9,600.00" -> 9600, "1,900.00" -> 1900) y reduciendo costos de 4 decimales ("20.0000" -> 20, "40.0000" -> 40).
    - Usa punto \`.\` exclusivamente como separador decimal y elimina símbolos de moneda \`$\`, \`Bs\`, \`%\`.
 5. CABECERA COMPLETA Y VALIDACIÓN ARITMÉTICA:
    - Extrae la cabecera completa: \`numero_orden\`, \`fecha_emision\`, \`fecha_entrega\`, \`dias_credito\`, \`tasa_cambio\` y \`observaciones\`.
@@ -324,17 +330,17 @@ export const ALKOSTO_OC_RESPONSE_SCHEMA = {
         properties: {
           codigo: {
             type: 'STRING',
-            description: 'Código numérico oficial de Codizulca del 9 al 1592 (PROHIBIDO inventar siglas alfabéticas como LPV; ej. "1536", "1556", "1574", "1579").'
+            description: 'Código numérico oficial de Codizulca del 9 al 1662 cuando hay coincidencia exacta de EAN o sustantivo principal (ej. "1642" para EAN 7590377000411 ARVEJAS VENCAMPO, "1644" para EAN 7590377000459 CARAOTAS NEGRAS VENCAMPO, "1574" para EAN 7590377000503 LECHE VENCAMPO 10X400GR), o "PENDIENTE" si el producto no tiene coincidencia exacta de sustantivo principal en el catálogo. PROHIBIDO inventar siglas como LPV o asignar 1555 por coincidencia parcial de marca/gramaje.'
           },
           codigoProducto: {
             type: 'STRING',
             nullable: true,
-            description: 'Código principal o SKU del producto homologado a Codizulca.'
+            description: 'Código principal o SKU del producto homologado a Codizulca (o "PENDIENTE" si requiere asignación manual).'
           },
           ean: {
             type: 'STRING',
             nullable: true,
-            description: 'Código de barras EAN-13 impreso en la OC si está presente (ej. "7590377000503").'
+            description: 'Código de barras EAN-13 impreso en la OC si está presente (ej. "7590377000411", "7590377000459").'
           },
           codigoInternoAlkosto: {
             type: 'STRING',
@@ -343,7 +349,7 @@ export const ALKOSTO_OC_RESPONSE_SCHEMA = {
           },
           descripcion: {
             type: 'STRING',
-            description: 'Descripción oficial exacta del Catálogo de Codizulca prestando máxima atención al gramaje (ej. "LECHE EN POLVO VENCAMPO 10X1KG", "LECHE EN POLVO VENCAMPO 10X400GR", "LECHE EN POLVO VENCAMPO 10X900GR").'
+            description: 'Descripción del producto: si tiene coincidencia exacta de EAN o sustantivo principal en el catálogo de Codizulca, usa su descripción oficial (ej. "ARVEJAS VENCAMPO 25 UND X 400GR", "CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR"); si NO tiene coincidencia exacta en el catálogo, conserva intacta la descripción original del PDF (ej. "ARVEJAS VERDES VENCAMPO 400GR/1.00").'
           },
           unidad: {
             type: 'STRING',
@@ -861,7 +867,10 @@ export function parseNumeroEstricto(val: unknown, defaultVal = 0): number {
     return Number.isFinite(val) ? val : defaultVal;
   }
   if (val === null || val === undefined) return defaultVal;
-  const raw = String(val).trim();
+  const raw = String(val)
+    .trim()
+    // Sanitizar dos puntos como punto decimal en columnas de tiendas de Alkosto (ej. "15:00" -> "15.00", "0:00" -> "0.00")
+    .replace(/(\d+):(\d{2})\b/g, '$1.$2');
   if (!raw) return defaultVal;
 
   const cleaned = raw.replace(/(?:Bs\.?|USD|US\$|\$|%|€|\s)+/gi, '');
@@ -1256,14 +1265,57 @@ export function mapNumericCellsToRow(
 }
 
 /**
+ * Sanitiza el texto crudo extraído del PDF/OCR de Alkosto:
+ * 1. Reemplaza patrones `(\d+):(\d{2})` y `(\d+);(\d{2})` por `$1.$2` (corrigiendo `15:00` -> `15.00` y `0:00` -> `0.00` en columnas de tiendas).
+ * 2. Normaliza saltos de línea huérfanos cuando el código EAN queda aislado en una línea o la descripción se parte antes de los valores numéricos.
+ */
+export function sanitizeAlkostoRawPdfText(rawText: string): string {
+  if (!rawText) return '';
+  const colonFixed = rawText
+    .replace(/(?<![:\d])(\d+)[;:](\d{2})(?![:\d]|\s*(?:A\.?\s*M\.?|P\.?\s*M\.?)\b)/gi, '$1.$2');
+  const rawLines = colonFixed.split(/\r?\n/);
+  const normalizedLines: string[] = [];
+
+  for (let i = 0; i < rawLines.length; i++) {
+    const curr = rawLines[i].trim();
+    if (!curr) continue;
+    const next = (rawLines[i + 1] || '').trim();
+    // 1. Si una línea contiene únicamente el código EAN/SKU (4 a 14 dígitos) y la siguiente inicia con la descripción del producto:
+    if (/^\d{4,14}$/.test(curr) && next && /^[A-ZÁÉÍÓÚÑ]/i.test(next) && !/^SubTotal/i.test(next)) {
+      normalizedLines.push(`${curr} ${next}`);
+      i++;
+      continue;
+    }
+    // 2. Si una línea inicia con EAN + descripción sin bloque numérico suficiente y la siguiente línea es un sufijo huérfano ("/ 1.00" o continuación corta + números):
+    if (
+      /^\d{4,14}\s+[A-ZÁÉÍÓÚÑ]/i.test(curr) &&
+      (curr.match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || []).length < 8 &&
+      next &&
+      !/^\d{4,14}\s+[A-ZÁÉÍÓÚÑ]/i.test(next) &&
+      !/^SubTotal/i.test(next) &&
+      (/^\/?\s*\d+(?:\.\d+)?\b/.test(next) || /^[A-ZÁÉÍÓÚÑ0-9\s.,/-]+?\b(?:GR|GRS|KG|KGS|LT|LTS|ML|UND|UNI|PZA)\s*\/\s*\d+(?:\.\d+)?/i.test(next))
+    ) {
+      normalizedLines.push(`${curr} ${next}`);
+      i++;
+      continue;
+    }
+    normalizedLines.push(curr);
+  }
+
+  return normalizedLines.join('\n');
+}
+
+/**
  * Parsea una o múltiples páginas de texto extraído de una Orden de Compra de Alkosto / Familia Center.
  * Soporta tanto texto ordenado visualmente como texto crudo del stream del PDF.
  */
 export function parseAlkostoRawText(rawText: string): ParsedOrdenCompraAlkosto {
   assertValidInputPayload(rawText, 'parseAlkostoRawText');
 
+  const sanitizedRawText = sanitizeAlkostoRawPdfText(rawText);
+
   // Dividir por páginas si el documento tiene varias cabeceras ("Pág.: 0001 de 0002" o cambios de Razón Social)
-  const pageChunks = splitTextIntoPages(rawText);
+  const pageChunks = splitTextIntoPages(sanitizedRawText);
 
   let ordenNro = '';
   let sede = 'AKOP';
@@ -1394,23 +1446,62 @@ export function parseAlkostoRawText(rawText: string): ParsedOrdenCompraAlkosto {
         continue;
       }
 
-      // Buscar la línea siguiente que contiene los valores numéricos del renglón (soportando salto de línea en la descripción)
-      let nextLineIdx = i + 1;
-      let nextLine = lines[nextLineIdx] || '';
-      let numTokens = nextLine.match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || [];
-      if (
-        numTokens.length < 8 &&
-        nextLine &&
-        !/^(\d{4,14})\s+[A-ZÁÉÍÓÚÑ]/i.test(nextLine) &&
-        !/^SubTotal/i.test(nextLine) &&
-        lines[i + 2]
-      ) {
-        const secondNextTokens = lines[i + 2].match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || [];
-        if (secondNextTokens.length >= 8) {
-          rawDescPart = `${rawDescPart} ${nextLine}`.trim();
-          nextLineIdx = i + 2;
-          nextLine = lines[nextLineIdx];
-          numTokens = secondNextTokens;
+      // Buscar los valores numéricos del renglón soportando:
+      // a) Números en la misma línea tras la descripción,
+      // b) Saltos de línea huérfanos en la descripción (ej. "/ 1.00" en línea separada),
+      // c) Secuencia de 21 números partida en 2 o más líneas consecutivas.
+      let nextLineIdx = i;
+      let numTokens: string[] = [];
+
+      const inlineNumericTail = rawDescPart.match(/^([A-ZÁÉÍÓÚÑ0-9\s.,/()-]+?(?:\s*\/\s*\d+(?:\.\d+)?|\b(?:GR|GRS|KG|KGS|LT|LTS|ML|UND|UNI|PZA)|[A-ZÁÉÍÓÚÑ)]))\s+((?:-?\d+(?:,\d{3})*(?:\.\d+)?\s*){8,})$/i);
+      if (inlineNumericTail) {
+        rawDescPart = inlineNumericTail[1].trim();
+        numTokens = inlineNumericTail[2].match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || [];
+      }
+
+      const expectedMinCols = pageChain === 'ALKOSTO' ? 21 : 16;
+      if (numTokens.length < expectedMinCols) {
+        let cursor = i + 1;
+        // 1. Si aún no extrajimos tokens en la misma línea, consumir líneas huérfanas de continuación de descripción (ej. "/ 1.00" o palabras del producto)
+        if (numTokens.length === 0) {
+          while (cursor < lines.length) {
+            const candidateLine = lines[cursor];
+            if (!candidateLine || /^(\d{4,14})\s+[A-ZÁÉÍÓÚÑ]/i.test(candidateLine) || /^SubTotal/i.test(candidateLine)) {
+              break;
+            }
+            const inlineCandidate = candidateLine.match(/^([A-ZÁÉÍÓÚÑ0-9\s.,/()-]+?(?:\s*\/\s*\d+(?:\.\d+)?|\b(?:GR|GRS|KG|KGS|LT|LTS|ML|UND|UNI|PZA)|[A-ZÁÉÍÓÚÑ)]))\s+((?:-?\d+(?:,\d{3})*(?:\.\d+)?\s*){8,})$/i);
+            if (inlineCandidate) {
+              rawDescPart = `${rawDescPart} ${inlineCandidate[1].trim()}`.trim();
+              numTokens.push(...(inlineCandidate[2].match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || []));
+              nextLineIdx = cursor;
+              cursor++;
+              break;
+            }
+            const tokensInLine = candidateLine.match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || [];
+            const hasAlphaWords = /[A-ZÁÉÍÓÚÑ]{2,}/i.test(candidateLine);
+            if (tokensInLine.length < 6 && (hasAlphaWords || /^\/\s*\d+(?:\.\d+)?$/.test(candidateLine))) {
+              rawDescPart = `${rawDescPart} ${candidateLine}`.trim();
+              nextLineIdx = cursor;
+              cursor++;
+            } else {
+              break;
+            }
+          }
+        }
+
+        // 2. Acumular líneas numéricas consecutivas hasta completar las columnas de la fila (16..21 números)
+        while (cursor < lines.length && numTokens.length < expectedMinCols) {
+          const candidateLine = lines[cursor];
+          if (!candidateLine || /^(\d{4,14})\s+[A-ZÁÉÍÓÚÑ]/i.test(candidateLine) || /^SubTotal/i.test(candidateLine)) {
+            break;
+          }
+          const tokensInLine = candidateLine.match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || [];
+          if (tokensInLine.length === 0) break;
+          // Si ya tenemos suficientes tokens y la siguiente línea tiene texto alfabético, parar
+          if (numTokens.length >= 8 && /[A-ZÁÉÍÓÚÑ]{3,}/i.test(candidateLine)) break;
+          numTokens.push(...tokensInLine);
+          nextLineIdx = cursor;
+          cursor++;
         }
       }
       if (numTokens.length < 8) continue;
@@ -1421,11 +1512,22 @@ export function parseAlkostoRawText(rawText: string): ParsedOrdenCompraAlkosto {
 
       const cleanDesc = limpiarDescripcionAlkosto(rawDescPart);
       const catalogMatch = resolverProductoPorCodigoODescripcion(rawCode, cleanDesc);
+      const strictMatch = matchProductoCodizulca(rawCode, rawDescPart || cleanDesc);
+      const hasExactMatch = Boolean(catalogMatch || strictMatch.matchExacto !== false);
 
-      const finalSku = catalogMatch ? catalogMatch.sku : rawCode;
-      const finalBarcode = catalogMatch?.codigoBarra || (/^\d{12,14}$/.test(rawCode) ? rawCode : undefined);
+      const finalSku = catalogMatch
+        ? catalogMatch.sku
+        : strictMatch.matchExacto !== false
+          ? strictMatch.codigo
+          : strictMatch.codigo || 'PENDIENTE';
+      const finalBarcode = catalogMatch?.codigoBarra || (/^\d{8,14}$/.test(rawCode) ? rawCode : undefined);
       const finalCodigoInternoAlkosto = /^100\d{3}$/.test(rawCode) ? rawCode : null;
-      const finalUnid = normalizarUnidadMedidaAlkosto(undefined, cleanDesc, mapped.emp, catalogMatch?.unidadSugerida);
+      const finalDescripcion = catalogMatch
+        ? catalogMatch.producto
+        : strictMatch.matchExacto !== false
+          ? strictMatch.descripcion
+          : rawDescPart.replace(/\s+/g, ' ').replace(/\s*\/\s*/g, '/').trim().toUpperCase();
+      const finalUnid = normalizarUnidadMedidaAlkosto(undefined, hasExactMatch ? finalDescripcion : cleanDesc, mapped.emp, catalogMatch?.unidadSugerida);
 
       const existing = itemsByCode.get(rawCode);
       if (existing) {
@@ -1449,7 +1551,7 @@ export function parseAlkostoRawText(rawText: string): ParsedOrdenCompraAlkosto {
           codigoBarra: finalBarcode,
           codigoEan: finalBarcode || null,
           codigoInternoAlkosto: finalCodigoInternoAlkosto,
-          descripcion: cleanDesc,
+          descripcion: finalDescripcion,
           iva: mapped.iva,
           emp: mapped.emp,
           unid: finalUnid,
@@ -1545,26 +1647,28 @@ function splitTextIntoPages(rawText: string): string[] {
 export function parseAlkostoFlexibleOcrText(rawText: string): ParsedOrdenCompraAlkosto | null {
   if (!rawText || typeof rawText !== 'string' || rawText.trim().length < 20) return null;
 
+  const sanitizedText = sanitizeAlkostoRawPdfText(rawText);
+
   try {
-    return parseAlkostoRawText(rawText);
+    return parseAlkostoRawText(sanitizedText);
   } catch {
-    // Continuar con extracción heurística de renglones
+    // Continuar con extracción heurística de renglones sobre texto sanitizado
   }
 
-  const upper = rawText.toUpperCase();
+  const upper = sanitizedText.toUpperCase();
   const isFamilia = upper.includes('FAMILIA CENTER') || /\bFC0[1-7]\b/.test(upper);
   const clienteCadena = isFamilia ? 'FAMILIA_CENTER' : 'ALKOSTO';
 
   const ocMatch =
-    rawText.match(/Orden\s*(?:de\s*Compra|Nro\.?)?\s*:?\s*#?\s*(\d{4,12})/i) ||
-    rawText.match(/\b(0000\d{5,8})\b/);
+    sanitizedText.match(/Orden\s*(?:de\s*Compra|Nro\.?)?\s*:?\s*#?\s*(\d{4,12})/i) ||
+    sanitizedText.match(/\b(0000\d{5,8})\b/);
   const ordenNro = ocMatch ? ocMatch[1].trim() : 'S/N';
 
-  const datesFound = rawText.match(/\b(\d{2}[/-]\d{2}[/-]\d{4})\b/g) || [];
+  const datesFound = sanitizedText.match(/\b(\d{2}[/-]\d{2}[/-]\d{4})\b/g) || [];
   const fechaEmision = datesFound[0] ? normalizarFechaAlkosto(datesFound[0].replace(/-/g, '/')) : '';
   const fechaEntrega = datesFound[1] ? normalizarFechaAlkosto(datesFound[1].replace(/-/g, '/')) : fechaEmision;
 
-  const lines = rawText
+  const lines = sanitizedText
     .split(/\r?\n/)
     .map(l => l.trim())
     .filter(l => l.length >= 6);
@@ -1584,12 +1688,13 @@ export function parseAlkostoFlexibleOcrText(rawText: string): ParsedOrdenCompraA
     if (rawCode === '409876136' || /^267319/.test(rawCode)) continue;
 
     const trailingNums = restText.match(/-?\d+(?:[.,]\d+)?/g) || [];
-    const descOnly = limpiarDescripcionAlkosto(
-      restText.replace(/(?:\s+-?\d+(?:[.,]\d+)?){2,}\s*$/, '').trim()
-    );
+    const rawDescOnly = restText.replace(/(?:\s+-?\d+(?:[.,]\d+)?){2,}\s*$/, '').trim();
+    const descOnly = limpiarDescripcionAlkosto(rawDescOnly);
 
     const catalogMatch = resolverProductoPorCodigoODescripcion(rawCode, descOnly);
-    if (!catalogMatch && trailingNums.length < 2 && cantHint <= 0) continue;
+    const strictMatch = matchProductoCodizulca(rawCode, rawDescOnly || descOnly);
+    const hasExactMatch = Boolean(catalogMatch || strictMatch.matchExacto !== false);
+    if (!hasExactMatch && trailingNums.length < 2 && cantHint <= 0) continue;
 
     let totalCantidad = cantHint;
     let costoUnitario = catalogMatch?.precioSugeridoUSD || 0;
@@ -1619,13 +1724,24 @@ export function parseAlkostoFlexibleOcrText(rawText: string): ParsedOrdenCompraA
       totalRenglon = Number((totalCantidad * costoUnitario).toFixed(2));
     }
 
+    const finalSku = catalogMatch
+      ? catalogMatch.sku
+      : strictMatch.matchExacto !== false
+        ? strictMatch.codigo
+        : strictMatch.codigo || 'PENDIENTE';
+    const finalDescripcion = catalogMatch
+      ? catalogMatch.producto
+      : strictMatch.matchExacto !== false
+        ? strictMatch.descripcion
+        : rawDescOnly.replace(/\s+/g, ' ').replace(/\s*\/\s*/g, '/').trim().toUpperCase();
+
     items.push({
       renglon: items.length + 1,
-      codigo: catalogMatch?.sku || rawCode,
-      skuCodizulca: catalogMatch?.sku || rawCode,
-      codigoBarra: catalogMatch?.codigoBarra || (/^\d{12,14}$/.test(rawCode) ? rawCode : undefined),
-      descripcion: catalogMatch?.producto || descOnly,
-      unid: normalizarUnidadMedidaAlkosto(unidHint, catalogMatch?.producto || descOnly, undefined, catalogMatch?.unidadSugerida),
+      codigo: finalSku,
+      skuCodizulca: finalSku,
+      codigoBarra: catalogMatch?.codigoBarra || (/^\d{8,14}$/.test(rawCode) ? rawCode : undefined),
+      descripcion: finalDescripcion,
+      unid: normalizarUnidadMedidaAlkosto(unidHint, hasExactMatch ? finalDescripcion : descOnly, undefined, catalogMatch?.unidadSugerida),
       totalCantidad,
       costoUnitario,
       totalRenglon
@@ -2251,27 +2367,24 @@ export function validateAndNormalizeAlkostoOC(
     }
 
     const isForbiddenAlphaCode = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(cleanCod);
-    const officialMatchIfAlpha = isForbiddenAlphaCode
-      ? matchProductoCodizulca(cleanCod, cleanDesc)
-      : undefined;
-
     const match =
-      (!isForbiddenAlphaCode ? resolverProductoPorCodigoODescripcion(cleanCod, cleanDesc) : undefined) ||
       (cleanCodEanInput ? resolverProductoPorCodigoODescripcion(cleanCodEanInput, cleanDesc) : undefined) ||
+      (!isForbiddenAlphaCode ? resolverProductoPorCodigoODescripcion(cleanCod, cleanDesc) : undefined) ||
       (cleanCodAlkostoInput ? resolverProductoPorCodigoODescripcion(cleanCodAlkostoInput, cleanDesc) : undefined);
 
+    const strictMatch = matchProductoCodizulca(cleanCodEanInput || cleanCod, rawDesc || cleanDesc);
+
     const finalSku =
-      (officialMatchIfAlpha ? officialMatchIfAlpha.codigo : '') ||
       (match ? match.sku : '') ||
-      (it.skuCodizulca ? normalizarCodigoProducto(it.skuCodizulca) : '') ||
-      normalizarCodigoProducto(rawCodPrincipal) ||
-      cleanCod;
-    const finalCodigo = finalSku || cleanCod || (match?.codigoBarra ?? '');
+      (strictMatch.matchExacto !== false ? strictMatch.codigo : '') ||
+      strictMatch.codigo ||
+      'PENDIENTE';
+    const finalCodigo = finalSku || 'PENDIENTE';
 
     // Separación clara de códigos (Regla 2): codigo_principal, codigo_ean y codigo_interno_alkosto
     const resolvedEan: string | null =
       cleanCodEanInput ||
-      (/^\d{12,14}$/.test(cleanCod) ? cleanCod : '') ||
+      (/^\d{8,14}$/.test(cleanCod) ? cleanCod : '') ||
       match?.codigoBarra ||
       null;
 
@@ -2283,10 +2396,14 @@ export function validateAndNormalizeAlkostoOC(
       null;
 
     const finalBarcode = resolvedEan || undefined;
-    const finalDesc =
-      (officialMatchIfAlpha ? officialMatchIfAlpha.descripcion : '') ||
-      cleanDesc ||
-      (match ? match.producto : '');
+    const hasExactCatalogDesc = Boolean(match || strictMatch.matchExacto !== false);
+    const finalDesc = hasExactCatalogDesc
+      ? (isForbiddenAlphaCode && strictMatch.matchExacto !== false ? strictMatch.descripcion : '') ||
+        cleanDesc ||
+        (match ? match.producto : '') ||
+        (strictMatch.matchExacto !== false ? strictMatch.descripcion : '')
+      : (rawDesc ? rawDesc.replace(/\s+/g, ' ').replace(/\s*\/\s*/g, '/').trim().toUpperCase() : '') ||
+        cleanDesc;
 
     if (!finalCodigo) {
       issues.push({
@@ -2704,7 +2821,10 @@ export function validateAndNormalizeAlkostoOC(
   const mergedByCodeMap = new Map<string, ParsedOrdenCompraAlkosto['items'][0]>();
   for (const item of rawNormalizedItems) {
     const hasStores = item.tiendas && Object.keys(item.tiendas).length > 0;
-    const key = hasStores ? item.codigo : `${item.codigo}#${item.renglon}`;
+    const isPendingCode = item.codigo === 'PENDIENTE' || item.codigo === 'S/C';
+    const key = hasStores
+      ? (isPendingCode ? `${item.codigo}#${item.codigoBarra || item.descripcion || item.renglon}` : item.codigo)
+      : `${item.codigo}#${item.renglon}`;
     const existing = mergedByCodeMap.get(key);
     if (existing && hasStores) {
       const mergedTiendas: Record<string, number> = { ...(existing.tiendas || {}) };
@@ -3105,6 +3225,10 @@ export function normalizeOrderForCodizulca(rawData: any): ParsedOrdenCompraAlkos
     }
 
     const codeKey = safeStr(it.codigo || it.codigoPrincipal || it.codigoProducto || it.skuCodizulca || it.codigoBarra, `ITEM_${i + 1}`);
+    const isPendingCodeKey = codeKey === 'PENDIENTE' || codeKey === 'S/C';
+    const mergeMapKey = isPendingCodeKey
+      ? `${codeKey}#${safeStr(it.codigoBarra || it.codigoEan || it.descripcion, String(i + 1))}`
+      : codeKey;
     const costoUnit = safeNum((it as any).valorUnitarioOC ?? it.costoUnitario ?? it.precioUnitario, 0);
     const costoBruto = safeNum(it.costoBruto, costoUnit);
     const sumAk = Object.entries(cleanStores)
@@ -3115,7 +3239,7 @@ export function normalizeOrderForCodizulca(rawData: any): ParsedOrdenCompraAlkos
     const effectiveCant = sumAk > 0 ? sumAk : sumAll > 0 ? sumAll : fallbackCant;
     const effectiveTotal = Number((effectiveCant * costoUnit).toFixed(2));
 
-    const existing = mergedItemsMap.get(codeKey);
+    const existing = mergedItemsMap.get(mergeMapKey);
     if (existing && Object.keys(cleanStores).length > 0) {
       const mergedTiendas: Record<string, number> = { ...(existing.tiendas || {}) };
       for (const [tk, tv] of Object.entries(cleanStores)) {
@@ -3138,7 +3262,7 @@ export function normalizeOrderForCodizulca(rawData: any): ParsedOrdenCompraAlkos
       existing.totalRenglon = Number((primaryCant * existing.costoUnitario).toFixed(2));
       existing.subtotal = Number((primaryCant * existing.costoUnitario).toFixed(2));
     } else {
-      mergedItemsMap.set(codeKey, {
+      mergedItemsMap.set(mergeMapKey, {
         renglon: mergedItemsMap.size + 1,
         codigo: codeKey,
         codigoPrincipal: safeStr(it.codigoPrincipal, codeKey),
@@ -3530,21 +3654,26 @@ export function construirPedidoNormalizadoSucursal(params: {
       isForbiddenAlpha ? '' : rawCandidateCode,
       f.descripcion || (match ? match.producto : '')
     );
+    const hasExactCatalogMatch = Boolean(match || (productoOficial.matchExacto !== false && productoOficial.codigo !== 'S/C' && productoOficial.codigo !== 'PENDIENTE'));
+    const userAssignedCode = (!isForbiddenAlpha && f.skuCodizulca && f.skuCodizulca !== 'PENDIENTE' && f.skuCodizulca !== 'S/C' && !(!hasExactCatalogMatch && /^\d{8,14}$/.test(String(f.skuCodizulca).trim())))
+      ? String(f.skuCodizulca).trim()
+      : (!isForbiddenAlpha && f.codigo && f.codigo !== 'PENDIENTE' && f.codigo !== 'S/C' && !(!hasExactCatalogMatch && /^\d{8,14}$/.test(String(f.codigo).trim())))
+        ? String(f.codigo).trim()
+        : '';
     const cleanSku = String(
-      (isForbiddenAlpha && productoOficial.codigo !== 'S/C' ? productoOficial.codigo : '') ||
-      (!isForbiddenAlpha && f.skuCodizulca ? f.skuCodizulca : '') ||
-      (!isForbiddenAlpha && match?.sku ? match.sku : '') ||
-      (productoOficial.codigo !== 'S/C' ? productoOficial.codigo : '') ||
-      (!isForbiddenAlpha ? f.codigo : '') ||
-      'S/C'
+      (match ? match.sku : '') ||
+      (productoOficial.matchExacto !== false && productoOficial.codigo !== 'S/C' && productoOficial.codigo !== 'PENDIENTE' ? productoOficial.codigo : '') ||
+      userAssignedCode ||
+      'PENDIENTE'
     ).trim();
-    const cleanDesc = limpiarDescripcionAlkosto(
-      (isForbiddenAlpha && productoOficial.codigo !== 'S/C' ? productoOficial.descripcion : '') ||
-      f.descripcion ||
-      (match ? match.producto : '') ||
-      productoOficial.descripcion ||
-      'PRODUCTO'
-    );
+    const cleanDesc = hasExactCatalogMatch
+      ? limpiarDescripcionAlkosto(
+          (match ? match.producto : '') ||
+          (productoOficial.matchExacto !== false ? productoOficial.descripcion : '') ||
+          f.descripcion ||
+          'PRODUCTO'
+        )
+      : String(f.descripcion || productoOficial.descripcion || 'PRODUCTO').trim().toUpperCase();
     const unid = normalizarUnidadMedidaAlkosto(f.unid, cleanDesc, undefined, match?.unidadSugerida);
 
     // Si se indica precio bruto y descuento porcentual (0 < descuento <= 100) sin precio unitario neto explícito:
@@ -3760,11 +3889,16 @@ export function extraerPedidosNormalizadosDeOC(params: {
     const skuKey = String(f.skuCodizulca || f.codigo || '').trim().toUpperCase();
     const codKey = String(f.codigo || '').trim().toUpperCase();
     const barKey = String(f.codigoBarra || '').trim().toUpperCase();
-    const oficialKey = matchProductoCodizulca(f.skuCodizulca || f.codigo, f.descripcion).codigo.trim().toUpperCase();
-    if (skuKey) editedByCode.set(skuKey, f);
-    if (codKey) editedByCode.set(codKey, f);
+    const descKey = f.descripcion ? `DESC:${String(f.descripcion).trim().toUpperCase()}` : '';
+    const prodMatch = matchProductoCodizulca(f.skuCodizulca || f.codigo, f.descripcion);
+    const oficialKey = (prodMatch.matchExacto !== false && prodMatch.codigo !== 'S/C' && prodMatch.codigo !== 'PENDIENTE')
+      ? prodMatch.codigo.trim().toUpperCase()
+      : '';
+    if (skuKey && skuKey !== 'PENDIENTE' && skuKey !== 'S/C') editedByCode.set(skuKey, f);
+    if (codKey && codKey !== 'PENDIENTE' && codKey !== 'S/C') editedByCode.set(codKey, f);
     if (barKey) editedByCode.set(barKey, f);
-    if (oficialKey && oficialKey !== 'S/C') editedByCode.set(oficialKey, f);
+    if (oficialKey) editedByCode.set(oficialKey, f);
+    if (descKey) editedByCode.set(descKey, f);
   });
 
   // Fuente maestra de filas con tiendas
@@ -3792,23 +3926,31 @@ export function extraerPedidosNormalizadosDeOC(params: {
         isForbiddenAlpha ? '' : rawSkuCandidate,
         ocItem.descripcion || (match ? match.producto : '')
       );
-      const skuKey = String(
+      const rawSkuKey = String(
         (isForbiddenAlpha && productoOficial.codigo !== 'S/C' ? productoOficial.codigo : rawSkuCandidate) || ''
       ).trim().toUpperCase();
-      const rawKey = String(ocItem.codigo || '').trim().toUpperCase();
+      const skuKey = (rawSkuKey !== 'PENDIENTE' && rawSkuKey !== 'S/C') ? rawSkuKey : '';
+      const rawCodUpper = String(ocItem.codigo || '').trim().toUpperCase();
+      const rawKey = (rawCodUpper !== 'PENDIENTE' && rawCodUpper !== 'S/C') ? rawCodUpper : '';
       const barKey = String(ocItem.codigoBarra || match?.codigoBarra || '').trim().toUpperCase();
-      const oficialKey = productoOficial.codigo !== 'S/C' ? productoOficial.codigo.toUpperCase() : '';
+      const oficialKey = (productoOficial.matchExacto !== false && productoOficial.codigo !== 'S/C' && productoOficial.codigo !== 'PENDIENTE')
+        ? productoOficial.codigo.toUpperCase()
+        : '';
+      const descKey = ocItem.descripcion ? `DESC:${String(ocItem.descripcion).trim().toUpperCase()}` : '';
 
       // Solo cruzar por clave exacta de producto (NUNCA usar filasActuales[idx] cuando la vista está filtrada por tienda)
       const editedRow =
-        editedByCode.get(skuKey) ||
-        editedByCode.get(rawKey) ||
+        (skuKey ? editedByCode.get(skuKey) : undefined) ||
+        (rawKey ? editedByCode.get(rawKey) : undefined) ||
         (barKey ? editedByCode.get(barKey) : undefined) ||
-        (oficialKey ? editedByCode.get(oficialKey) : undefined);
+        (oficialKey ? editedByCode.get(oficialKey) : undefined) ||
+        (descKey ? editedByCode.get(descKey) : undefined);
       if (skuKey) usedEditedKeys.add(skuKey);
       if (rawKey) usedEditedKeys.add(rawKey);
       if (barKey) usedEditedKeys.add(barKey);
       if (oficialKey) usedEditedKeys.add(oficialKey);
+      if (descKey) usedEditedKeys.add(descKey);
+      if (editedRow?.descripcion) usedEditedKeys.add(`DESC:${String(editedRow.descripcion).trim().toUpperCase()}`);
 
       const mergedTiendas: Record<string, number> = {
         ...(ocItem.tiendas || {}),
@@ -3827,16 +3969,24 @@ export function extraerPedidosNormalizadosDeOC(params: {
         }
       }
 
-      const rawFinalSku = editedRow?.codigo || ocItem.skuCodizulca || (match ? match.sku : ocItem.codigo);
+      const rawFinalSku =
+        editedRow?.codigo ||
+        (match ? match.sku : '') ||
+        (productoOficial.matchExacto !== false ? productoOficial.codigo : '') ||
+        ocItem.skuCodizulca ||
+        ocItem.codigo;
       const finalSku = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(String(rawFinalSku || '').trim()) && productoOficial.codigo !== 'S/C'
         ? productoOficial.codigo
         : rawFinalSku;
-      const finalDesc = limpiarDescripcionAlkosto(
-        editedRow?.descripcion ||
-        ocItem.descripcion ||
-        (match ? match.producto : '') ||
-        (productoOficial.codigo !== 'S/C' ? productoOficial.descripcion : '')
-      );
+      const hasExactMatch = Boolean(match || productoOficial.matchExacto !== false);
+      const finalDesc = hasExactMatch
+        ? limpiarDescripcionAlkosto(
+            editedRow?.descripcion ||
+            (match ? match.producto : '') ||
+            (productoOficial.matchExacto !== false ? productoOficial.descripcion : '') ||
+            ocItem.descripcion
+          )
+        : String(editedRow?.descripcion || ocItem.descripcion || productoOficial.descripcion || '').trim().toUpperCase();
       const finalUnid = normalizarUnidadMedidaAlkosto(
         editedRow?.unid || ocItem.unid,
         finalDesc,
@@ -3873,18 +4023,31 @@ export function extraerPedidosNormalizadosDeOC(params: {
     const cant = toSafeNumber(f.cantSolicitada);
     if (cant <= 0) return;
     const key = String(f.codigo || f.skuCodizulca || '').trim().toUpperCase();
-    const oficialKey = matchProductoCodizulca(f.skuCodizulca || f.codigo, f.descripcion).codigo.trim().toUpperCase();
-    if (rawItemsFromOC.length > 0 && (usedEditedKeys.has(key) || (oficialKey !== 'S/C' && usedEditedKeys.has(oficialKey)))) {
+    const barKey = String(f.codigoBarra || '').trim().toUpperCase();
+    const descKey = f.descripcion ? `DESC:${String(f.descripcion).trim().toUpperCase()}` : '';
+    const prodMatch = matchProductoCodizulca(f.skuCodizulca || f.codigo, f.descripcion);
+    const oficialKey = (prodMatch.matchExacto !== false && prodMatch.codigo !== 'S/C' && prodMatch.codigo !== 'PENDIENTE')
+      ? prodMatch.codigo.trim().toUpperCase()
+      : '';
+    if (
+      rawItemsFromOC.length > 0 &&
+      ((key && key !== 'PENDIENTE' && key !== 'S/C' && usedEditedKeys.has(key)) ||
+        (barKey && usedEditedKeys.has(barKey)) ||
+        (oficialKey && usedEditedKeys.has(oficialKey)) ||
+        (descKey && usedEditedKeys.has(descKey)))
+    ) {
       return;
     }
     const isForbiddenAlpha = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(String(f.codigo || f.skuCodizulca || '').trim());
-    const prodMatch = matchProductoCodizulca(isForbiddenAlpha ? '' : (f.skuCodizulca || f.codigo), f.descripcion);
     const resolvedCod = (isForbiddenAlpha && prodMatch.codigo !== 'S/C') ? prodMatch.codigo : (f.codigo || prodMatch.codigo);
+    const hasExactProdMatch = prodMatch.matchExacto !== false && prodMatch.codigo !== 'S/C' && prodMatch.codigo !== 'PENDIENTE';
     masterRows.push({
       renglon: f.renglon || masterRows.length + 1,
       codigo: resolvedCod,
       skuCodizulca: (!isForbiddenAlpha && f.skuCodizulca) ? f.skuCodizulca : resolvedCod,
-      descripcion: limpiarDescripcionAlkosto(f.descripcion || prodMatch.descripcion),
+      descripcion: hasExactProdMatch
+        ? limpiarDescripcionAlkosto(f.descripcion || prodMatch.descripcion)
+        : String(f.descripcion || prodMatch.descripcion || '').trim().toUpperCase(),
       unid: f.unid || 'CJ',
       precio: toSafeNumber((f as any).valorUnitarioOC ?? f.precio),
       precioBruto: toSafeNumber(f.precioBruto) || undefined,

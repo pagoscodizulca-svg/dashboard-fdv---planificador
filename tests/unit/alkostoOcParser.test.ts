@@ -905,27 +905,27 @@ describe('Unit & Regression: alkostoOcParser', () => {
     });
 
     it('should validate the 158 official products (PRODUCTOS_CODIZULCA), matchProductoCodizulca Vencampo gramajes (1536, 1556, 1574, 1579), reject LPV, and compute exact Sala de Espera subtotal (CANT * valorUnitarioOC)', () => {
-      // 1. Catálogo oficial de 158 ítems (del 9 al 1592) con caracteres UTF-8 (Ñ) preservados
-      expect(PRODUCTOS_CODIZULCA).toHaveLength(158);
+      // 1. Catálogo oficial de 221 ítems (del 9 al 1662, incluye 1642 ARVEJAS y 1644 CARAOTAS NEGRAS VENCAMPO) con caracteres UTF-8 (Ñ) preservados
+      expect(PRODUCTOS_CODIZULCA).toHaveLength(221);
       expect(PRODUCTOS_CODIZULCA[0].codigo).toBe('9');
-      expect(PRODUCTOS_CODIZULCA[PRODUCTOS_CODIZULCA.length - 1].codigo).toBe('1592');
+      expect(PRODUCTOS_CODIZULCA[PRODUCTOS_CODIZULCA.length - 1].codigo).toBe('1662');
       expect(PRODUCTOS_CODIZULCA.some(p => p.descripcion.includes('DOÑA FLORA'))).toBe(true);
       expect(PRODUCTOS_CODIZULCA.some(p => p.descripcion.includes('NAVIDEÑA'))).toBe(true);
 
       // 2. Desambiguación obligatoria de Leche en Polvo Vencampo por gramaje y prohibición de 'LPV'
-      expect(matchProductoCodizulca('LPV', 'LECHE EN POLVO COMPLETA VENCAMPO 1KG')).toEqual({
+      expect(matchProductoCodizulca('LPV', 'LECHE EN POLVO COMPLETA VENCAMPO 1KG')).toMatchObject({
         codigo: '1536',
         descripcion: 'LECHE EN POLVO VENCAMPO 10X1KG'
       });
-      expect(matchProductoCodizulca('7590377000510', 'LECHE EN POLVO COMPLETA VENCAMPO 900GR')).toEqual({
+      expect(matchProductoCodizulca('7590377000510', 'LECHE EN POLVO COMPLETA VENCAMPO 900GR')).toMatchObject({
         codigo: '1556',
         descripcion: 'LECHE EN POLVO VENCAMPO 10X900GR'
       });
-      expect(matchProductoCodizulca('7590377000503', 'LECHE EN POLVO COMPLETA VENCAMPO 400GR')).toEqual({
+      expect(matchProductoCodizulca('7590377000503', 'LECHE EN POLVO COMPLETA VENCAMPO 400GR')).toMatchObject({
         codigo: '1574',
         descripcion: 'LECHE EN POLVO VENCAMPO 10X400GR'
       });
-      expect(matchProductoCodizulca('', 'LECHE EN POLVO VENCAMPO 500G')).toEqual({
+      expect(matchProductoCodizulca('', 'LECHE EN POLVO VENCAMPO 500G')).toMatchObject({
         codigo: '1579',
         descripcion: 'LECHE EN POLVO VENCAMPO 10X500GR'
       });

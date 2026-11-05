@@ -37,6 +37,10 @@ import {
   toSafeNumber
 } from "./src/services/alkostoOcParser";
 import {
+  hasPrimaryNounConflict,
+  isBrandOrPresentationToken
+} from "./src/services/productosCodizulca";
+import {
   VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT,
   VENEZUELAN_RECEIPT_RESPONSE_SCHEMA,
   detectReceiptMimeType,
@@ -1495,16 +1499,22 @@ async function startServer() {
         const isForbiddenAlpha = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(rawCod);
         const desc = limpiarDescripcionAlkosto((rawDesc || 'PRODUCTO').toUpperCase());
         const productoOficial = matchProductoCodizulca(isForbiddenAlpha ? '' : rawCod, desc);
-        const resolvedProd = resolverProductoBackend(isForbiddenAlpha ? '' : rawCod, desc);
+        const hasExactOficial =
+          productoOficial.matchExacto !== false &&
+          productoOficial.codigo !== 'S/C' &&
+          productoOficial.codigo !== 'PENDIENTE';
+        const resolvedProd = hasExactOficial ? null : resolverProductoBackend(isForbiddenAlpha ? '' : rawCod, desc);
+        const hasExactCatalogMatch = Boolean(hasExactOficial || resolvedProd);
         const cleanCod =
-          (productoOficial.codigo !== 'S/C' ? productoOficial.codigo : '') ||
+          (hasExactOficial ? productoOficial.codigo : '') ||
           (resolvedProd && !/^(LPV|UTH|UHT|QS|JUGOS)$/i.test(resolvedProd.sku) ? resolvedProd.sku : '') ||
-          (!isForbiddenAlpha ? rawCod : '') ||
-          'S/C';
-        const cleanDesc =
-          (productoOficial.codigo !== 'S/C' ? productoOficial.descripcion : '') ||
-          (resolvedProd ? resolvedProd.nombre : '') ||
-          desc;
+          (!isForbiddenAlpha && rawCod && rawCod !== 'S/C' && !(!hasExactCatalogMatch && /^\d{8,14}$/.test(rawCod)) ? rawCod : '') ||
+          'PENDIENTE';
+        const cleanDesc = hasExactCatalogMatch
+          ? (hasExactOficial ? productoOficial.descripcion : '') ||
+            (resolvedProd ? resolvedProd.nombre : '') ||
+            desc
+          : String(rawDesc || desc || 'PRODUCTO').trim().toUpperCase();
 
         const cant = toSafeNumber(
           it.cantidad ??
@@ -1688,6 +1698,8 @@ async function startServer() {
       ...(sucursalTagClean ? { sucursal_tag: sucursalTagClean } : {}),
       cadena: cadenaNorm,
       numero_oc: numeroOcClean,
+      orden_compra: numeroOcClean,
+      orden_de_compra: numeroOcClean,
       direccion_despacho: direccionDespachoClean,
       observacion_formateada: observacionFormateada,
       vendedor: vendedorHomologado,
@@ -1829,10 +1841,12 @@ async function startServer() {
     }
 
     if (!confirmedId) {
-      // Fallback directo en memoria/storage del backend cuando Supabase externo no está activo o disponible (No requiere Supabase)
-      confirmedId = orderId;
-      console.log(
-        `[ENVIO_FDV -> SALA_ESPERA_DIRECTA] Confirmado en memoria/storage Pedido N° ${correlativo} (ID: ${confirmedId} | Vendedor: ${vendedorHomologado} | ${sucursalClienteClean} | OC: ${numeroOcClean} | Renglones: ${gestorArticles.length} | Monto: $${totalMonto.toFixed(2)})`
+      throw (
+        lastExternalErr ||
+        new AlkostoHttpError(
+          502,
+          `No se pudo confirmar la inserción del pedido N° ${correlativo} (${sucursalClienteClean}) en Supabase Sala de Espera.`
+        )
       );
     }
 
@@ -2310,6 +2324,8 @@ async function startServer() {
     { sku: '1556', nombre: 'LECHE EN POLVO VENCAMPO 10X900GR', barcode: '7590377000510', chainCodes: ['1556', '7590377000510'], unid: 'CJ' },
     { sku: '1574', nombre: 'LECHE EN POLVO VENCAMPO 10X400GR', barcode: '7590377000503', chainCodes: ['1574', '7590377000503'], unid: 'CJ' },
     { sku: '1579', nombre: 'LECHE EN POLVO VENCAMPO 10X500GR', barcode: '', chainCodes: ['1579'], unid: 'CJ' },
+    { sku: '1642', nombre: 'ARVEJAS VENCAMPO 25 UND X 400GR', barcode: '7590377000411', chainCodes: ['1642', '001642', '7590377000411'], unid: 'CJ' },
+    { sku: '1644', nombre: 'CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR', barcode: '7590377000459', chainCodes: ['1644', '001644', '7590377000459'], unid: 'CJ' },
     { sku: '1572', nombre: 'CAJAS DE PIZZA 1X100', barcode: '', chainCodes: ['1572'], unid: 'BLT' },
     ...PRODUCTOS_CODIZULCA.map(p => ({
       sku: p.codigo,
@@ -2326,9 +2342,13 @@ async function startServer() {
     const cleanCod = isForbiddenAlpha ? '' : rawCod.replace(/[\s\-_.]/g, '').toUpperCase();
     const cleanDesc = String(descInput || '').trim().toUpperCase();
 
-    // 0. Priorizar homologación determinista contra el catálogo oficial de 158 productos (`Data de productos.csv`)
+    // 0. Priorizar homologación determinista contra el catálogo oficial de productos (`Data de productos.csv`)
     const prodOficial = matchProductoCodizulca(cleanCod, cleanDesc);
-    if (prodOficial.codigo !== 'S/C') {
+    if (
+      prodOficial.matchExacto !== false &&
+      prodOficial.codigo !== 'S/C' &&
+      prodOficial.codigo !== 'PENDIENTE'
+    ) {
       const dictEntry = MASTER_PRODUCTOS_DICT.find(p => p.sku === prodOficial.codigo);
       return {
         sku: prodOficial.codigo,
@@ -2339,38 +2359,53 @@ async function startServer() {
       };
     }
 
-    // 1. Coincidencia exacta SKU
+    // 1. Coincidencia por código de barra (EAN-13)
     if (cleanCod) {
-      const match = MASTER_PRODUCTOS_DICT.find(p => p.sku.toUpperCase() === cleanCod);
+      const match = MASTER_PRODUCTOS_DICT.find(
+        p => p.barcode && p.barcode.replace(/[\s\-_.]/g, '') === cleanCod && (!cleanDesc || !hasPrimaryNounConflict(p.nombre, cleanDesc))
+      );
       if (match) return match;
     }
 
-    // 2. Coincidencia por código de barra (EAN-13)
-    if (cleanCod) {
-      const match = MASTER_PRODUCTOS_DICT.find(p => p.barcode && p.barcode.replace(/[\s\-_.]/g, '') === cleanCod);
+    // 2. Coincidencia exacta SKU (validando sustantivo principal)
+    if (cleanCod && cleanCod !== 'PENDIENTE' && cleanCod !== 'S/C') {
+      const match = MASTER_PRODUCTOS_DICT.find(
+        p => p.sku.toUpperCase() === cleanCod && (!cleanDesc || !hasPrimaryNounConflict(p.nombre, cleanDesc))
+      );
       if (match) return match;
     }
 
     // 3. Coincidencia por código de cadena (Alkosto / Familia Center)
-    if (cleanCod) {
-      const match = MASTER_PRODUCTOS_DICT.find(p => p.chainCodes && p.chainCodes.some(c => c.toUpperCase() === cleanCod));
+    if (cleanCod && cleanCod !== 'PENDIENTE' && cleanCod !== 'S/C') {
+      const match = MASTER_PRODUCTOS_DICT.find(
+        p => p.chainCodes && p.chainCodes.some(c => c.toUpperCase() === cleanCod) && (!cleanDesc || !hasPrimaryNounConflict(p.nombre, cleanDesc))
+      );
       if (match) return match;
     }
 
-    // 4. Coincidencia por texto de descripción
+    // Guardarraíl: si trae un EAN/código numérico explícito no catalogado, no hacer match difuso por descripción
+    if (cleanCod.length >= 4 && /^\d+$/.test(cleanCod)) {
+      return null;
+    }
+
+    // 4. Coincidencia por texto de descripción (exigiendo coincidencia obligatoria de sustantivo principal y prohibiendo match parcial por marca/gramaje)
     if (cleanDesc) {
       const match = MASTER_PRODUCTOS_DICT.find(p => {
+        if (hasPrimaryNounConflict(p.nombre, cleanDesc)) return false;
         const pNorm = p.nombre.toUpperCase();
         return cleanDesc.includes(pNorm) || pNorm.includes(cleanDesc);
       });
       if (match) return match;
 
-      // Tokens clave
-      const tokens = cleanDesc.split(/\s+/).filter(t => t.length > 2 && !['POR', 'CON', 'DEL', 'LOS', 'LAS', 'PARA'].includes(t));
+      const tokens = cleanDesc
+        .split(/\s+/)
+        .filter(t => t.length > 2 && !['POR', 'CON', 'DEL', 'LOS', 'LAS', 'PARA'].includes(t) && !isBrandOrPresentationToken(t));
       if (tokens.length > 0) {
         const tokenMatch = MASTER_PRODUCTOS_DICT.find(p => {
+          if (hasPrimaryNounConflict(p.nombre, cleanDesc)) return false;
           const pNorm = p.nombre.toUpperCase();
-          return tokens.filter(t => pNorm.includes(t)).length >= Math.min(2, tokens.length);
+          const required = tokens.length <= 2 ? tokens.length : Math.max(2, Math.ceil(tokens.length * 0.75));
+          return tokens.filter(t => pNorm.includes(t)).length >= required;
         });
         if (tokenMatch) return tokenMatch;
       }

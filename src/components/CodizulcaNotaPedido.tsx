@@ -205,36 +205,45 @@ function buildFilasFromData(
       (it as any).codigo_interno_alkosto || 
       ''
     ).trim();
-    const rawDesc = limpiarDescripcionAlkosto(
-      String(
-        it.descripcion || 
-        (it as any).descripcion_producto || 
-        (it as any).producto || 
-        (it as any).nombre || 
-        (it as any).articulo || 
-        (it as any).item || 
-        (it as any).detalle || 
-        ''
-      )
-    );
+    const rawDescOriginal = String(
+      it.descripcion || 
+      (it as any).descripcion_producto || 
+      (it as any).producto || 
+      (it as any).nombre || 
+      (it as any).articulo || 
+      (it as any).item || 
+      (it as any).detalle || 
+      ''
+    ).trim();
+    const rawDesc = limpiarDescripcionAlkosto(rawDescOriginal);
     const match = resolverProductoPorCodigoODescripcion(rawCode, rawDesc);
     const isForbiddenAlpha = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(rawCode);
-    const productoOficial = matchProductoCodizulca(isForbiddenAlpha ? '' : rawCode, rawDesc || (match ? match.producto : ''));
+    const productoOficial = matchProductoCodizulca(
+      isForbiddenAlpha ? '' : rawCode,
+      rawDescOriginal || rawDesc || (match ? match.producto : '')
+    );
+    const hasExactCatalogMatch = Boolean(
+      match || (productoOficial.matchExacto !== false && productoOficial.codigo !== 'S/C' && productoOficial.codigo !== 'PENDIENTE')
+    );
+    const isUsableUserCode = (c: string) =>
+      !!c && c !== 'PENDIENTE' && c !== 'S/C' && !/^(LPV|UTH|UHT|QS|JUGOS)$/i.test(c) && !/^\d{8,14}$/.test(c);
 
-    // FASE 2.2: Homologar al código numérico oficial del maestro de 158 productos (`Data de productos.csv`)
-    // sin permitir códigos alfabéticos inventados ('LPV')
+    // FASE 2.2: Homologar al código numérico oficial del catálogo solo si hay coincidencia exacta de EAN o sustantivo principal.
+    // Si no existe en catálogo, conservar la descripción original del PDF y dejar el SKU editable/pendiente
+    // (nunca reutilizar un SKU alucinado, p. ej. 1555 por compartir solo marca/gramaje).
     const finalSku =
-      (productoOficial.codigo !== 'S/C' ? productoOficial.codigo : '') ||
-      (!isForbiddenAlpha && match && !/^(LPV|UTH|UHT|QS|JUGOS)$/i.test(match.sku) ? match.sku : '') ||
-      (!isForbiddenAlpha && it.skuCodizulca ? String(it.skuCodizulca).trim() : '') ||
-      (!isForbiddenAlpha ? rawCode : 'S/C');
+      (match && !/^(LPV|UTH|UHT|QS|JUGOS)$/i.test(match.sku) ? match.sku : '') ||
+      (hasExactCatalogMatch && productoOficial.matchExacto !== false && productoOficial.codigo !== 'S/C' && productoOficial.codigo !== 'PENDIENTE' ? productoOficial.codigo : '') ||
+      (hasExactCatalogMatch && it.skuCodizulca && isUsableUserCode(String(it.skuCodizulca).trim()) ? String(it.skuCodizulca).trim() : '') ||
+      (isUsableUserCode(rawCode) && hasExactCatalogMatch ? rawCode : '') ||
+      'PENDIENTE';
     const finalBarcode = it.codigoBarra || (it as any).codigoEan || (it as any).codigo_ean || (it as any).barcode || match?.codigoBarra || '';
     const finalCodigoInternoAlkosto = (it as any).codigoInternoAlkosto || (it as any).codigo_interno_alkosto || null;
-    // Usar la descripción oficial homologada del catálogo de 158 productos o la limpia de la OC (sin sufijo /PVP)
-    const finalDesc =
-      (productoOficial.codigo !== 'S/C' ? productoOficial.descripcion : '') ||
-      (match ? match.producto : '') ||
-      rawDesc;
+    const finalDesc = hasExactCatalogMatch
+      ? ((match ? match.producto : '') ||
+         (productoOficial.matchExacto !== false ? productoOficial.descripcion : '') ||
+         rawDesc)
+      : (rawDescOriginal.replace(/\s+/g, ' ').replace(/\s*\/\s*/g, '/').trim().toUpperCase() || rawDesc);
     const finalUnid = normalizarUnidadMedidaAlkosto(
       it.unid || (it as any).unidad_medida || (it as any).unidad,
       finalDesc,
@@ -644,11 +653,11 @@ export function CodizulcaNotaPedido({
     const copy = [...filas];
     const fila = { ...copy[index], [campo]: valor };
 
-    // Si se modifica el código, resolver automáticamente con el catálogo maestro y dejar SOLO EL SKU numérico oficial
+    // Si se modifica el código, resolver automáticamente con el catálogo maestro solo si hay coincidencia exacta
     if (campo === 'codigo') {
       const productoOficial = matchProductoCodizulca(valor, fila.descripcion);
       const match = resolverProductoPorCodigoODescripcion(valor, fila.descripcion);
-      if (productoOficial.codigo !== 'S/C') {
+      if (productoOficial.matchExacto !== false && productoOficial.codigo !== 'S/C' && productoOficial.codigo !== 'PENDIENTE') {
         fila.codigo = productoOficial.codigo;
         fila.skuCodizulca = productoOficial.codigo;
         if (!fila.descripcion || fila.descripcion === '') fila.descripcion = productoOficial.descripcion;
@@ -658,14 +667,17 @@ export function CodizulcaNotaPedido({
         fila.codigoBarra = match.codigoBarra;
         if (!fila.descripcion || fila.descripcion === '') fila.descripcion = match.producto;
         if (!fila.unid || fila.unid === '') fila.unid = match.unidadSugerida || 'CJ';
+      } else {
+        fila.codigo = String(valor || '');
+        fila.skuCodizulca = String(valor || '');
       }
     }
 
-    // Si se modifica la descripción, resolver automáticamente con el catálogo maestro y dejar SOLO EL SKU numérico oficial
+    // Si se modifica la descripción, resolver automáticamente con el catálogo maestro solo si hay coincidencia exacta
     if (campo === 'descripcion') {
       const productoOficial = matchProductoCodizulca(fila.codigo, valor);
       const match = resolverProductoPorCodigoODescripcion(fila.codigo, valor);
-      if (productoOficial.codigo !== 'S/C') {
+      if (productoOficial.matchExacto !== false && productoOficial.codigo !== 'S/C' && productoOficial.codigo !== 'PENDIENTE') {
         fila.codigo = productoOficial.codigo;
         fila.skuCodizulca = productoOficial.codigo;
       } else if (match) {
@@ -862,6 +874,23 @@ export function CodizulcaNotaPedido({
       if (pedidosValidados.length === 0) {
         alert('No hay productos válidos con cantidad mayor a 0 para enviar. Por favor verifica los renglones del formato.');
         return;
+      }
+
+      // Advertir si existen SKUs pendientes (productos no encontrados en el catálogo) antes de transmitir
+      const descPendientes = Array.from(
+        new Set(
+          pedidosValidados.flatMap(p =>
+            (p.renglones || [])
+              .filter(r => String(r.codigo || '').trim().toUpperCase() === 'PENDIENTE')
+              .map(r => String(r.descripcion || '').trim())
+          )
+        )
+      );
+      if (descPendientes.length > 0) {
+        const seguir = window.confirm(
+          `⚠️ Hay ${descPendientes.length} producto(s) con SKU PENDIENTE (no existen en el catálogo):\n\n- ${descPendientes.join('\n- ')}\n\nAsigna el SKU correcto en la tabla antes de enviar. ¿Transmitir de todas formas?`
+        );
+        if (!seguir) return;
       }
 
       setProgresoEnvio({
@@ -1366,7 +1395,12 @@ export function CodizulcaNotaPedido({
                         list="codigos-codizulca-list"
                         value={f.codigo}
                         onChange={(e) => handleActualizarCelda(idx, 'codigo', e.target.value)}
-                        className="w-full text-center font-mono text-xs font-bold text-slate-900 outline-none focus:bg-amber-100 uppercase"
+                        title={f.codigo === 'PENDIENTE' ? 'SKU pendiente: el producto no existe en el catálogo. Edita el SKU manualmente.' : undefined}
+                        className={`w-full text-center font-mono text-xs font-bold outline-none focus:bg-amber-100 uppercase ${
+                          f.codigo === 'PENDIENTE'
+                            ? 'bg-amber-100 text-amber-800 ring-1 ring-amber-400 rounded'
+                            : 'text-slate-900'
+                        }`}
                         placeholder="SKU"
                       />
                     </td>
