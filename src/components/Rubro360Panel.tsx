@@ -136,7 +136,7 @@ export const Rubro360Panel: React.FC<Props> = ({
                 >
                   {active ? <CheckSquare className="w-3.5 h-3.5 shrink-0" /> : <Square className="w-3.5 h-3.5 shrink-0 opacity-60" />}
                   <IconComp className="w-3.5 h-3.5 shrink-0" />
-                  <span>{RUBRO_LABEL[rCode]}</span>
+                  <span title={RUBRO_LABEL[rCode]} className="truncate max-w-[200px] sm:max-w-none">{RUBRO_LABEL[rCode]}</span>
                 </button>
               );
             })}
@@ -146,7 +146,7 @@ export const Rubro360Panel: React.FC<Props> = ({
               className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-sans font-bold border border-dashed border-neutral-700 text-neutral-400 hover:text-white hover:border-neutral-500"
             >
               {todosSeleccionados ? <Eraser className="w-3.5 h-3.5" /> : <Layers className="w-3.5 h-3.5" />}
-              {todosSeleccionados ? 'Quitar todos' : 'Tildar los 5'}
+              {todosSeleccionados ? 'Quitar todos' : `Tildar los ${RUBROS_ACTIVACION.length}`}
             </button>
           </div>
         )}
@@ -177,7 +177,7 @@ export const Rubro360Panel: React.FC<Props> = ({
                   </th>
                   {cargados.map(({ r }) => (
                     <th key={r} colSpan={2} className={`p-2 text-center border-l border-neutral-800 ${getRubroTheme(r).accentText}`}>
-                      {RUBRO_LABEL[r]}
+                      <span title={RUBRO_LABEL[r]} className="block max-w-[220px] mx-auto leading-tight whitespace-normal">{RUBRO_LABEL[r]}</span>
                     </th>
                   ))}
                 </tr>

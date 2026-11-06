@@ -1,5 +1,5 @@
 import { VolumenData } from '../types';
-import { clasificarRubroServerLabel } from '../lib/rubros';
+import { clasificarRubroServerLabel, clasificarRubro, RUBROS_ACTIVOS_CONFIG, type RubroCodigo } from '../lib/rubros';
 import { SUPERVISOR_SUMMARY_COLUMNS, normalizeVendorName } from '../utils/vendorRoutes';
 
 export const DEFAULT_GOOGLE_SHEET_ID = '1PLzYEe9GG1vHb_wjd7HA93U6UQNtyP-uk8sxVfiN4sg';
@@ -452,6 +452,9 @@ export interface ParsedWorkbookResult {
     POLLO: Map<string, number>;
     ESTANDAR_ASTURIAS: Map<string, number>;
     MORTADELA_SALPICAO: Map<string, number>;
+    LECHE_VENCAMPO: Map<string, number>;
+    MORTADELA_ASTURIAS: Map<string, number>;
+    SALPICAO: Map<string, number>;
   };
   usuariosRows: Array<{
     usuario: string;
@@ -472,11 +475,43 @@ function isSupervisorSummaryHeader(vendorRaw: string): boolean {
   return SUPERVISOR_SUMMARY_COLUMNS.has(norm);
 }
 
+function normalizeCuentasClavesVendor(vendorName: string): { id: string; display: string } | null {
+  const u = String(vendorName || '').replace(/\s+/g, ' ').trim().toUpperCase();
+  if (
+    u === 'MARIANA CHACIN' ||
+    u === 'MARIANA CHACÍN' ||
+    u === 'CUENTAS CLAVE 1' ||
+    u === 'CUENTAS CLAVES 1' ||
+    u === 'CUENTAS CLAVE 1 - MC' ||
+    u === 'CUENTAS CLAVES 1 - MC'
+  ) {
+    return { id: 'CUENTAS CLAVES 1 - MC', display: 'Cuentas claves 1 - MC' };
+  }
+  if (
+    u === 'SAIRU VALLES' ||
+    u === 'SAIRÚ VALLES' ||
+    u === 'CUENTAS CLAVE 2' ||
+    u === 'CUENTAS CLAVES 2' ||
+    u === 'CUENTAS CLAVE 2 - SV' ||
+    u === 'CUENTAS CLAVES 2 - SV'
+  ) {
+    return { id: 'CUENTAS CLAVES 2 - SV', display: 'Cuentas claves 2 - SV' };
+  }
+  return null;
+}
+
 function formatVolumenVendorDisplay(vendorName: string): {
   finalVendedorId: string;
   finalVendedorNombre: string;
   finalVendedorEmail?: string;
 } {
+  const cc = normalizeCuentasClavesVendor(vendorName);
+  if (cc) {
+    return {
+      finalVendedorId: cc.id,
+      finalVendedorNombre: cc.display
+    };
+  }
   const vendorUpper = vendorName.toUpperCase();
   const isMikelRoute1 =
     vendorUpper === 'MIKELANGELO DIAZ1' ||
@@ -552,9 +587,14 @@ export function parseWorkbookFull(
   options: {
     periodo: string;
     masterClients?: MasterClientSeed[];
+    /**
+     * Ventas netas del mes en curso (tabla ventas_historial) por cliente y artículo. Permite separar por cliente
+     * 'Mortadela Asturias' de 'Salpicao' (la hoja 'Enteros Ligeros' los trae combinados) y reforzar 'Leche en polvo Vencampo'.
+     */
+    ventasMes?: Array<{ id_cliente: string; id_articulo: string; articulo: string; cajas: number }>;
   }
 ): ParsedWorkbookResult {
-  const { periodo, masterClients = [] } = options;
+  const { periodo, masterClients = [], ventasMes = [] } = options;
   const warnings: SheetWarning[] = [];
   const metrics: Record<string, SheetTabMetrics> = {};
 
@@ -681,13 +721,15 @@ export function parseWorkbookFull(
 
           if (metaKg > 0 || ejecutadoKg > 0) {
             tabMetric.validRecordsRead++;
+            const ccVol = normalizeCuentasClavesVendor(block.vendorName);
+            const canonicalBlockVendor = ccVol ? ccVol.id : block.vendorName;
             volumenSupabaseRows.push({
               periodo,
               sku,
               articulo,
               categoria: cat,
-              vendedor_id: block.vendorName,
-              vendedor_nombre: block.vendorName,
+              vendedor_id: canonicalBlockVendor,
+              vendedor_nombre: canonicalBlockVendor,
               meta_kg: metaKg,
               ejecutado_kg: ejecutadoKg,
               zona: 'General'
@@ -757,6 +799,7 @@ export function parseWorkbookFull(
         { codigo: 0, cliente: 1, cajas: 2 }
       );
 
+      let prevCajas = -1;
       for (let r = 1; r < rows.length; r++) {
         const row = rows[r];
         if (isRowCompletelyEmpty(row)) {
@@ -776,6 +819,13 @@ export function parseWorkbookFull(
         }
 
         const cajas = parseLocaleNumber(row[cols.cajas], 0);
+        // Detectar reinicio abrupto en hojas ordenadas ascendentemente donde quedaron filas del mes anterior al final
+        if (tabMetric.validRecordsRead >= 50 && prevCajas >= 15 && cajas > 0 && cajas <= prevCajas * 0.05) {
+          break;
+        }
+        if (cajas > 0) {
+          prevCajas = cajas;
+        }
         const addVal = cajas > 0 ? cajas : 1;
         tabMetric.validRecordsRead++;
 
@@ -791,12 +841,38 @@ export function parseWorkbookFull(
     return clientMap;
   };
 
+  // Une dos mapas cliente->cajas (suma por cliente). Se usa para combinar hoja del Sheet + ventas del mes.
+  const unirMapas = (a: Map<string, number>, b: Map<string, number>): Map<string, number> => {
+    const out = new Map<string, number>(a);
+    b.forEach((v, k) => out.set(k, +((out.get(k) || 0) + v).toFixed(4)));
+    return out;
+  };
+
+  // Cajas netas del mes por cliente para un rubro, clasificando cada artículo con la misma regla central de rubros.
+  const ventasMesPorRubro = (rubro: RubroCodigo): Map<string, number> => {
+    const acc = new Map<string, number>();
+    for (const v of ventasMes) {
+      const cajas = Number(v.cajas) || 0;
+      if (cajas <= 0) continue;
+      if (clasificarRubro(v.id_articulo, v.articulo) !== rubro) continue;
+      const { rawClean, canonical } = normalizeClientCode(v.id_cliente);
+      if (!canonical) continue;
+      acc.set(canonical, +((acc.get(canonical) || 0) + cajas).toFixed(4));
+      if (rawClean && rawClean !== canonical) acc.set(rawClean, acc.get(canonical)!);
+    }
+    return acc;
+  };
+
   const productMaps = {
     ACEITE: readProductPurchaseSheet(['aceite'], ['aceite']),
     AZUCAR: readProductPurchaseSheet(['azucar'], ['azucar']),
     POLLO: readProductPurchaseSheet(['pollo'], ['pollo']),
     ESTANDAR_ASTURIAS: readProductPurchaseSheet(['jamon_asturias', 'estandar_asturias'], ['jamon', 'asturias']),
-    MORTADELA_SALPICAO: readProductPurchaseSheet(['enteros_ligeros', 'mortadela_salpicao'], ['ligeros', 'salpicao', 'mortadela'])
+    MORTADELA_SALPICAO: readProductPurchaseSheet(['enteros_ligeros', 'mortadela_salpicao'], ['ligeros', 'salpicao', 'mortadela']),
+    // Rubros activos desde Noviembre 2026
+    LECHE_VENCAMPO: unirMapas(readProductPurchaseSheet(['leche', 'leche_vencampo', 'leche_en_polvo_vencampo'], ['leche']), ventasMesPorRubro('LECHE_VENCAMPO')),
+    MORTADELA_ASTURIAS: unirMapas(readProductPurchaseSheet(['mortadela_asturias'], []), ventasMesPorRubro('MORTADELA_ASTURIAS')),
+    SALPICAO: unirMapas(readProductPurchaseSheet(['salpicao'], []), ventasMesPorRubro('SALPICAO'))
   };
 
   // ============================================================================
@@ -818,6 +894,9 @@ export function parseWorkbookFull(
     flagPollo: boolean;
     flagAsturias: boolean;
     flagSalpicao: boolean;
+    flagLeche: boolean;
+    flagMortadelaAsturias: boolean;
+    flagSalpicaoNuevo: boolean;
   }
 
   const sheetClientsByCanonical = new Map<string, SheetClientRow>();
@@ -844,7 +923,9 @@ export function parseWorkbookFull(
           azucar: ['azucar'],
           pollo: ['pollo', 'arroz'],
           asturias: ['estandar_y_superior_asturias', 'jamon_asturias', 'estandar_asturias'],
-          salpicao: ['mortadela_salpicao_y_asturias', 'enteros_ligeros', 'mortadela_salpicao']
+          salpicao: ['mortadela_salpicao_y_asturias', 'enteros_ligeros', 'mortadela_salpicao'],
+          leche: ['leche_en_polvo_vencampo', 'leche_vencampo', 'leche'],
+          mortadelaAsturias: ['mortadela_asturias']
         },
         {
           codigo: 0,
@@ -854,9 +935,13 @@ export function parseWorkbookFull(
           azucar: 4,
           pollo: 5,
           asturias: 6,
-          salpicao: 7
+          salpicao: 7,
+          leche: -1,
+          mortadelaAsturias: -1
         }
       );
+      // 'Salpicao' (rubro nuevo): solo coincidencia EXACTA, para no confundirlo con la columna combinada legacy
+      const salpicaoNuevoIdx = (rows[0] || []).map(normalizeHeaderKey).indexOf('salpicao');
 
       for (let r = 1; r < rows.length; r++) {
         const row = rows[r];
@@ -884,9 +969,14 @@ export function parseWorkbookFull(
         const flagPollo = cols.pollo >= 0 ? parseTruthySheetFlag(row[cols.pollo]) : false;
         const flagAsturias = cols.asturias >= 0 ? parseTruthySheetFlag(row[cols.asturias]) : false;
         const flagSalpicao = cols.salpicao >= 0 ? parseTruthySheetFlag(row[cols.salpicao]) : false;
+        const flagLeche = cols.leche >= 0 ? parseTruthySheetFlag(row[cols.leche]) : false;
+        const flagMortadelaAsturias = cols.mortadelaAsturias >= 0 ? parseTruthySheetFlag(row[cols.mortadelaAsturias]) : false;
+        const flagSalpicaoNuevo = salpicaoNuevoIdx >= 0 ? parseTruthySheetFlag(row[salpicaoNuevoIdx]) : false;
 
-        const mappedVendor =
-          rawVendor.toUpperCase() === 'FOOD SERVICE NORTE'
+        const ccSheet = normalizeCuentasClavesVendor(rawVendor);
+        const mappedVendor = ccSheet
+          ? ccSheet.id
+          : rawVendor.toUpperCase() === 'FOOD SERVICE NORTE'
             ? 'JAIDER MEDINA - FOOD SERVICE NORTE'
             : rawVendor;
 
@@ -897,6 +987,9 @@ export function parseWorkbookFull(
           prev.flagPollo = prev.flagPollo || flagPollo;
           prev.flagAsturias = prev.flagAsturias || flagAsturias;
           prev.flagSalpicao = prev.flagSalpicao || flagSalpicao;
+          prev.flagLeche = prev.flagLeche || flagLeche;
+          prev.flagMortadelaAsturias = prev.flagMortadelaAsturias || flagMortadelaAsturias;
+          prev.flagSalpicaoNuevo = prev.flagSalpicaoNuevo || flagSalpicaoNuevo;
           warnings.push({
             sheet: actResolved.sheetName,
             row: r + 1,
@@ -915,7 +1008,10 @@ export function parseWorkbookFull(
           flagAzucar,
           flagPollo,
           flagAsturias,
-          flagSalpicao
+          flagSalpicao,
+          flagLeche,
+          flagMortadelaAsturias,
+          flagSalpicaoNuevo
         });
       }
     }
@@ -939,36 +1035,47 @@ export function parseWorkbookFull(
   >();
 
   for (const mc of masterClients) {
-    const { rawClean, canonical } = normalizeClientCode(mc.cliente_codigo);
+    const rawCodeClean = String(mc.cliente_codigo || '').replace(/#\d+$/, '').trim();
+    const { rawClean, canonical } = normalizeClientCode(rawCodeClean);
     if (!canonical) continue;
+    const rawVId = String(mc.vendedor_id || mc.vendedor_nombre || '').replace(/\s+/g, ' ').trim();
+    if (rawVId.toUpperCase().startsWith('INACTIVO_MAESTRA::')) continue;
+    const rawVNombre = String(mc.vendedor_nombre || mc.vendedor_id || '').replace(/\s+/g, ' ').trim();
+    const ccMc = normalizeCuentasClavesVendor(rawVNombre) || normalizeCuentasClavesVendor(rawVId);
+    const vIdClean = ccMc ? ccMc.id : rawVId;
+    const vNombreClean = ccMc ? ccMc.id : rawVNombre;
+    const compositeKey = `${normalizeVendorName(vNombreClean)}::${canonical}`;
     const sheetMatch = sheetClientsByCanonical.get(canonical);
-    if (!mergedClientsMap.has(canonical)) {
-      mergedClientsMap.set(canonical, {
+    if (!mergedClientsMap.has(compositeKey)) {
+      mergedClientsMap.set(compositeKey, {
         dbId: mc.id,
-        codigo: rawClean || canonical,
+        codigo: String(mc.cliente_codigo || rawClean || canonical).trim(),
         canonical,
         razonSocial: String(mc.cliente_nombre || sheetMatch?.razonSocial || '').trim(),
-        vendedorId: String(mc.vendedor_id || mc.vendedor_nombre || '').replace(/\s+/g, ' ').trim(),
-        vendedorNombre: String(mc.vendedor_nombre || mc.vendedor_id || '').replace(/\s+/g, ' ').trim(),
+        vendedorId: vIdClean,
+        vendedorNombre: vNombreClean,
         isNewFromSheet: false,
         sheetFlags: sheetMatch
       });
     }
   }
 
-  // Incorporar automáticamente cualquier cliente presente en el Google Sheet que no exista aún en la maestra
-  for (const [canonical, sc] of sheetClientsByCanonical.entries()) {
-    if (mergedClientsMap.has(canonical)) continue;
-    if (sc.vendedor.toUpperCase() === 'ALI PEREZ') continue;
-    mergedClientsMap.set(canonical, {
-      codigo: sc.rawCode || canonical,
-      canonical,
-      razonSocial: sc.razonSocial,
-      vendedorId: sc.vendedor,
-      vendedorNombre: sc.vendedor,
-      isNewFromSheet: true,
-      sheetFlags: sc
-    });
+  // Solo usar los registros del Sheet como cartera base si no existe aún cartera maestra cargada
+  if (masterClients.length === 0) {
+    for (const [canonical, sc] of sheetClientsByCanonical.entries()) {
+      const compositeKey = `${normalizeVendorName(sc.vendedor)}::${canonical}`;
+      if (mergedClientsMap.has(compositeKey)) continue;
+      if (sc.vendedor.toUpperCase() === 'ALI PEREZ') continue;
+      mergedClientsMap.set(compositeKey, {
+        codigo: sc.rawCode || canonical,
+        canonical,
+        razonSocial: sc.razonSocial,
+        vendedorId: sc.vendedor,
+        vendedorNombre: sc.vendedor,
+        isNewFromSheet: true,
+        sheetFlags: sc
+      });
+    }
   }
 
   const activacionApiRows: any[] = [];
@@ -984,13 +1091,20 @@ export function parseWorkbookFull(
     const cPollo = productMaps.POLLO.get(c.canonical) || productMaps.POLLO.get(c.codigo) || 0;
     const cAsturias = productMaps.ESTANDAR_ASTURIAS.get(c.canonical) || productMaps.ESTANDAR_ASTURIAS.get(c.codigo) || 0;
     const cSalpicao = productMaps.MORTADELA_SALPICAO.get(c.canonical) || productMaps.MORTADELA_SALPICAO.get(c.codigo) || 0;
+    const cLeche = productMaps.LECHE_VENCAMPO.get(c.canonical) || productMaps.LECHE_VENCAMPO.get(c.codigo) || 0;
+    const cMortAst = productMaps.MORTADELA_ASTURIAS.get(c.canonical) || productMaps.MORTADELA_ASTURIAS.get(c.codigo) || 0;
+    const cSalpNuevo = productMaps.SALPICAO.get(c.canonical) || productMaps.SALPICAO.get(c.codigo) || 0;
 
     const hasAceite = cAceite > 0 || Boolean(c.sheetFlags?.flagAceite);
     const hasAzucar = cAzucar > 0 || Boolean(c.sheetFlags?.flagAzucar);
     const hasPollo = cPollo > 0 || Boolean(c.sheetFlags?.flagPollo);
     const hasAsturias = cAsturias > 0 || Boolean(c.sheetFlags?.flagAsturias);
     const hasSalpicao = cSalpicao > 0 || Boolean(c.sheetFlags?.flagSalpicao);
-    const isActivo = hasAceite || hasAzucar || hasPollo || hasAsturias || hasSalpicao;
+    const hasLeche = cLeche > 0 || Boolean(c.sheetFlags?.flagLeche);
+    const hasMortAst = cMortAst > 0 || Boolean(c.sheetFlags?.flagMortadelaAsturias);
+    const hasSalpNuevo = cSalpNuevo > 0 || Boolean(c.sheetFlags?.flagSalpicaoNuevo);
+    // Cliente 'ACTIVO' = compró al menos uno de los rubros activos del mes (ver src/lib/rubros.ts)
+    const isActivo = hasAzucar || hasLeche || hasAsturias || hasMortAst || hasSalpNuevo;
 
     const vNorm = normalizeVendorName(c.vendedorNombre || c.vendedorId);
     if (!clientActByVendor.has(vNorm)) {
@@ -1000,7 +1114,10 @@ export function parseWorkbookFull(
         AZUCAR: 0,
         POLLO: 0,
         'ESTANDAR Y SUPERIOR ASTURIAS': 0,
-        'MORTADELA SALPICAO Y ASTURIAS': 0
+        'MORTADELA SALPICAO Y ASTURIAS': 0,
+        'LECHE VENCAMPO': 0,
+        'MORTADELA ASTURIAS': 0,
+        SALPICAO: 0
       });
     }
     const vCounts = clientActByVendor.get(vNorm)!;
@@ -1012,6 +1129,9 @@ export function parseWorkbookFull(
     if (hasPollo) vCounts.POLLO++;
     if (hasAsturias) vCounts['ESTANDAR Y SUPERIOR ASTURIAS']++;
     if (hasSalpicao) vCounts['MORTADELA SALPICAO Y ASTURIAS']++;
+    if (hasLeche) vCounts['LECHE VENCAMPO']++;
+    if (hasMortAst) vCounts['MORTADELA ASTURIAS']++;
+    if (hasSalpNuevo) vCounts.SALPICAO++;
 
     const supaPayload = {
       ...(c.dbId !== undefined ? { id: c.dbId } : {}),
@@ -1030,7 +1150,14 @@ export function parseWorkbookFull(
       has_azucar: hasAzucar,
       has_pollo: hasPollo,
       has_estandar_asturias: hasAsturias,
-      has_mortadela_salpicao: hasSalpicao
+      has_mortadela_salpicao: hasSalpicao,
+      // Rubros nuevos (requieren scripts/sql/03_rubros_noviembre_2026.sql; el servidor las omite si la BD aún no las tiene)
+      cajas_leche_vencampo: cLeche,
+      cajas_mortadela_asturias: cMortAst,
+      cajas_salpicao: cSalpNuevo,
+      has_leche_vencampo: hasLeche,
+      has_mortadela_asturias: hasMortAst,
+      has_salpicao: hasSalpNuevo
     };
 
     if (c.dbId !== undefined) {
@@ -1039,15 +1166,18 @@ export function parseWorkbookFull(
       newSheetClientsForSupabase.push(supaPayload);
     }
 
+    const ccAct = normalizeCuentasClavesVendor(c.vendedorNombre) || normalizeCuentasClavesVendor(c.vendedorId);
     const vendUpper = c.vendedorId.toUpperCase();
     const isVilla = vendUpper.includes('VILLA');
     const isJohnatanOrMikel =
       vendUpper.includes('JOHNATAN') || vendUpper.includes('MIKELANGELO') || vendUpper.includes('SOTO');
-    const displayVendedorNombre = isJohnatanOrMikel
-      ? isVilla
-        ? 'Mikelangelo Diaz (Villa del Rosario)'
-        : 'Mikelangelo Diaz (Principal)'
-      : c.vendedorNombre;
+    const displayVendedorNombre = ccAct
+      ? ccAct.display
+      : isJohnatanOrMikel
+        ? isVilla
+          ? 'Mikelangelo Diaz (Villa del Rosario)'
+          : 'Mikelangelo Diaz (Principal)'
+        : c.vendedorNombre;
     const displayEmail = isJohnatanOrMikel ? 'Mikelangelodiaz@gmail.com' : undefined;
 
     activacionApiRows.push({
@@ -1063,6 +1193,9 @@ export function parseWorkbookFull(
         POLLO: hasPollo,
         ESTANDAR_ASTURIAS: hasAsturias,
         MORTADELA_SALPICAO: hasSalpicao,
+        LECHE_VENCAMPO: hasLeche,
+        MORTADELA_ASTURIAS: hasMortAst,
+        SALPICAO: hasSalpNuevo,
         ARROZ: hasPollo,
         ENTERO: hasAsturias,
         LIGEROS: hasSalpicao
@@ -1072,7 +1205,10 @@ export function parseWorkbookFull(
         AZUCAR: cAzucar,
         POLLO: cPollo,
         ESTANDAR_ASTURIAS: cAsturias,
-        MORTADELA_SALPICAO: cSalpicao
+        MORTADELA_SALPICAO: cSalpicao,
+        LECHE_VENCAMPO: cLeche,
+        MORTADELA_ASTURIAS: cMortAst,
+        SALPICAO: cSalpNuevo
       }
     });
   }
@@ -1110,30 +1246,42 @@ export function parseWorkbookFull(
       const findCategoryCols = (
         catKeywords: string[],
         fallbackMeta: number,
-        fallbackAct: number
+        fallbackAct: number,
+        exact = false
       ): { metaIdx: number; actIdx: number } => {
-        // Buscar en fila 1 ("Meta Aceite ", "Meta azucar", etc.) o en fila 0 ("ACEITE ", "AZUCAR", etc.)
-        for (let c = 0; c < Math.max(h0.length, h1.length); c++) {
-          const cell1 = h1[c] || '';
+        // Priorizar fila 0 ("AZUCAR", "LECHE VENCAMPO", etc.) y luego fila 1 ("Meta azucar", etc.)
+        // `exact`: la celda debe ser IGUAL a la palabra clave (rubros nuevos que no deben confundirse con la columna combinada legacy)
+        const matches = (cell: string, kw: string) => (exact ? cell === kw : cell === kw || cell.includes(kw));
+        const maxCols = Math.max(h0.length, h1.length);
+        for (let c = 0; c < maxCols; c++) {
           const cell0 = h0[c] || '';
-          if (
-            (cell1.startsWith('meta') && catKeywords.some((kw) => cell1.includes(kw))) ||
-            catKeywords.some((kw) => cell0 === kw || cell0.includes(kw))
-          ) {
-            const actCol = h1[c + 1]?.includes('activad') ? c + 1 : c + 1;
-            return { metaIdx: c, actIdx: actCol };
+          if (cell0 && catKeywords.some((kw) => matches(cell0, kw))) {
+            return { metaIdx: c, actIdx: c + 1 };
+          }
+        }
+        for (let c = 0; c < maxCols; c++) {
+          const cell1 = h1[c] || '';
+          if (cell1.startsWith('meta') && catKeywords.some((kw) => (exact ? cell1 === `meta_${kw}` : cell1.includes(kw)))) {
+            return { metaIdx: c, actIdx: c + 1 };
           }
         }
         return { metaIdx: fallbackMeta, actIdx: fallbackAct };
       };
 
-      const catDefs = [
-        { name: 'ACEITE', ...findCategoryCols(['aceite'], 2, 3) },
-        { name: 'AZÚCAR', ...findCategoryCols(['azucar'], 4, 5) },
-        { name: 'POLLO', ...findCategoryCols(['pollo', 'arroz'], 6, 7) },
-        { name: 'ESTANDAR Y SUPERIOR ASTURIAS', ...findCategoryCols(['estandar', 'superior'], 8, 9) },
-        { name: 'MORTADELA SALPICAO Y ASTURIAS', ...findCategoryCols(['mortadela', 'salpicao'], 10, 11) }
-      ];
+      // Categorías = rubros ACTIVOS de la configuración central (src/lib/rubros.ts). Cada una busca su columna de
+      // meta/activados por encabezado; si el Grid aún no trae esa columna (-1) la meta queda en 0 y los activados
+      // se calculan con la cartera real (liveCounts).
+      const GRID_KEYWORDS: Record<string, { kw: string[]; exact?: boolean }> = {
+        AZUCAR: { kw: ['azucar'] },
+        LECHE_VENCAMPO: { kw: ['leche_vencampo', 'leche_en_polvo_vencampo', 'leche'] },
+        ESTANDAR_ASTURIAS: { kw: ['estandar', 'superior'] },
+        MORTADELA_ASTURIAS: { kw: ['mortadela_asturias'], exact: true },
+        SALPICAO: { kw: ['salpicao'], exact: true }
+      };
+      const catDefs = RUBROS_ACTIVOS_CONFIG.map((r) => {
+        const g = GRID_KEYWORDS[r.codigo] || { kw: [r.categoriaServidor.toLowerCase()] };
+        return { name: r.categoriaServidor, ...findCategoryCols(g.kw, -1, -1, g.exact) };
+      });
 
       for (let r = 2; r < rows.length; r++) {
         const row = rows[r];
@@ -1163,7 +1311,7 @@ export function parseWorkbookFull(
         for (const cDef of catDefs) {
           const meta = Math.round(parseLocaleNumber(row[cDef.metaIdx], 0));
           let activados = Math.round(parseLocaleNumber(row[cDef.actIdx], 0));
-          if (activados === 0 && liveCounts && liveCounts[cDef.name] !== undefined) {
+          if (cDef.actIdx < 0 && liveCounts && liveCounts[cDef.name] !== undefined) {
             activados = liveCounts[cDef.name];
           }
 
@@ -1186,13 +1334,7 @@ export function parseWorkbookFull(
 
       if (!metasSupabaseRows.some((m) => normalizeVendorName(m.vendedor_id).includes('ANGEL NAVARRO'))) {
         const angelCounts = clientActByVendor.get('ANGEL NAVARRO') || {};
-        for (const cat of [
-          'ACEITE',
-          'AZÚCAR',
-          'POLLO',
-          'ESTANDAR Y SUPERIOR ASTURIAS',
-          'MORTADELA SALPICAO Y ASTURIAS'
-        ]) {
+        for (const cat of RUBROS_ACTIVOS_CONFIG.map((r) => r.categoriaServidor)) {
           const act = angelCounts[cat] || 0;
           metasSupabaseRows.push({ periodo, vendedor_id: 'ANGEL NAVARRO', categoria: cat, meta: 0, activados: act });
           metasApiRows.push({ vendedorId: 'ANGEL NAVARRO', categoria: cat, meta: 0, activados: act });

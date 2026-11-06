@@ -30,6 +30,9 @@ export interface ActivacionData {
     POLLO?: number;
     ESTANDAR_ASTURIAS?: number;
     MORTADELA_SALPICAO?: number;
+    LECHE_VENCAMPO?: number;
+    MORTADELA_ASTURIAS?: number;
+    SALPICAO?: number;
     ARROZ?: number;
     ENTERO?: number;
     LIGEROS?: number;
@@ -41,6 +44,9 @@ export interface ActivacionData {
     POLLO?: number;
     ESTANDAR_ASTURIAS?: number;
     MORTADELA_SALPICAO?: number;
+    LECHE_VENCAMPO?: number;
+    MORTADELA_ASTURIAS?: number;
+    SALPICAO?: number;
     [key: string]: number | undefined;
   };
 }

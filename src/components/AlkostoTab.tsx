@@ -349,7 +349,7 @@ export function AlkostoTab({ vendedoraNombre = 'SAIRU VALLES', userRole = 'VENDE
 🏢 *Sucursal:* ${pedido.sucursalNombre} (Cód. ${pedido.sucursalCodigo})
 📝 *OC Alkosto:* ${pedido.ordenCompraAlkosto || 'N/A'}
 📅 *Fecha:* ${pedido.fechaPedido} | *Entrega:* ${pedido.fechaEntregaEstimada}
-👤 *Vendedora:* ${pedido.vendedora} (Cuentas Clave 2)
+👤 *Vendedora:* ${pedido.vendedora} (Cuentas claves 2 - SV)
 
 📦 *DETALLE DE PRODUCTOS:*
 ${(pedido?.items || []).map((it, idx) => `${idx + 1}. ${it?.producto || ''}\n   ▸ Cantidad: ${it?.cantidadCajas || 0} cjs/bultos (${it?.totalKilos || 0} kg)\n   ▸ Subtotal: $${(it?.subtotalUSD || 0).toFixed(2)}`).join('\n\n')}
@@ -505,7 +505,7 @@ ${pedido.observaciones ? `💬 *Observaciones:* ${pedido.observaciones}` : ''}
               </div>
               <div>
                 <span className="text-xs font-mono font-bold text-red-400 uppercase tracking-widest block">
-                  CUENTAS CLAVE 2 • {vendedoraNombre}
+                  Cuentas claves 2 - SV • {vendedoraNombre}
                 </span>
                 <h1 className="text-2xl sm:text-3xl font-sans font-black text-white tracking-tight flex items-center gap-2">
                   MÓDULO <span className="text-red-500">ALKOSTO</span>

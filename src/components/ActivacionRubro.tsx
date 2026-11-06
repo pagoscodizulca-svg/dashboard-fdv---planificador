@@ -4,7 +4,15 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Target, Search, FileText, CheckCircle2, Droplets, Flame, Drumstick, Package as PkgIcon, Sparkles, CheckSquare, Square, Activity, X, RotateCcw } from 'lucide-react';
 import { VolumenData, ActivacionData } from '../types';
 import { getMesLaboralInfo } from '../utils/calendar';
-import { RubroCodigo, RUBROS_ACTIVACION, clasificarRubro } from '../lib/rubros';
+import {
+  RubroCodigo,
+  RUBROS_ACTIVACION,
+  RUBROS_ACTIVOS_CONFIG,
+  RUBRO_LABEL,
+  RUBRO_KEYWORDS,
+  RUBRO_SERVER_CATEGORY,
+  clasificarRubro
+} from '../lib/rubros';
 import { categoryToRubroCode } from '../services/historialService';
 import { Rubro360Panel, RubroStatsActual } from './Rubro360Panel';
 
@@ -24,7 +32,12 @@ interface Props {
 }
 
 interface CategoriaStats {
+  /** Clave interna de categoría del servidor (no se muestra). */
   categoria: string;
+  /** Código canónico del rubro. */
+  codigo: RubroCodigo;
+  /** Nombre comercial mostrado al usuario (viene de src/lib/rubros.ts). */
+  label: string;
   meta: number;
   activados: number;
   faltante: number;
@@ -63,34 +76,29 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
     });
   };
 
-  // Mapping categories to icons based on the new activation products
+  // Ícono por rubro (clave = código canónico del rubro, ver src/lib/rubros.ts)
   const getIconForCategory = (cat: string) => {
-    const c = (cat || '').toUpperCase();
-    if (c.includes('ACEITE')) return <Droplets className="w-4 h-4 text-amber-500" />;
-    if (c.includes('AZÚCAR') || c.includes('AZUCAR')) return <Flame className="w-4 h-4 text-rose-500" />;
-    if (c.includes('POLLO')) return <Drumstick className="w-4 h-4 text-orange-400" />;
-    if (c.includes('ESTANDAR') || c.includes('SUPERIOR')) return <PkgIcon className="w-4 h-4 text-emerald-500" />;
-    if (c.includes('MORTADELA') || c.includes('SALPICAO')) return <Sparkles className="w-4 h-4 text-cyan-400" />;
-    return <Target className="w-4 h-4 text-neutral-400" />;
+    switch (categoryToRubroCode(cat)) {
+      case 'AZUCAR':
+        return <Flame className="w-4 h-4 text-rose-500" />;
+      case 'LECHE_VENCAMPO':
+        return <Droplets className="w-4 h-4 text-sky-400" />;
+      case 'ESTANDAR_ASTURIAS':
+        return <PkgIcon className="w-4 h-4 text-emerald-500" />;
+      case 'MORTADELA_ASTURIAS':
+        return <Drumstick className="w-4 h-4 text-orange-400" />;
+      case 'SALPICAO':
+        return <Sparkles className="w-4 h-4 text-cyan-400" />;
+      default:
+        return <Target className="w-4 h-4 text-neutral-400" />;
+    }
   };
 
-  const TARGET_CATEGORIES = [
-    'ACEITE',
-    'AZÚCAR',
-    'POLLO',
-    'ESTANDAR Y SUPERIOR ASTURIAS',
-    'MORTADELA SALPICAO Y ASTURIAS'
-  ];
+  // Rubros activos del mes: viven en UN solo lugar (src/lib/rubros.ts -> RUBROS_CONFIG)
+  const TARGET_CATEGORIES = RUBROS_ACTIVOS_CONFIG.map((r) => r.categoriaServidor);
 
-  const normalizeCat = (cat: string) => {
-    const c = (cat || '').toUpperCase();
-    if (c.includes('ACEITE')) return 'ACEITE';
-    if (c.includes('AZUCAR') || c.includes('AZÚCAR')) return 'AZÚCAR';
-    if (c.includes('POLLO')) return 'POLLO';
-    if (c.includes('ESTANDAR') || c.includes('SUPERIOR')) return 'ESTANDAR Y SUPERIOR ASTURIAS';
-    if (c.includes('MORTADELA') || c.includes('SALPICAO')) return 'MORTADELA SALPICAO Y ASTURIAS';
-    return c;
-  };
+  // Cualquier nombre de categoría (nuevo o legacy) -> clave de categoría del servidor del rubro activo equivalente
+  const normalizeCat = (cat: string) => RUBRO_SERVER_CATEGORY[categoryToRubroCode(cat)] || (cat || '').toUpperCase();
 
   const categoriaStats: CategoriaStats[] = useMemo(() => {
     let manualMap: Record<string, any> = {};
@@ -106,24 +114,15 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
         const key = a.id ? String(a.id).replace(/^[#\s]+/, '').trim() : String(a.cliente || '').trim();
         if (!key) continue;
         const ov = manualMap[key];
-        let isActive = false;
-        switch (cat) {
-          case 'ACEITE':
-            isActive = ov?.ACEITE !== undefined ? Boolean(ov.ACEITE) : Boolean(a.cats?.ACEITE || (Number(a.cajas?.ACEITE) || 0) > 0);
-            break;
-          case 'AZÚCAR':
-            isActive = ov?.AZUCAR !== undefined ? Boolean(ov.AZUCAR) : Boolean(a.cats?.AZUCAR || a.cats?.AZÚCAR || (Number(a.cajas?.AZUCAR) || 0) > 0);
-            break;
-          case 'POLLO':
-            isActive = ov?.POLLO !== undefined ? Boolean(ov.POLLO) : Boolean(a.cats?.POLLO || a.cats?.ARROZ || (Number(a.cajas?.POLLO) || 0) > 0);
-            break;
-          case 'ESTANDAR Y SUPERIOR ASTURIAS':
-            isActive = ov?.ESTANDAR_ASTURIAS !== undefined ? Boolean(ov.ESTANDAR_ASTURIAS) : Boolean(a.cats?.ESTANDAR_ASTURIAS || a.cats?.ENTERO || (Number(a.cajas?.ESTANDAR_ASTURIAS) || 0) > 0);
-            break;
-          case 'MORTADELA SALPICAO Y ASTURIAS':
-            isActive = ov?.MORTADELA_SALPICAO !== undefined ? Boolean(ov.MORTADELA_SALPICAO) : Boolean(a.cats?.MORTADELA_SALPICAO || a.cats?.LIGEROS || (Number(a.cajas?.MORTADELA_SALPICAO) || 0) > 0);
-            break;
-        }
+        const code = categoryToRubroCode(cat);
+        // Alias de claves antiguas que aún pueden venir en el payload (compatibilidad)
+        const aliasCats: Record<string, string[]> = { AZUCAR: ['AZÚCAR'], ESTANDAR_ASTURIAS: ['ENTERO'] };
+        const claves = [code, ...(aliasCats[code] || [])];
+        const ovVal = ov?.[code];
+        const isActive =
+          ovVal !== undefined
+            ? Boolean(ovVal)
+            : claves.some((k) => Boolean(a.cats?.[k])) || (Number(a.cajas?.[code]) || 0) > 0;
         if (isActive) activeSet.add(key);
         else if (ov) activeSet.delete(key);
       }
@@ -147,15 +146,18 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
         const d = statsMap.get(cat) || { meta: 0, activados: 0 };
         const clientAct = countClientActivations(cat);
         const meta = d.meta;
-        // Si el grid tiene activados usa el grid, si tiene 0 o guion '-' usa el conteo real de clientes
-        const activados = d.activados > 0 ? d.activados : clientAct;
+        // Si el grid tiene meta o activados definidos usa el grid (incluyendo '-' = 0), si no usa el conteo real de clientes
+        const activados = (d.meta > 0 || d.activados > 0) ? d.activados : clientAct;
         const faltante = Math.max(0, meta - activados);
         const cumplimiento = meta > 0 ? (activados / meta) * 100 : 0;
         const estCierre = mesInfo.elapsedWorkingDays > 0
           ? Math.round((activados / mesInfo.elapsedWorkingDays) * mesInfo.totalWorkingDays)
           : activados;
+        const codigo = categoryToRubroCode(cat);
         return {
           categoria: cat,
+          codigo,
+          label: RUBRO_LABEL[codigo],
           meta,
           activados,
           faltante,
@@ -169,8 +171,11 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
     return TARGET_CATEGORIES.map(cat => {
       const activados = countClientActivations(cat);
       const meta = 0;
+      const codigo = categoryToRubroCode(cat);
       return {
         categoria: cat,
+        codigo,
+        label: RUBRO_LABEL[codigo],
         meta,
         activados,
         faltante: 0,
@@ -191,17 +196,9 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
       if (statusFilter === 'SELECCIONADOS_360' && selectedRubros.length > 0 && !selectedRubros.includes(rCode)) return false;
 
       if (!q) return true;
-      if (normSearchText(c.categoria).includes(q)) return true;
+      if (normSearchText(c.label).includes(q) || normSearchText(c.categoria).includes(q)) return true;
       // Coincidencia por sinónimos y artículos/SKUs pertenecientes al rubro
-      const extraKeywords: Record<RubroCodigo, string> = {
-        ACEITE: 'aceite oleo soya girasol',
-        AZUCAR: 'azucar montalban',
-        POLLO: 'pollo filet muslo alas higado molleja arroz',
-        ESTANDAR_ASTURIAS: 'jamon estandar superior asturias entero',
-        MORTADELA_SALPICAO: 'mortadela salpicao asturias ligeros',
-        OTROS: 'otros varios',
-      };
-      if ((extraKeywords[rCode] || '').includes(q)) return true;
+      if (normSearchText(RUBRO_KEYWORDS[rCode] || '').includes(q)) return true;
       return (filteredVolumen || []).some((v: any) => {
         const sku = String(v.skuId || v.sku || '');
         const art = String(v.articulo || v.nombre || '');
@@ -277,7 +274,7 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
       const estadoStr = isSuccess ? 'Cumplido (>=100%)' : 'En Riesgo';
       return [
         (idx + 1).toString(),
-        stat.categoria,
+        stat.label,
         stat.meta.toString(),
         stat.activados.toString(),
         stat.faltante === 0 ? '¡Meta! (0)' : stat.faltante.toString(),
@@ -427,7 +424,12 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
                 </div>
               </div>
 
-              <h3 className="text-sm font-sans font-bold text-white uppercase tracking-wider mb-2">{stat.categoria}</h3>
+              <h3
+                title={stat.label}
+                className="text-sm font-sans font-bold text-white uppercase tracking-wide leading-snug mb-2 min-h-[2.5rem] line-clamp-2 break-words"
+              >
+                {stat.label}
+              </h3>
               
               <div className="text-3xl md:text-4xl font-mono text-white font-bold tracking-tight mb-4">
                 {stat.activados} <span className="text-xs md:text-sm text-neutral-500 font-sans font-normal">/ {stat.meta} CLI</span>
@@ -572,7 +574,7 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
                 <th className="p-3 md:p-4 text-center w-14 border-r border-neutral-800">
                   <button
                     type="button"
-                    title={todosTildados ? 'Quitar los 5 rubros' : 'Tildar los 5 rubros'}
+                    title={todosTildados ? `Quitar los ${RUBROS_ACTIVACION.length} rubros` : `Tildar los ${RUBROS_ACTIVACION.length} rubros`}
                     onClick={() => setSelectedRubros(todosTildados ? [] : [...RUBROS_ACTIVACION])}
                     className="inline-flex items-center justify-center gap-1 text-neutral-400 hover:text-white"
                   >
@@ -619,10 +621,10 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
                         )}
                       </div>
                     </td>
-                    <td className="p-3 md:p-4 font-sans font-bold text-white border-r border-neutral-800">
+                    <td className="p-3 md:p-4 font-sans font-bold text-white border-r border-neutral-800 min-w-[200px] max-w-[320px]">
                       <div className="flex items-center gap-2">
-                        {getIconForCategory(stat.categoria)}
-                        <span>{stat.categoria}</span>
+                        <span className="shrink-0">{getIconForCategory(stat.categoria)}</span>
+                        <span title={stat.label} className="line-clamp-2 break-words leading-tight">{stat.label}</span>
                       </div>
                     </td>
                     <td className="p-3 md:p-4 text-center border-r border-neutral-800">{stat.meta}</td>
@@ -710,7 +712,7 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
                   {totalEstCierre} cli
                 </td>
                 <td className="p-3 md:p-4 text-center text-neutral-500 font-sans text-[10px]">
-                  5 Rubros
+                  {RUBROS_ACTIVACION.length} Rubros
                 </td>
               </tr>
             </tbody>

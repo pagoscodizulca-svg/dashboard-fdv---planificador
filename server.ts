@@ -40,6 +40,20 @@ import {
   hasPrimaryNounConflict,
   isBrandOrPresentationToken
 } from "./src/services/productosCodizulca";
+import crypto from "crypto";
+import { categoriaARubroCodigo, clasificarRubro, esRubroActivo } from "./src/lib/rubros";
+import {
+  parseMaestraBytes,
+  MaestraParseError
+} from "./src/utils/maestraParser";
+import {
+  crearMaestraRepoSupabase,
+  calcularPreviewDb,
+  sincronizarMaestra,
+  leerCarteraActivaMaestra,
+  MaestraEsquemaError,
+  MaestraBajasMasivasError
+} from "./src/utils/maestraSync";
 import {
   VENEZUELAN_BANKING_AUDIT_SYSTEM_PROMPT,
   VENEZUELAN_RECEIPT_RESPONSE_SCHEMA,
@@ -92,9 +106,14 @@ import {
   getSupervisorProfile,
   getSupervisedAliases,
   getSupervisedRoutes,
+  hydrateVendorProfilesFromMasterCatalog,
   matchesVendorAlias,
   normalizeVendorName
 } from './src/utils/vendorRoutes';
+import {
+  getRuntimeSellerCatalog,
+  hydrateRuntimeSellerCatalog
+} from './src/utils/maestraCatalogSanitizer';
 import {
   getGoogleSheetId,
   buildGoogleSheetExportUrl,
@@ -4117,6 +4136,184 @@ async function startServer() {
     }
   });
 
+  // ==============================================================
+  // MAESTRA ACTIVA (clientes / vendedores / supervisores) - solo ADMIN
+  //   POST /api/maestra/preview : parsea el CSV y calcula el diff contra la BD SIN escribir
+  //   POST /api/maestra/sync    : re-parsea en el servidor (nunca confía en el cliente) y sincroniza
+  //   GET  /api/maestra/estado  : última carga registrada
+  // ==============================================================
+  let maestraSyncEnCurso = false;
+
+  function leerCsvMaestraDeBody(body: any): { bytes: Buffer; archivoNombre: string; sha256: string } {
+    const b64 = String(body?.csvBase64 || '').replace(/^data:[^;]+;base64,/, '').replace(/\s+/g, '');
+    if (!b64) throw new MaestraParseError('Falta el archivo CSV (csvBase64).');
+    const bytes = Buffer.from(b64, 'base64');
+    if (bytes.length === 0) throw new MaestraParseError('El archivo CSV está vacío.');
+    if (bytes.length > 20 * 1024 * 1024) throw new MaestraParseError('El archivo CSV supera el máximo de 20 MB.');
+    return {
+      bytes,
+      archivoNombre: String(body?.archivo || 'maestra.csv').slice(0, 200),
+      sha256: crypto.createHash('sha256').update(bytes).digest('hex')
+    };
+  }
+
+  function responderErrorMaestra(res: any, err: any, contexto: string) {
+    if (err instanceof MaestraParseError) {
+      return res.status(400).json({ success: false, code: 'CSV_INVALIDO', error: err.message });
+    }
+    if (err instanceof MaestraEsquemaError) {
+      return res.status(412).json({ success: false, code: 'ESQUEMA_FALTANTE', error: err.message });
+    }
+    if (err instanceof MaestraBajasMasivasError) {
+      return res.status(409).json({
+        success: false,
+        code: 'BAJAS_MASIVAS',
+        error: err.message,
+        bajas: err.bajas,
+        activos: err.activos
+      });
+    }
+    console.error(`[MAESTRA] Error en ${contexto}:`, err?.message || err);
+    return res.status(500).json({ success: false, code: 'ERROR_INTERNO', error: err?.message || `Error en ${contexto}` });
+  }
+
+  app.post(
+    "/api/maestra/preview",
+    authenticateToken,
+    requireAdmin,
+    rateLimiter(60_000, 20, 'maestra-preview'),
+    async (req: any, res: any) => {
+      try {
+        const { bytes, archivoNombre, sha256 } = leerCsvMaestraDeBody(req.body);
+        const parsed = parseMaestraBytes(new Uint8Array(bytes));
+
+        const conteoPorVendedor = new Map<number, number>();
+        parsed.clientes.forEach(c => conteoPorVendedor.set(c.idVendedor, (conteoPorVendedor.get(c.idVendedor) || 0) + 1));
+
+        let db: any = null;
+        if (supabase) {
+          const { aBajaIds, ...resto } = await calcularPreviewDb(crearMaestraRepoSupabase(supabase), parsed, { archivoSha256: sha256 });
+          db = { ...resto, aBajaMuestra: aBajaIds.slice(0, 25) };
+        }
+
+        res.json({
+          success: true,
+          archivo: { nombre: archivoNombre, sha256, bytes: bytes.length },
+          reporte: parsed.reporte,
+          supervisores: parsed.supervisores,
+          vendedores: parsed.vendedores.map(v => ({ ...v, clientes: conteoPorVendedor.get(v.idVendedor) || 0 })),
+          db
+        });
+      } catch (err: any) {
+        responderErrorMaestra(res, err, 'preview');
+      }
+    }
+  );
+
+  app.post(
+    "/api/maestra/sync",
+    authenticateToken,
+    requireAdmin,
+    rateLimiter(60_000, 6, 'maestra-sync'),
+    async (req: any, res: any) => {
+      if (maestraSyncEnCurso) {
+        return res.status(409).json({ success: false, code: 'SYNC_EN_CURSO', error: 'Ya hay una sincronización de la maestra en curso.' });
+      }
+      maestraSyncEnCurso = true;
+      try {
+        if (!supabase) {
+          return res.status(503).json({ success: false, code: 'SIN_BASE_DE_DATOS', error: 'Supabase no está configurado en el servidor.' });
+        }
+        const { bytes, archivoNombre, sha256 } = leerCsvMaestraDeBody(req.body);
+        const parsed = parseMaestraBytes(new Uint8Array(bytes));
+
+        const resultado = await sincronizarMaestra(crearMaestraRepoSupabase(supabase), parsed, {
+          periodo: metasPeriodoActual(),
+          archivoNombre,
+          archivoSha256: sha256,
+          creadoPor: String(req.user?.username || req.user?.nombre || 'ADMIN'),
+          forzarBajas: req.body?.forzarBajas === true
+        });
+
+        // Invalidar cachés en memoria para que el Dashboard recalcule la cartera con la maestra nueva
+        cachedVolumenParsed = null;
+        cachedActivacionParsed = null;
+        cachedMetasParsed = null;
+        lastVolumenParsedTime = 0;
+        lastActivacionParsedTime = 0;
+        lastMetasParsedTime = 0;
+
+        console.log(
+          `[MAESTRA] Carga ${resultado.cargaId} (${resultado.estado}): ${resultado.clientes.enArchivo} clientes | nuevos ${resultado.clientes.nuevos} | actualizados ${resultado.clientes.actualizados} | reactivados ${resultado.clientes.reactivados} | dados de baja ${resultado.clientes.desactivados} | vendedores ${resultado.vendedores.enArchivo} | activos en BD ${resultado.verificacion.activosEnBd}`
+        );
+        res.json({ success: true, resultado, reporte: parsed.reporte });
+      } catch (err: any) {
+        responderErrorMaestra(res, err, 'sync');
+      } finally {
+        maestraSyncEnCurso = false;
+      }
+    }
+  );
+
+  app.get("/api/maestra/estado", authenticateToken, requireAdmin, async (_req: any, res: any) => {
+    try {
+      if (!supabase) return res.json({ success: true, esquemaDisponible: false, ultimaCarga: null });
+      const { data, error } = await supabase
+        .from('maestra_cargas')
+        .select('id,periodo,archivo_nombre,estado,creado_por,creado_en,finalizado_en')
+        .order('creado_en', { ascending: false })
+        .limit(1);
+      if (error) {
+        const faltaEsquema = /does not exist|schema cache|Could not find the table/i.test(error.message || '') || error.code === '42P01' || error.code === 'PGRST205';
+        if (faltaEsquema) return res.json({ success: true, esquemaDisponible: false, ultimaCarga: null });
+        throw error;
+      }
+      res.json({ success: true, esquemaDisponible: true, ultimaCarga: data && data[0] ? data[0] : null });
+    } catch (err: any) {
+      responderErrorMaestra(res, err, 'estado');
+    }
+  });
+
+  // Columnas nuevas de activacion_clientes (scripts/sql/03_rubros_noviembre_2026.sql). Si la BD aún no las tiene
+  // se omiten de los upserts para no romper la sincronización existente.
+  const COLUMNAS_ACTIVACION_NUEVAS = [
+    'cajas_leche_vencampo', 'cajas_mortadela_asturias', 'cajas_salpicao',
+    'has_leche_vencampo', 'has_mortadela_asturias', 'has_salpicao'
+  ];
+  const NUEVOS_RUBROS_CODES = ['LECHE_VENCAMPO', 'MORTADELA_ASTURIAS', 'SALPICAO'];
+  let activacionColsNuevasCache: { ok: boolean; at: number } | null = null;
+  async function activacionTieneColumnasNuevas(): Promise<boolean> {
+    if (!supabase) return false;
+    if (activacionColsNuevasCache && Date.now() - activacionColsNuevasCache.at < 60_000) return activacionColsNuevasCache.ok;
+    const { error } = await supabase.from('activacion_clientes').select(COLUMNAS_ACTIVACION_NUEVAS.join(',')).limit(1);
+    activacionColsNuevasCache = { ok: !error, at: Date.now() };
+    if (error) console.warn('[RUBROS] activacion_clientes aún no tiene las columnas de los rubros nuevos; ejecuta scripts/sql/03_rubros_noviembre_2026.sql');
+    return !error;
+  }
+  const sinColumnasNuevas = (row: any) => {
+    const copia = { ...row };
+    for (const k of COLUMNAS_ACTIVACION_NUEVAS) delete copia[k];
+    return copia;
+  };
+
+  // Ventas netas del mes en curso por cliente/artículo: permite separar por cliente 'Mortadela Asturias' vs 'Salpicao'
+  // (la hoja 'Enteros Ligeros' los trae combinados).
+  async function cargarVentasMesActual(): Promise<Array<{ id_cliente: string; id_articulo: string; articulo: string; cajas: number }>> {
+    if (!supabase) return [];
+    try {
+      const hoy = new Date();
+      const rows = await histFetchAll((a, b) =>
+        supabase!.from('ventas_historial')
+          .select('id_cliente,id_articulo,articulo,cajas')
+          .eq('ano', hoy.getFullYear()).eq('mes', hoy.getMonth() + 1)
+          .order('id_cliente').order('id_articulo').range(a, b)
+      );
+      return rows.map((r: any) => ({ id_cliente: String(r.id_cliente || ''), id_articulo: String(r.id_articulo || ''), articulo: String(r.articulo || ''), cajas: Number(r.cajas) || 0 }));
+    } catch {
+      return [];
+    }
+  }
+
   async function syncWorkbookToSupabase(workbook: any) {
     const XLSX = await import('xlsx');
     const periodo = metasPeriodoActual();
@@ -4143,30 +4340,34 @@ async function startServer() {
 
         if (allClients.length > 0) {
           hadDbClients = true;
-          const seenCodes = new Map<string, any>();
-          const duplicateIds: number[] = [];
+          const seenComposite = new Map<string, any>();
           for (const c of allClients) {
-            const codKey = String(c.cliente_codigo || '').trim();
-            if (!codKey) continue;
-            if (!seenCodes.has(codKey)) {
-              seenCodes.set(codKey, c);
+            const rawVid = String(c.vendedor_id || '').trim();
+            if (
+              rawVid.toUpperCase().startsWith('INACTIVO_MAESTRA::') ||
+              String(c.status || '').toUpperCase() === 'BAJA_MAESTRA' ||
+              c.activo === false
+            ) {
+              continue;
+            }
+            const rawCod = String(c.cliente_codigo || '').trim();
+            const cleanCod = rawCod.replace(/#\d+$/, '').trim();
+            if (!cleanCod) continue;
+            const vNorm = normalizeVendorName(c.vendedor_nombre || c.vendedor_id);
+            const compKey = `${vNorm}::${cleanCod}`;
+            if (!seenComposite.has(compKey)) {
+              seenComposite.set(compKey, c);
             } else {
-              const prev = seenCodes.get(codKey);
+              const prev = seenComposite.get(compKey);
               prev.has_aceite = Boolean(prev.has_aceite || c.has_aceite);
               prev.has_azucar = Boolean(prev.has_azucar || c.has_azucar);
               prev.has_pollo = Boolean(prev.has_pollo || c.has_pollo);
               prev.has_estandar_asturias = Boolean(prev.has_estandar_asturias || c.has_estandar_asturias);
               prev.has_mortadela_salpicao = Boolean(prev.has_mortadela_salpicao || c.has_mortadela_salpicao);
-              duplicateIds.push(c.id);
-            }
-          }
-          if (duplicateIds.length > 0) {
-            for (let i = 0; i < duplicateIds.length; i += 200) {
-              await supabase.from('activacion_clientes').delete().in('id', duplicateIds.slice(i, i + 200));
             }
           }
 
-          masterClients = Array.from(seenCodes.values()).map((c: any) => ({
+          masterClients = Array.from(seenComposite.values()).map((c: any) => ({
             id: c.id,
             cliente_codigo: String(c.cliente_codigo || '').trim(),
             cliente_nombre: String(c.cliente_nombre || '').trim(),
@@ -4188,10 +4389,24 @@ async function startServer() {
       masterClients = loadLocalMasterClientSeed();
     }
 
+    // Fuente preferente: Maestra Activa (tablas maestra_*, cargadas desde "Actualizar Maestra").
+    // Si aún no existen o están vacías, se mantiene la fuente anterior sin cambios.
+    if (supabase) {
+      const idActivacionPorCodigo = new Map<string, number>();
+      for (const mc of masterClients) {
+        if (mc.id !== undefined) idActivacionPorCodigo.set(String(mc.cliente_codigo).trim(), mc.id);
+      }
+      const carteraMaestra = await leerCarteraActivaMaestra(supabase, idActivacionPorCodigo);
+      if (carteraMaestra.length > 0) {
+        masterClients = carteraMaestra;
+      }
+    }
+
     // 2. Parsear y normalizar las 10 pestañas del Google Sheet con validación fila por fila
     const parsed = parseWorkbookFull(XLSX, workbook, {
       periodo,
-      masterClients
+      masterClients,
+      ventasMes: await cargarVentasMesActual()
     });
 
     // 3. Actualizar cachés en memoria de inmediato para respuesta instantánea y consistente
@@ -4229,15 +4444,16 @@ async function startServer() {
 
       // 4b. activacion_clientes (upserts sobre cartera maestra + inserción de clientes nuevos detectados en el Sheet)
       try {
+        const colsNuevasOk = await activacionTieneColumnasNuevas();
         if (parsed.activacionSupabaseUpserts.length > 0) {
           for (let i = 0; i < parsed.activacionSupabaseUpserts.length; i += 200) {
-            const batch = parsed.activacionSupabaseUpserts.slice(i, i + 200);
+            const batch = parsed.activacionSupabaseUpserts.slice(i, i + 200).map((row: any) => (colsNuevasOk ? row : sinColumnasNuevas(row)));
             await supabase.from('activacion_clientes').upsert(batch, { onConflict: 'id' });
           }
         }
         if (hadDbClients && parsed.newSheetClientsForSupabase.length > 0) {
           for (let i = 0; i < parsed.newSheetClientsForSupabase.length; i += 200) {
-            const batch = parsed.newSheetClientsForSupabase.slice(i, i + 200);
+            const batch = parsed.newSheetClientsForSupabase.slice(i, i + 200).map((row: any) => (colsNuevasOk ? row : sinColumnasNuevas(row)));
             await supabase.from('activacion_clientes').insert(batch);
           }
         }
@@ -4357,15 +4573,11 @@ async function startServer() {
   // ==============================================================
   const normHist = (s: any) => String(s || '').replace(/Ã‘|Ã±/g, 'N').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
+  // Normaliza cualquier nombre/código de rubro (nuevo o legacy) al código canónico de src/lib/rubros.ts
   const normalizeHistRubroCode = (raw: any): string | null => {
-    const s = normHist(raw);
-    if (!s) return null;
-    if (s.includes('ACEITE')) return 'ACEITE';
-    if (s.includes('AZUCAR')) return 'AZUCAR';
-    if (s.includes('POLLO') || s.includes('ARROZ')) return 'POLLO';
-    if (s.includes('ESTANDAR') || s.includes('SUPERIOR') || s.includes('ENTERO')) return 'ESTANDAR_ASTURIAS';
-    if (s.includes('MORTADELA') || s.includes('SALPICAO') || s.includes('LIGEROS')) return 'MORTADELA_SALPICAO';
-    return null;
+    if (!normHist(raw)) return null;
+    const code = categoriaARubroCodigo(String(raw || ''));
+    return code === 'OTROS' ? null : code;
   };
 
   const histFail = (res: any, e: any) => {
@@ -4532,7 +4744,7 @@ async function startServer() {
       const add = (r: any) => {
         const k = `${r.ano}|${r.mes}|${r.id_articulo}`;
         let m = merged.get(k);
-        if (!m) { m = { ano: r.ano, mes: r.mes, sku: r.id_articulo, articulo: r.articulo, rubro: r.rubro, cajas: 0, unidades: 0, kgs: 0, monto: 0, clientes: 0 }; merged.set(k, m); }
+        if (!m) { m = { ano: r.ano, mes: r.mes, sku: r.id_articulo, articulo: r.articulo, rubro: clasificarRubro(r.id_articulo, r.articulo), cajas: 0, unidades: 0, kgs: 0, monto: 0, clientes: 0 }; merged.set(k, m); }
         m.cajas += nz(r.cajas); m.unidades += nz(r.unidades); m.kgs += nz(r.kgs); m.monto += nz(r.monto); m.clientes += nz(r.clientes);
       };
       if (scope.all) {
@@ -4552,7 +4764,7 @@ async function startServer() {
           if (!scope.clientIds!.has(cid)) return;
           const k = `${r.ano}|${r.mes}|${r.id_articulo}`;
           let m = merged.get(k);
-          if (!m) { m = { ano: r.ano, mes: r.mes, sku: r.id_articulo, articulo: r.articulo, rubro: r.rubro, cajas: 0, unidades: 0, kgs: 0, monto: 0, clientes: 0 }; merged.set(k, m); }
+          if (!m) { m = { ano: r.ano, mes: r.mes, sku: r.id_articulo, articulo: r.articulo, rubro: clasificarRubro(r.id_articulo, r.articulo), cajas: 0, unidades: 0, kgs: 0, monto: 0, clientes: 0 }; merged.set(k, m); }
           m.cajas += nz(r.cajas); m.unidades += nz(r.unidades); m.kgs += nz(r.kgs); m.monto += nz(r.monto);
           if (nz(r.cajas) > 0 && cid) {
             let cs = cliSets.get(k);
@@ -4602,7 +4814,7 @@ async function startServer() {
         const mesRow = (ano: number, mes: number) => {
           const k = `${ano}|${mes}`;
           let m = meses.get(k);
-          if (!m) { m = { ano, mes, kgs: {} as Record<string, number>, cajas: {} as Record<string, number>, monto: {} as Record<string, number>, activos: { ACEITE: 0, AZUCAR: 0, POLLO: 0, ESTANDAR_ASTURIAS: 0, MORTADELA_SALPICAO: 0, TOTAL: 0 }, clientesConMovimiento: 0, fueraCartera: 0 }; meses.set(k, m); }
+          if (!m) { m = { ano, mes, kgs: {} as Record<string, number>, cajas: {} as Record<string, number>, monto: {} as Record<string, number>, activos: { ACEITE: 0, AZUCAR: 0, POLLO: 0, ESTANDAR_ASTURIAS: 0, MORTADELA_SALPICAO: 0, LECHE_VENCAMPO: 0, MORTADELA_ASTURIAS: 0, SALPICAO: 0, TOTAL: 0 }, clientesConMovimiento: 0, fueraCartera: 0 }; meses.set(k, m); }
           return m;
         };
         vol.forEach((r: any) => {
@@ -4623,7 +4835,7 @@ async function startServer() {
         if (scope.clientIds && scope.clientIds.size > 0) {
           const clientRows = await histFetchAll((a, b) =>
             supabase!.from('ventas_historial')
-              .select('ano,mes,id_cliente,rubro,cajas')
+              .select('ano,mes,id_cliente,id_articulo,articulo,rubro,cajas')
               .in('vendedor', scope.names)
               .order('ano').order('mes').order('id_cliente').order('id_articulo')
               .range(a, b)
@@ -4635,17 +4847,18 @@ async function startServer() {
             const mk = `${r.ano}|${r.mes}|${cid}`;
             let obj = byMesCliRub.get(mk);
             if (!obj) { obj = {}; byMesCliRub.set(mk, obj); }
-            obj[r.rubro] = (obj[r.rubro] || 0) + nz(r.cajas);
+            const rk = (r.id_articulo || r.articulo) ? clasificarRubro(r.id_articulo, r.articulo) : r.rubro;
+            obj[rk] = (obj[rk] || 0) + nz(r.cajas);
             obj._ANY = (obj._ANY || 0) + nz(r.cajas);
           });
           byMesCliRub.forEach((obj, mk) => {
             const [anoS, mesS] = mk.split('|');
             const m = mesRow(Number(anoS), Number(mesS));
             let anyKeyRub = false;
-            for (const rub of ['ACEITE', 'AZUCAR', 'POLLO', 'ESTANDAR_ASTURIAS', 'MORTADELA_SALPICAO']) {
+            for (const rub of ['AZUCAR', 'LECHE_VENCAMPO', 'ESTANDAR_ASTURIAS', 'MORTADELA_ASTURIAS', 'SALPICAO', 'ACEITE', 'POLLO', 'MORTADELA_SALPICAO']) {
               if ((obj[rub] || 0) > 0) {
                 m.activos[rub] = (m.activos[rub] || 0) + 1;
-                anyKeyRub = true;
+                if (esRubroActivo(rub)) anyKeyRub = true;
               }
             }
             if (anyKeyRub) m.activos.TOTAL += 1;
@@ -4664,6 +4877,9 @@ async function startServer() {
             m.activos.POLLO += nz(r.act_pollo);
             m.activos.ESTANDAR_ASTURIAS += nz(r.act_estandar_asturias);
             m.activos.MORTADELA_SALPICAO += nz(r.act_mortadela_salpicao);
+            m.activos.LECHE_VENCAMPO += nz(r.act_leche_vencampo);
+            m.activos.MORTADELA_ASTURIAS += nz(r.act_mortadela_asturias);
+            m.activos.SALPICAO += nz(r.act_salpicao);
             m.activos.TOTAL += nz(r.act_total ?? r.clientes_con_compra);
             m.clientesConMovimiento += nz(r.clientes_con_movimiento ?? r.clientes_con_compra);
             m.fueraCartera += nz(r.clientes_fuera_cartera);
@@ -4763,7 +4979,10 @@ async function startServer() {
               AZUCAR: nz(r.cajas_azucar),
               POLLO: nz(r.cajas_pollo),
               ESTANDAR_ASTURIAS: nz(r.cajas_estandar_asturias) || +(em?.ESTANDAR_ASTURIAS || 0).toFixed(2),
-              MORTADELA_SALPICAO: nz(r.cajas_mortadela_salpicao) || +(em?.MORTADELA_SALPICAO || 0).toFixed(2)
+              MORTADELA_SALPICAO: nz(r.cajas_mortadela_salpicao) || +(em?.MORTADELA_SALPICAO || 0).toFixed(2),
+              LECHE_VENCAMPO: nz(r.cajas_leche_vencampo),
+              MORTADELA_ASTURIAS: nz(r.cajas_mortadela_asturias),
+              SALPICAO: nz(r.cajas_salpicao)
             },
             kgs: nz(r.kgs ?? r.kgs_total),
             monto: nz(r.monto ?? r.monto_total)
@@ -4805,13 +5024,14 @@ async function startServer() {
       prods.forEach((r: any) => {
         const k = `${r.ano}|${r.mes}|${r.id_articulo}`;
         let m = pm.get(k);
-        if (!m) { m = { ano: r.ano, mes: r.mes, sku: r.id_articulo, articulo: r.articulo, rubro: r.rubro, cajas: 0, kgs: 0, monto: 0 }; pm.set(k, m); }
+        if (!m) { m = { ano: r.ano, mes: r.mes, sku: r.id_articulo, articulo: r.articulo, rubro: clasificarRubro(r.id_articulo, r.articulo), cajas: 0, kgs: 0, monto: 0 }; pm.set(k, m); }
         m.cajas += nz(r.cajas); m.kgs += nz(r.kgs); m.monto += nz(r.monto);
 
         const mk = `${r.ano}|${r.mes}`;
         let cm = cajasByMesRubro.get(mk);
         if (!cm) { cm = {}; cajasByMesRubro.set(mk, cm); }
-        cm[r.rubro] = (cm[r.rubro] || 0) + nz(r.cajas);
+        const rkc = clasificarRubro(r.id_articulo, r.articulo);
+        cm[rkc] = (cm[rkc] || 0) + nz(r.cajas);
       });
 
       res.json({
@@ -4824,7 +5044,10 @@ async function startServer() {
               AZUCAR: nz(r.cajas_azucar) || +(cm.AZUCAR || 0).toFixed(2),
               POLLO: nz(r.cajas_pollo) || +(cm.POLLO || 0).toFixed(2),
               ESTANDAR_ASTURIAS: nz(r.cajas_estandar_asturias) || +(cm.ESTANDAR_ASTURIAS || 0).toFixed(2),
-              MORTADELA_SALPICAO: nz(r.cajas_mortadela_salpicao) || +(cm.MORTADELA_SALPICAO || 0).toFixed(2)
+              MORTADELA_SALPICAO: nz(r.cajas_mortadela_salpicao) || +(cm.MORTADELA_SALPICAO || 0).toFixed(2),
+              LECHE_VENCAMPO: nz(r.cajas_leche_vencampo) || +(cm.LECHE_VENCAMPO || 0).toFixed(2),
+              MORTADELA_ASTURIAS: nz(r.cajas_mortadela_asturias) || +(cm.MORTADELA_ASTURIAS || 0).toFixed(2),
+              SALPICAO: nz(r.cajas_salpicao) || +(cm.SALPICAO || 0).toFixed(2)
             },
             kgs: nz(r.kgs ?? r.kgs_total),
             monto: nz(r.monto ?? r.monto_total)
@@ -4921,6 +5144,9 @@ async function startServer() {
             case 'POLLO': return !!c.has_pollo || nz(c.cajas_pollo) > 0;
             case 'ESTANDAR_ASTURIAS': return !!c.has_estandar_asturias || nz(c.cajas_estandar_asturias) > 0;
             case 'MORTADELA_SALPICAO': return !!c.has_mortadela_salpicao || nz(c.cajas_mortadela_salpicao) > 0;
+            case 'LECHE_VENCAMPO': return !!c.has_leche_vencampo || nz(c.cajas_leche_vencampo) > 0;
+            case 'MORTADELA_ASTURIAS': return !!c.has_mortadela_asturias || nz(c.cajas_mortadela_asturias) > 0;
+            case 'SALPICAO': return !!c.has_salpicao || nz(c.cajas_salpicao) > 0;
             default: return false;
           }
         };
@@ -5320,7 +5546,8 @@ async function startServer() {
     const XLSX = await import('xlsx');
     const parsed = parseWorkbookFull(XLSX, workbook, {
       periodo: metasPeriodoActual(),
-      masterClients: loadLocalMasterClientSeed()
+      masterClients: loadLocalMasterClientSeed(),
+      ventasMes: await cargarVentasMesActual()
     });
     cachedVolumenParsed = parsed.volumenApiRows;
     lastVolumenParsedTime = Date.now();
@@ -5517,7 +5744,7 @@ async function startServer() {
         return res.json(filterByVendor(cachedActivacionParsed));
       }
 
-      if (supabase) {
+      if (supabase && (await activacionTieneColumnasNuevas())) {
         try {
           let supaRows: any[] = [];
           let from = 0;
@@ -5532,27 +5759,43 @@ async function startServer() {
           if (Array.isArray(supaRows) && supaRows.length > 0) {
             const byClientMap = new Map<string, any>();
             for (const r of supaRows) {
-              const cid = String(r.cliente_codigo || '').trim();
+              const rawVid = String(r.vendedor_id || '').trim();
+              if (
+                rawVid.toUpperCase().startsWith('INACTIVO_MAESTRA::') ||
+                String(r.status || '').toUpperCase() === 'BAJA_MAESTRA' ||
+                r.activo === false
+              ) {
+                continue;
+              }
+              const cid = String(r.cliente_codigo || '').replace(/#\d+$/, '').trim();
               if (!cid) continue;
+              const vNorm = normalizeVendorName(r.vendedor_nombre || r.vendedor_id);
+              const compKey = `${vNorm}::${cid}`;
               const hasAceite = Boolean(r.has_aceite) || (Number(r.cajas_aceite) || 0) > 0;
               const hasAzucar = Boolean(r.has_azucar) || (Number(r.cajas_azucar) || 0) > 0;
               const hasPollo = Boolean(r.has_pollo) || (Number(r.cajas_pollo) || 0) > 0;
               const hasAsturias = Boolean(r.has_estandar_asturias) || (Number(r.cajas_estandar_asturias) || 0) > 0;
               const hasSalpicao = Boolean(r.has_mortadela_salpicao) || (Number(r.cajas_mortadela_salpicao) || 0) > 0;
+                const hasLeche = Boolean(r.has_leche_vencampo) || (Number(r.cajas_leche_vencampo) || 0) > 0;
+                const hasMortAst = Boolean(r.has_mortadela_asturias) || (Number(r.cajas_mortadela_asturias) || 0) > 0;
+                const hasSalpNuevo = Boolean(r.has_salpicao) || (Number(r.cajas_salpicao) || 0) > 0;
 
-              if (!byClientMap.has(cid)) {
-                byClientMap.set(cid, {
+              if (!byClientMap.has(compKey)) {
+                byClientMap.set(compKey, {
                   id: cid,
                   cliente: r.cliente_nombre,
                   vendedorId: r.vendedor_id,
                   vendedorNombre: r.vendedor_nombre,
-                  status: (hasAceite || hasAzucar || hasPollo || hasAsturias || hasSalpicao || r.status === 'ACTIVO') ? 'ACTIVO' : 'INACTIVO',
+                  status: (hasAzucar || hasLeche || hasAsturias || hasMortAst || hasSalpNuevo || r.status === 'ACTIVO') ? 'ACTIVO' : 'INACTIVO',
                   cajas: {
                     ACEITE: Number(r.cajas_aceite) || 0,
                     AZUCAR: Number(r.cajas_azucar) || 0,
                     POLLO: Number(r.cajas_pollo) || 0,
                     ESTANDAR_ASTURIAS: Number(r.cajas_estandar_asturias) || 0,
-                    MORTADELA_SALPICAO: Number(r.cajas_mortadela_salpicao) || 0
+                    MORTADELA_SALPICAO: Number(r.cajas_mortadela_salpicao) || 0,
+                    LECHE_VENCAMPO: Number(r.cajas_leche_vencampo) || 0,
+                    MORTADELA_ASTURIAS: Number(r.cajas_mortadela_asturias) || 0,
+                    SALPICAO: Number(r.cajas_salpicao) || 0
                   },
                   cats: {
                     ACEITE: hasAceite,
@@ -5560,18 +5803,24 @@ async function startServer() {
                     POLLO: hasPollo,
                     ESTANDAR_ASTURIAS: hasAsturias,
                     MORTADELA_SALPICAO: hasSalpicao,
+                    LECHE_VENCAMPO: hasLeche,
+                    MORTADELA_ASTURIAS: hasMortAst,
+                    SALPICAO: hasSalpNuevo,
                     ARROZ: hasPollo,
                     ENTERO: hasAsturias,
                     LIGEROS: hasSalpicao
                   }
                 });
               } else {
-                const prev = byClientMap.get(cid);
+                const prev = byClientMap.get(compKey);
                 prev.cats.ACEITE = prev.cats.ACEITE || hasAceite;
                 prev.cats.AZUCAR = prev.cats.AZUCAR || hasAzucar;
                 prev.cats.POLLO = prev.cats.POLLO || hasPollo;
                 prev.cats.ESTANDAR_ASTURIAS = prev.cats.ESTANDAR_ASTURIAS || hasAsturias;
                 prev.cats.MORTADELA_SALPICAO = prev.cats.MORTADELA_SALPICAO || hasSalpicao;
+                prev.cats.LECHE_VENCAMPO = prev.cats.LECHE_VENCAMPO || hasLeche;
+                prev.cats.MORTADELA_ASTURIAS = prev.cats.MORTADELA_ASTURIAS || hasMortAst;
+                prev.cats.SALPICAO = prev.cats.SALPICAO || hasSalpNuevo;
                 prev.cats.ARROZ = prev.cats.POLLO;
                 prev.cats.ENTERO = prev.cats.ESTANDAR_ASTURIAS;
                 prev.cats.LIGEROS = prev.cats.MORTADELA_SALPICAO;
@@ -5580,7 +5829,10 @@ async function startServer() {
                 prev.cajas.POLLO = Math.max(prev.cajas.POLLO, Number(r.cajas_pollo) || 0);
                 prev.cajas.ESTANDAR_ASTURIAS = Math.max(prev.cajas.ESTANDAR_ASTURIAS, Number(r.cajas_estandar_asturias) || 0);
                 prev.cajas.MORTADELA_SALPICAO = Math.max(prev.cajas.MORTADELA_SALPICAO, Number(r.cajas_mortadela_salpicao) || 0);
-                if (prev.cats.ACEITE || prev.cats.AZUCAR || prev.cats.POLLO || prev.cats.ESTANDAR_ASTURIAS || prev.cats.MORTADELA_SALPICAO) {
+                prev.cajas.LECHE_VENCAMPO = Math.max(prev.cajas.LECHE_VENCAMPO || 0, Number(r.cajas_leche_vencampo) || 0);
+                prev.cajas.MORTADELA_ASTURIAS = Math.max(prev.cajas.MORTADELA_ASTURIAS || 0, Number(r.cajas_mortadela_asturias) || 0);
+                prev.cajas.SALPICAO = Math.max(prev.cajas.SALPICAO || 0, Number(r.cajas_salpicao) || 0);
+                if (prev.cats.AZUCAR || prev.cats.LECHE_VENCAMPO || prev.cats.ESTANDAR_ASTURIAS || prev.cats.MORTADELA_ASTURIAS || prev.cats.SALPICAO) {
                   prev.status = 'ACTIVO';
                 }
               }
@@ -5603,6 +5855,36 @@ async function startServer() {
     }
   });
 
+  app.get("/api/catalog/vendors", async (_req: any, res: any) => {
+    try {
+      let vendedores = getRuntimeSellerCatalog();
+      let syncedAt: string | null = null;
+      if (supabase) {
+        try {
+          const { data: supaVendedores } = await supabase.from('vendedores_maestro').select('*');
+          if (Array.isArray(supaVendedores) && supaVendedores.length > 0) {
+            vendedores = hydrateRuntimeSellerCatalog(supaVendedores);
+            hydrateVendorProfilesFromMasterCatalog(supaVendedores);
+          }
+          const { data: syncMeta } = await supabase
+            .from('catalog_sync_meta')
+            .select('*')
+            .eq('id', 'GLOBAL_MASTER_SYNC')
+            .maybeSingle();
+          if (syncMeta?.last_synced_at) {
+            syncedAt = syncMeta.last_synced_at;
+          }
+        } catch {
+          // Fallback al catálogo en memoria
+        }
+      }
+      setNoCacheSyncHeaders(res, 'supabase');
+      return res.json({ vendedores, syncedAt });
+    } catch (err: any) {
+      return res.status(500).json({ error: err?.message || 'Error consultando catálogo de vendedores' });
+    }
+  });
+
   app.post("/api/data/activacion/toggle-rubro", authenticateToken, async (req: any, res: any) => {
     try {
       const { clienteCodigo, rubro, active } = req.body || {};
@@ -5619,8 +5901,16 @@ async function startServer() {
         POLLO: 'has_pollo',
         ESTANDAR_ASTURIAS: 'has_estandar_asturias',
         MORTADELA_SALPICAO: 'has_mortadela_salpicao',
+        LECHE_VENCAMPO: 'has_leche_vencampo',
+        MORTADELA_ASTURIAS: 'has_mortadela_asturias',
+        SALPICAO: 'has_salpicao',
       };
       const dbCol = colMap[normRubro];
+      const colsNuevasOk = await activacionTieneColumnasNuevas();
+      // Si la BD aún no tiene las columnas nuevas y se intenta marcar un rubro nuevo, avisar (no fallar en silencio)
+      if (dbCol && !colsNuevasOk && NUEVOS_RUBROS_CODES.includes(normRubro)) {
+        return res.status(412).json({ error: 'Faltan columnas en activacion_clientes. Ejecuta scripts/sql/03_rubros_noviembre_2026.sql en Supabase.', code: 'ESQUEMA_FALTANTE' });
+      }
 
       if (supabase && dbCol) {
         const { data: rows } = await supabase
@@ -5636,8 +5926,15 @@ async function startServer() {
               has_pollo: normRubro === 'POLLO' ? boolActive : Boolean(r.has_pollo),
               has_estandar_asturias: normRubro === 'ESTANDAR_ASTURIAS' ? boolActive : Boolean(r.has_estandar_asturias),
               has_mortadela_salpicao: normRubro === 'MORTADELA_SALPICAO' ? boolActive : Boolean(r.has_mortadela_salpicao),
+              ...(colsNuevasOk
+                ? {
+                    has_leche_vencampo: normRubro === 'LECHE_VENCAMPO' ? boolActive : Boolean(r.has_leche_vencampo),
+                    has_mortadela_asturias: normRubro === 'MORTADELA_ASTURIAS' ? boolActive : Boolean(r.has_mortadela_asturias),
+                    has_salpicao: normRubro === 'SALPICAO' ? boolActive : Boolean(r.has_salpicao)
+                  }
+                : {})
             };
-            const isActivo = Object.values(nextState).some(Boolean);
+            const isActivo = [nextState.has_azucar, nextState.has_estandar_asturias, (nextState as any).has_leche_vencampo, (nextState as any).has_mortadela_asturias, (nextState as any).has_salpicao].some(Boolean);
             await supabase
               .from('activacion_clientes')
               .update({
@@ -5659,7 +5956,7 @@ async function startServer() {
             if (normRubro === 'ESTANDAR_ASTURIAS') c.cats.ENTERO = boolActive;
             if (normRubro === 'MORTADELA_SALPICAO') c.cats.LIGEROS = boolActive;
             const anyActive = Boolean(
-              c.cats.ACEITE || c.cats.AZUCAR || c.cats.POLLO || c.cats.ESTANDAR_ASTURIAS || c.cats.MORTADELA_SALPICAO
+              c.cats.AZUCAR || c.cats.LECHE_VENCAMPO || c.cats.ESTANDAR_ASTURIAS || c.cats.MORTADELA_ASTURIAS || c.cats.SALPICAO
             );
             c.status = anyActive ? 'ACTIVO' : 'INACTIVO';
           }

@@ -1,3 +1,4 @@
+import { RUBROS_ACTIVOS_CONFIG } from '../lib/rubros';
 import {
   AsignacionClienteRuta,
   ClienteRutaEnriquecido,
@@ -36,21 +37,16 @@ export const DIAS_HABILES_AUTO_DISTRIBUCION: DiaSemanaRuta[] = [
   'VIERNES'
 ];
 
-export const RUBROS_ESTRATEGICOS_5 = [
-  'ACEITE',
-  'AZÚCAR',
-  'POLLO',
-  'ESTANDAR Y SUPERIOR ASTURIAS',
-  'MORTADELA SALPICAO Y ASTURIAS'
-] as const;
+/**
+ * Rubros estratégicos del mes = rubros ACTIVOS de la configuración central (src/lib/rubros.ts).
+ * Los elementos son las claves de categoría de servidor de cada rubro (no los nombres comerciales).
+ */
+export const RUBROS_ESTRATEGICOS_5: readonly string[] = RUBROS_ACTIVOS_CONFIG.map((r) => r.categoriaServidor);
 
-export const RUBRO_SHORT_LABELS: Record<string, string> = {
-  'ACEITE': 'Aceite',
-  'AZÚCAR': 'Azúcar',
-  'POLLO': 'Pollo',
-  'ESTANDAR Y SUPERIOR ASTURIAS': 'Asturias Est./Sup.',
-  'MORTADELA SALPICAO Y ASTURIAS': 'Mort. Salpicao/Ast.'
-};
+/** Nombre comercial a mostrar por clave de categoría (chips, tooltips, listados). */
+export const RUBRO_SHORT_LABELS: Record<string, string> = Object.fromEntries(
+  RUBROS_ACTIVOS_CONFIG.map((r) => [r.categoriaServidor, r.label])
+);
 
 export const MOTIVOS_NO_VENTA_RUTA: Array<{
   id: MotivoNoVentaRuta;
@@ -123,20 +119,14 @@ export function extraerRubrosActivosRecord(
   const rubros = existingSet ? new Set(existingSet) : new Set<string>();
   if (!a) return rubros;
 
-  const cAceite = Number(a.cajas?.ACEITE) || 0;
-  const cAzucar = Number(a.cajas?.AZUCAR) || 0;
-  const cPollo = Number(a.cajas?.POLLO) || 0;
-  const cAsturias = Number(a.cajas?.ESTANDAR_ASTURIAS) || 0;
-  const cSalpicao = Number(a.cajas?.MORTADELA_SALPICAO) || 0;
+  // Alias de claves antiguas que aún pueden venir en el payload (compatibilidad)
+  const aliasCats: Record<string, string[]> = { AZUCAR: ['AZÚCAR'], ESTANDAR_ASTURIAS: ['ENTERO'], SALPICAO: ['LIGEROS'] };
 
-  if (a.cats?.ACEITE || cAceite > 0) rubros.add('ACEITE');
-  if (a.cats?.AZUCAR || a.cats?.AZÚCAR || cAzucar > 0) rubros.add('AZÚCAR');
-  if (a.cats?.POLLO || a.cats?.ARROZ || cPollo > 0) rubros.add('POLLO');
-  if (a.cats?.ESTANDAR_ASTURIAS || a.cats?.ENTERO || cAsturias > 0) {
-    rubros.add('ESTANDAR Y SUPERIOR ASTURIAS');
-  }
-  if (a.cats?.MORTADELA_SALPICAO || a.cats?.LIGEROS || cSalpicao > 0) {
-    rubros.add('MORTADELA SALPICAO Y ASTURIAS');
+  for (const r of RUBROS_ACTIVOS_CONFIG) {
+    const claves = [r.codigo, ...(aliasCats[r.codigo] || [])];
+    if (claves.some((k) => Boolean(a.cats?.[k])) || (Number(a.cajas?.[r.codigo]) || 0) > 0) {
+      rubros.add(r.categoriaServidor);
+    }
   }
 
   const key = a.id
@@ -144,23 +134,10 @@ export function extraerRubrosActivosRecord(
     : String(a.cliente || '').trim();
   const ov = key && manualOverrides ? manualOverrides[key] : undefined;
   if (ov) {
-    if (ov.ACEITE === true) rubros.add('ACEITE');
-    else if (ov.ACEITE === false) rubros.delete('ACEITE');
-
-    if (ov.AZUCAR === true) rubros.add('AZÚCAR');
-    else if (ov.AZUCAR === false) {
-      rubros.delete('AZÚCAR');
-      rubros.delete('AZUCAR');
+    for (const r of RUBROS_ACTIVOS_CONFIG) {
+      if (ov[r.codigo] === true) rubros.add(r.categoriaServidor);
+      else if (ov[r.codigo] === false) rubros.delete(r.categoriaServidor);
     }
-
-    if (ov.POLLO === true) rubros.add('POLLO');
-    else if (ov.POLLO === false) rubros.delete('POLLO');
-
-    if (ov.ESTANDAR_ASTURIAS === true) rubros.add('ESTANDAR Y SUPERIOR ASTURIAS');
-    else if (ov.ESTANDAR_ASTURIAS === false) rubros.delete('ESTANDAR Y SUPERIOR ASTURIAS');
-
-    if (ov.MORTADELA_SALPICAO === true) rubros.add('MORTADELA SALPICAO Y ASTURIAS');
-    else if (ov.MORTADELA_SALPICAO === false) rubros.delete('MORTADELA SALPICAO Y ASTURIAS');
   }
 
   return rubros;

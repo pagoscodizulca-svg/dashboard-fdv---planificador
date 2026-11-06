@@ -326,7 +326,7 @@ export const toggleClienteRubro = async (
         if (!c.cats) c.cats = {};
         c.cats[rubro] = active;
         const anyActive = Boolean(
-          c.cats.ACEITE || c.cats.AZUCAR || c.cats.POLLO || c.cats.ESTANDAR_ASTURIAS || c.cats.MORTADELA_SALPICAO
+          c.cats.AZUCAR || c.cats.LECHE_VENCAMPO || c.cats.ESTANDAR_ASTURIAS || c.cats.MORTADELA_ASTURIAS || c.cats.SALPICAO
         );
         c.status = anyActive ? 'ACTIVO' : 'INACTIVO';
       }

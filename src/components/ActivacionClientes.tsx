@@ -4,7 +4,7 @@ import React, { useMemo, useRef, useState } from 'react';
 import { VolumenData, ActivacionData } from '../types';
 import { getMesLaboralInfo } from '../utils/calendar';
 import { Search, Users, CalendarDays, Target, ShieldAlert, XCircle, CheckCircle2, TriangleAlert, User, LayoutList, FileText, Grip, Zap, Activity, CheckSquare, Square, X, Filter } from 'lucide-react';
-import { RUBROS_ACTIVACION, RUBRO_LABEL, RubroCodigo } from '../lib/rubros';
+import { RUBROS_ACTIVACION, RUBRO_LABEL, RubroCodigo, categoriaARubroCodigo } from '../lib/rubros';
 import { Rubro360Panel } from './Rubro360Panel';
 import { getRubroTheme } from './RubroDashboard360';
 import { toggleClienteRubro } from '../services/googleSheetsService';
@@ -128,35 +128,20 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
       const existing = clientMap.get(key);
       const rubros = existing ? existing.rubrosComprados : new Set<string>();
 
-      const cAceite = Number(a.cajas?.ACEITE) || 0;
-      const cAzucar = Number(a.cajas?.AZUCAR) || 0;
-      const cPollo = Number(a.cajas?.POLLO) || 0;
-      const cAsturias = Number(a.cajas?.ESTANDAR_ASTURIAS) || 0;
-      const cSalpicao = Number(a.cajas?.MORTADELA_SALPICAO) || 0;
-
-      if (a.cats?.ACEITE || cAceite > 0) rubros.add('ACEITE');
-      if (a.cats?.AZUCAR || a.cats?.AZÚCAR || cAzucar > 0) rubros.add('AZÚCAR');
-      if (a.cats?.POLLO || a.cats?.ARROZ || cPollo > 0) rubros.add('POLLO');
-      if (a.cats?.ESTANDAR_ASTURIAS || a.cats?.ENTERO || cAsturias > 0) rubros.add('ESTANDAR Y SUPERIOR ASTURIAS');
-      if (a.cats?.MORTADELA_SALPICAO || a.cats?.LIGEROS || cSalpicao > 0) rubros.add('MORTADELA SALPICAO Y ASTURIAS');
+      // Rubros activos del mes (src/lib/rubros.ts). `rubros` guarda códigos canónicos de rubro.
+      const aliasCats: Record<string, string[]> = { AZUCAR: ['AZÚCAR'], ESTANDAR_ASTURIAS: ['ENTERO'], SALPICAO: ['LIGEROS'] };
+      for (const r of RUBROS_ACTIVACION) {
+        const claves = [r, ...(aliasCats[r] || [])];
+        if (claves.some((k) => Boolean(a.cats?.[k])) || (Number(a.cajas?.[r]) || 0) > 0) rubros.add(r);
+      }
 
       // Aplicar activaciones manuales del vendedor si existen
       const ov = manualOverrides[key];
       if (ov) {
-        if (ov.ACEITE === true) rubros.add('ACEITE');
-        else if (ov.ACEITE === false) rubros.delete('ACEITE');
-
-        if (ov.AZUCAR === true) rubros.add('AZÚCAR');
-        else if (ov.AZUCAR === false) { rubros.delete('AZÚCAR'); rubros.delete('AZUCAR'); }
-
-        if (ov.POLLO === true) rubros.add('POLLO');
-        else if (ov.POLLO === false) rubros.delete('POLLO');
-
-        if (ov.ESTANDAR_ASTURIAS === true) rubros.add('ESTANDAR Y SUPERIOR ASTURIAS');
-        else if (ov.ESTANDAR_ASTURIAS === false) rubros.delete('ESTANDAR Y SUPERIOR ASTURIAS');
-
-        if (ov.MORTADELA_SALPICAO === true) rubros.add('MORTADELA SALPICAO Y ASTURIAS');
-        else if (ov.MORTADELA_SALPICAO === false) rubros.delete('MORTADELA SALPICAO Y ASTURIAS');
+        for (const r of RUBROS_ACTIVACION) {
+          if (ov[r] === true) rubros.add(r);
+          else if (ov[r] === false) rubros.delete(r);
+        }
       }
 
       const isActivo = rubros.size > 0 || (!ov && a.status === 'ACTIVO' && Boolean(existing?.isActivo));
@@ -202,22 +187,15 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
     const _saludCartera = baseTotal > 0 ? (totalRubrosComprados / baseTotal) : 0;
 
     const clientList = Array.from(clientMap.entries()).map(([key, data], idx) => {
-       const hasAceite = data.rubrosComprados.has('ACEITE');
-       const hasAzucar = data.rubrosComprados.has('AZÚCAR') || data.rubrosComprados.has('AZUCAR');
-       const hasPollo = data.rubrosComprados.has('POLLO');
-       const hasEstandarAsturias = data.rubrosComprados.has('ESTANDAR Y SUPERIOR ASTURIAS');
-       const hasMortadelaSalpicao = data.rubrosComprados.has('MORTADELA SALPICAO Y ASTURIAS');
-
-       const count = [hasAceite, hasAzucar, hasPollo, hasEstandarAsturias, hasMortadelaSalpicao].filter(Boolean).length;
+       const flags = Object.fromEntries(
+         RUBROS_ACTIVACION.map((r) => [r, data.rubrosComprados.has(r)])
+       ) as Record<string, boolean>;
+       const count = RUBROS_ACTIVACION.filter((r) => flags[r]).length;
 
        return {
           codigo: data.id ? (data.id.startsWith('#') ? data.id : `#${data.id}`) : `#${idx + 1}`,
           razonSocial: data.name,
-          hasAceite,
-          hasAzucar,
-          hasPollo,
-          hasEstandarAsturias,
-          hasMortadelaSalpicao,
+          flags,
           cobertura: count
        };
     });
@@ -254,31 +232,7 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
   const isEnRitmo = ritmoActual >= ritmoRequerido;
   const totalCartera = (faltantesPorActivar + cienPorCientoActivados) || totalClientes || 1;
 
-  const clienteActivoEnRubro = (
-    c: {
-      hasAceite: boolean;
-      hasAzucar: boolean;
-      hasPollo: boolean;
-      hasEstandarAsturias: boolean;
-      hasMortadelaSalpicao: boolean;
-    },
-    rubro: RubroCodigo
-  ): boolean => {
-    switch (rubro) {
-      case 'ACEITE':
-        return c.hasAceite;
-      case 'AZUCAR':
-        return c.hasAzucar;
-      case 'POLLO':
-        return c.hasPollo;
-      case 'ESTANDAR_ASTURIAS':
-        return c.hasEstandarAsturias;
-      case 'MORTADELA_SALPICAO':
-        return c.hasMortadelaSalpicao;
-      default:
-        return false;
-    }
-  };
+  const clienteActivoEnRubro = (c: { flags: Record<string, boolean> }, rubro: RubroCodigo): boolean => Boolean(c.flags[rubro]);
 
   const rubroSelectionCounts = useMemo(() => {
     if (selectedRubros.length === 0) return { activos: 0, faltantes: 0 };
@@ -443,11 +397,7 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
       tableStartY = 68;
     }
 
-    const countAceite = displayedClients.filter(c => c.hasAceite).length;
-    const countAzucar = displayedClients.filter(c => c.hasAzucar).length;
-    const countPollo = displayedClients.filter(c => c.hasPollo).length;
-    const countAsturias = displayedClients.filter(c => c.hasEstandarAsturias).length;
-    const countSalpicao = displayedClients.filter(c => c.hasMortadelaSalpicao).length;
+    const countsPorRubro = RUBROS_ACTIVACION.map((r) => displayedClients.filter((c) => c.flags[r]).length);
     const countActivosMostrados = displayedClients.filter(c => c.cobertura > 0).length;
     const countFaltantesMostrados = Math.max(0, displayedClients.length - countActivosMostrados);
 
@@ -455,11 +405,7 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
       client.codigo,
       client.razonSocial,
       client.cobertura > 0 ? 'ACTIVO' : 'FALTA VENDER',
-      client.hasAceite ? 'SI' : '-',
-      client.hasAzucar ? 'SI' : '-',
-      client.hasPollo ? 'SI' : '-',
-      client.hasEstandarAsturias ? 'SI' : '-',
-      client.hasMortadelaSalpicao ? 'SI' : '-',
+      ...RUBROS_ACTIVACION.map((r) => (client.flags[r] ? 'SI' : '-')),
       `${client.cobertura}/5 (${client.cobertura * 20}%)`
     ]);
 
@@ -468,19 +414,15 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
         'TOTAL',
         `CARTERA LISTADA: ${displayedClients.length} CLI`,
         `Act: ${countActivosMostrados} | Falta: ${countFaltantesMostrados}`,
-        `${countAceite}`,
-        `${countAzucar}`,
-        `${countPollo}`,
-        `${countAsturias}`,
-        `${countSalpicao}`,
+        ...countsPorRubro.map((n) => `${n}`),
         `${displayedClients.length > 0 ? ((countActivosMostrados / displayedClients.length) * 100).toFixed(1) : '0.0'}%`
       ]);
     }
 
     autoTable(doc, {
       startY: tableStartY,
-      head: [['Cód.', 'Razón Social / Cliente', 'Activ. General', 'Aceite', 'Azúcar', 'Pollo', 'Est. Asturias', 'Mort. Salpicao', 'Cobertura']],
-      body: tableData.length > 0 ? tableData : [['-', 'Sin registros de clientes disponibles para el filtro actual', '-', '-', '-', '-', '-', '-', '-']],
+      head: [['Cód.', 'Razón Social / Cliente', 'Activ. General', ...RUBROS_ACTIVACION.map((r) => RUBRO_LABEL[r]), 'Cobertura']],
+      body: tableData.length > 0 ? tableData : [['-', 'Sin registros de clientes disponibles para el filtro actual', '-', ...RUBROS_ACTIVACION.map(() => '-'), '-']],
       theme: 'grid',
       styles: {
         fontSize: 7,
@@ -1187,21 +1129,19 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
                        </span>
                      </div>
                    </th>
-                   <th onClick={() => toggleRubro360('ACEITE')} title="Filtrar clientes activos y ver Historial 360° de Aceite" className={`p-3 font-bold text-center border-r border-[#a00000] w-24 cursor-pointer transition-colors ${selectedRubros.includes('ACEITE') ? 'bg-emerald-800 text-white' : 'hover:bg-red-800'}`}>
-                     <span className="inline-flex items-center gap-1">{selectedRubros.includes('ACEITE') ? <CheckSquare className="w-3 h-3" /> : <Activity className="w-3 h-3 opacity-75" />} Aceite</span>
-                   </th>
-                   <th onClick={() => toggleRubro360('AZUCAR')} title="Filtrar clientes activos y ver Historial 360° de Azúcar" className={`p-3 font-bold text-center border-r border-[#a00000] w-24 cursor-pointer transition-colors ${selectedRubros.includes('AZUCAR') ? 'bg-emerald-800 text-white' : 'hover:bg-red-800'}`}>
-                     <span className="inline-flex items-center gap-1">{selectedRubros.includes('AZUCAR') ? <CheckSquare className="w-3 h-3" /> : <Activity className="w-3 h-3 opacity-75" />} Azúcar</span>
-                   </th>
-                   <th onClick={() => toggleRubro360('POLLO')} title="Filtrar clientes activos y ver Historial 360° de Pollo" className={`p-3 font-bold text-center border-r border-[#a00000] w-24 cursor-pointer transition-colors ${selectedRubros.includes('POLLO') ? 'bg-emerald-800 text-white' : 'hover:bg-red-800'}`}>
-                     <span className="inline-flex items-center gap-1">{selectedRubros.includes('POLLO') ? <CheckSquare className="w-3 h-3" /> : <Activity className="w-3 h-3 opacity-75" />} Pollo</span>
-                   </th>
-                   <th onClick={() => toggleRubro360('ESTANDAR_ASTURIAS')} title="Filtrar clientes activos y ver Historial 360° de Est. y Sup. Asturias" className={`p-3 font-bold text-center border-r border-[#a00000] min-w-[120px] cursor-pointer transition-colors ${selectedRubros.includes('ESTANDAR_ASTURIAS') ? 'bg-emerald-800 text-white' : 'hover:bg-red-800'}`}>
-                     <span className="inline-flex items-center gap-1">{selectedRubros.includes('ESTANDAR_ASTURIAS') ? <CheckSquare className="w-3 h-3" /> : <Activity className="w-3 h-3 opacity-75" />} Est. y Sup. Asturias</span>
-                   </th>
-                   <th onClick={() => toggleRubro360('MORTADELA_SALPICAO')} title="Filtrar clientes activos y ver Historial 360° de Mort. Salpicao y Asturias" className={`p-3 font-bold text-center border-r border-[#a00000] min-w-[130px] cursor-pointer transition-colors ${selectedRubros.includes('MORTADELA_SALPICAO') ? 'bg-emerald-800 text-white' : 'hover:bg-red-800'}`}>
-                     <span className="inline-flex items-center gap-1">{selectedRubros.includes('MORTADELA_SALPICAO') ? <CheckSquare className="w-3 h-3" /> : <Activity className="w-3 h-3 opacity-75" />} Mort. Salpicao y Asturias</span>
-                   </th>
+                    {RUBROS_ACTIVACION.map((rCode) => (
+                      <th
+                        key={rCode}
+                        onClick={() => toggleRubro360(rCode)}
+                        title={`Filtrar clientes activos y ver Historial 360° de ${RUBRO_LABEL[rCode]}`}
+                        className={`p-3 font-bold text-center border-r border-[#a00000] min-w-[120px] max-w-[190px] cursor-pointer transition-colors ${selectedRubros.includes(rCode) ? 'bg-emerald-800 text-white' : 'hover:bg-red-800'}`}
+                      >
+                        <span className="inline-flex items-center gap-1 max-w-full">
+                          {selectedRubros.includes(rCode) ? <CheckSquare className="w-3 h-3 shrink-0" /> : <Activity className="w-3 h-3 opacity-75 shrink-0" />}
+                          <span className="line-clamp-2 break-words leading-tight">{RUBRO_LABEL[rCode]}</span>
+                        </span>
+                      </th>
+                    ))}
                    <th className="p-3 font-bold text-center w-32">Cobertura</th>
                  </tr>
               </thead>
@@ -1274,11 +1214,7 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
                               </span>
                             )}
                           </td>
-                          {getCell(client.hasAceite, 'ACEITE')}
-                          {getCell(client.hasAzucar, 'AZUCAR')}
-                          {getCell(client.hasPollo, 'POLLO')}
-                          {getCell(client.hasEstandarAsturias, 'ESTANDAR_ASTURIAS')}
-                          {getCell(client.hasMortadelaSalpicao, 'MORTADELA_SALPICAO')}
+                          {RUBROS_ACTIVACION.map((rCode) => getCell(Boolean(client.flags[rCode]), rCode))}
                           <td className="p-3 text-center">
                              <span
                                key={`${client.codigo}-badge-${client.cobertura}`}
@@ -1305,11 +1241,9 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
                         <span className="text-red-400">Faltan: {displayedClients.filter(c => c.cobertura === 0).length}</span>
                       </div>
                     </td>
-                    <td className="p-3 text-center text-emerald-400 border-r border-neutral-800">{displayedClients.filter(c => c.hasAceite).length}</td>
-                    <td className="p-3 text-center text-emerald-400 border-r border-neutral-800">{displayedClients.filter(c => c.hasAzucar).length}</td>
-                    <td className="p-3 text-center text-emerald-400 border-r border-neutral-800">{displayedClients.filter(c => c.hasPollo).length}</td>
-                    <td className="p-3 text-center text-emerald-400 border-r border-neutral-800">{displayedClients.filter(c => c.hasEstandarAsturias).length}</td>
-                    <td className="p-3 text-center text-emerald-400 border-r border-neutral-800">{displayedClients.filter(c => c.hasMortadelaSalpicao).length}</td>
+                    {RUBROS_ACTIVACION.map((rCode) => (
+                      <td key={rCode} className="p-3 text-center text-emerald-400 border-r border-neutral-800">{displayedClients.filter(c => c.flags[rCode]).length}</td>
+                    ))}
                     <td className="p-3 text-center text-amber-400">
                       {((displayedClients.filter(c => c.cobertura > 0).length / displayedClients.length) * 100).toFixed(1)}%
                     </td>
@@ -1346,10 +1280,10 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
                     translate="no"
                     onClick={() => handleToggleClientRubro(client.codigo, rCode, true)}
                     title={`Rubro ${name} ACTIVO en ${client.razonSocial}`}
-                    className="inline-flex items-center gap-1 bg-emerald-600 hover:bg-emerald-500 border-2 border-emerald-300 text-white text-[10px] font-extrabold px-2.5 py-1 rounded-md shadow-[0_0_12px_rgba(16,185,129,0.45)] cursor-pointer transition-all"
+                    className="inline-flex max-w-full items-center gap-1 bg-emerald-600 hover:bg-emerald-500 border-2 border-emerald-300 text-white text-[10px] font-extrabold px-2.5 py-1 rounded-md shadow-[0_0_12px_rgba(16,185,129,0.45)] cursor-pointer transition-all"
                   >
                      <CheckCircle2 className="w-3.5 h-3.5 text-white shrink-0" />
-                     <span>{name}</span>
+                     <span className="truncate">{name}</span>
                   </button>
                ) : (
                   <button
@@ -1358,9 +1292,9 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
                     translate="no"
                     onClick={() => handleToggleClientRubro(client.codigo, rCode, false)}
                     title={`Toca para activar ${name} en ${client.razonSocial}`}
-                    className="inline-flex items-center gap-1 bg-neutral-900/60 hover:bg-emerald-950/40 hover:border-emerald-700/60 hover:text-emerald-300 border border-neutral-800 text-neutral-500 text-[10px] font-bold px-2.5 py-1 rounded-md line-through hover:no-underline cursor-pointer transition-all"
+                    className="inline-flex max-w-full items-center gap-1 bg-neutral-900/60 hover:bg-emerald-950/40 hover:border-emerald-700/60 hover:text-emerald-300 border border-neutral-800 text-neutral-500 text-[10px] font-bold px-2.5 py-1 rounded-md line-through hover:no-underline cursor-pointer transition-all"
                   >
-                     <span>{name}</span>
+                     <span className="truncate">{name}</span>
                   </button>
                );
 
@@ -1409,11 +1343,7 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
                      </h4>
                      
                      <div className="flex flex-wrap gap-1.5 border-t border-neutral-800 pt-3 mt-2">
-                         {getPill('ACEITE', client.hasAceite, 'ACEITE')}
-                         {getPill('AZÚCAR', client.hasAzucar, 'AZUCAR')}
-                         {getPill('POLLO', client.hasPollo, 'POLLO')}
-                         {getPill('EST. ASTURIAS', client.hasEstandarAsturias, 'ESTANDAR_ASTURIAS')}
-                         {getPill('MORT. SALPICAO', client.hasMortadelaSalpicao, 'MORTADELA_SALPICAO')}
+                         {RUBROS_ACTIVACION.map((rCode) => getPill(RUBRO_LABEL[rCode], Boolean(client.flags[rCode]), rCode))}
                      </div>
                   </div>
                );

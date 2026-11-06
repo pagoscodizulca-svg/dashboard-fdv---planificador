@@ -11,7 +11,7 @@ import {
   SheetsSyncMeta
 } from './services/googleSheetsService';
 import { Lock, User as UserIcon, AlertCircle, ShieldCheck } from 'lucide-react';
-import { Target, Package, Users, UserCircle, ScanText, ChevronDown, LogOut, Activity, Route, Sparkles, ShoppingCart } from 'lucide-react';
+import { Target, Package, Users, UserCircle, ScanText, ChevronDown, LogOut, Activity, Route, Sparkles, ShoppingCart, Database } from 'lucide-react';
 import { supabase, hasValidSupabaseConfig } from './lib/supabase';
 import { verifyServerSession, clearAuthSession, saveAuthSession } from './services/authService';
 import { 
@@ -20,6 +20,7 @@ import {
   getSupervisedRoutes,
   getSupervisedAliases,
   getAllowedRoutesForUser, 
+  hydrateVendorProfilesFromMasterCatalog,
   isRouteMatch, 
   matchesVendorAlias,
   VENDOR_PROFILES, 
@@ -35,13 +36,14 @@ const ActivacionClientes = lazy(() => import('./components/ActivacionClientes').
 const HistorialSection = lazy(() => import('./components/HistorialPanel').then(m => ({ default: m.HistorialSection })));
 const CobrosOCR = lazy(() => import('./components/CobrosOCR').then(m => ({ default: m.CobrosOCR })));
 const TrazabilidadTab = lazy(() => import('./components/TrazabilidadTab').then(m => ({ default: m.TrazabilidadTab })));
+const ActualizarMaestra = lazy(() => import('./components/ActualizarMaestra').then(m => ({ default: m.ActualizarMaestra })));
 const DegustacionesTab = lazy(() => import('./components/DegustacionesTab').then(m => ({ default: m.DegustacionesTab })));
 const AlkostoTab = lazy(() => import('./components/AlkostoTab').then(m => ({ default: m.AlkostoTab })));
 const PlanificadorRutaTab = lazy(() => import('./components/PlanificadorRutaTab').then(m => ({ default: m.PlanificadorRutaTab })));
 import { subscribeDegustaciones } from './services/degustacionesService';
 import { Degustacion } from './types';
 
-type TabId = 'ACTIVACION_RUBRO' | 'VOLUMEN' | 'ACTIVACION_CLIENTES' | 'RUTERO' | 'COBROS_OCR' | 'DEGUSTACIONES' | 'ALKOSTO' | 'TRAZABILIDAD';
+type TabId = 'ACTIVACION_RUBRO' | 'VOLUMEN' | 'ACTIVACION_CLIENTES' | 'RUTERO' | 'COBROS_OCR' | 'DEGUSTACIONES' | 'ALKOSTO' | 'TRAZABILIDAD' | 'MAESTRA';
 
 const isIncomingWhatsAppShare = (): boolean => {
   if (typeof window === 'undefined') return false;
@@ -338,6 +340,23 @@ export default function App() {
   // Cargar datos al estar autenticado y mantener sincronizado cada 60s
   useEffect(() => {
     if (!isLoggedIn) return;
+    fetch('/api/catalog/vendors')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((cat) => {
+        if (cat && Array.isArray(cat.vendedores)) {
+          hydrateVendorProfilesFromMasterCatalog(cat.vendedores);
+        }
+        if (cat?.syncedAt) {
+          const prevSync = localStorage.getItem('fdv_master_catalog_sync_version');
+          if (prevSync && prevSync !== cat.syncedAt) {
+            clearSheetsCache();
+            loadData(true, false);
+          }
+          localStorage.setItem('fdv_master_catalog_sync_version', String(cat.syncedAt));
+        }
+      })
+      .catch(() => {});
+
     loadData(false, false);
     const syncInterval = setInterval(() => {
       loadData(false, false);
@@ -586,7 +605,9 @@ export default function App() {
       for (const prof of Object.values(VENDOR_PROFILES)) {
         const found = prof.routes.find(r => r.id === activeVendedorId);
         if (found) {
-          return `${prof.displayName} - ${found.label}`;
+          return prof.displayName.toUpperCase() === found.label.toUpperCase()
+            ? found.label
+            : `${prof.displayName} - ${found.label}`;
         }
       }
       const opt = allowedDropdownOptions.find(o => o.value === activeVendedorId);
@@ -597,7 +618,10 @@ export default function App() {
       return `${currentVendorProfile.displayName} (TODAS MIS RUTAS)`;
     }
     const route = currentVendorProfile.routes.find(r => r.id === activeVendedorId);
-    return route ? `${currentVendorProfile.displayName} - ${route.label}` : currentVendorProfile.displayName;
+    if (!route) return currentVendorProfile.displayName;
+    return currentVendorProfile.displayName.toUpperCase() === route.label.toUpperCase()
+      ? route.label
+      : `${currentVendorProfile.displayName} - ${route.label}`;
   }, [userRole, activeVendedorId, currentVendorProfile, allowedDropdownOptions]);
 
   // Filtrado 100% seguro y estricto
@@ -683,10 +707,15 @@ export default function App() {
     return Array.from(map.values());
   }, [userRole, activeVendedorId, loggedInVendor, activacionData, volumenData]);
 
-  // Restricción estricta: Alkosto SOLO visible y accesible para Sairú Valles
+  // Restricción estricta: Alkosto SOLO visible y accesible para Sairú Valles (Cuentas claves 2 - SV)
   const isSairuValles = useMemo(() => {
     const vendorNorm = (loggedInVendor || '').toUpperCase();
-    return vendorNorm.includes('SAIRU') || vendorNorm.includes('VALLES');
+    return (
+      vendorNorm.includes('SAIRU') ||
+      vendorNorm.includes('VALLES') ||
+      vendorNorm.includes('CUENTAS CLAVES 2') ||
+      vendorNorm.includes('CUENTAS CLAVE 2')
+    );
   }, [loggedInVendor]);
 
   // Si cambia de usuario o rol y la pestaña activa no le corresponde, regresar a ACTIVACION_RUBRO
@@ -695,6 +724,9 @@ export default function App() {
       setActiveTab('ACTIVACION_RUBRO');
     }
     if (activeTab === 'TRAZABILIDAD' && userRole !== 'ADMIN') {
+      setActiveTab('ACTIVACION_RUBRO');
+    }
+    if (activeTab === 'MAESTRA' && userRole !== 'ADMIN') {
       setActiveTab('ACTIVACION_RUBRO');
     }
   }, [activeTab, isSairuValles, userRole]);
@@ -817,6 +849,7 @@ export default function App() {
     },
     ...(isSairuValles ? [{ id: 'ALKOSTO' as TabId, label: 'ALKOSTO', icon: ShoppingCart }] : []),
     ...(userRole === 'ADMIN' ? [{ id: 'TRAZABILIDAD' as TabId, label: 'Trazabilidad', icon: Activity }] : []),
+    ...(userRole === 'ADMIN' ? [{ id: 'MAESTRA' as TabId, label: 'Actualizar Maestra', icon: Database }] : []),
   ];
 
   return (
@@ -1073,6 +1106,9 @@ export default function App() {
             )}
             {activeTab === 'TRAZABILIDAD' && userRole === 'ADMIN' && (
               <TrazabilidadTab />
+            )}
+            {activeTab === 'MAESTRA' && userRole === 'ADMIN' && (
+              <ActualizarMaestra onSynced={() => loadData(true)} />
             )}
           </div>
         </Suspense>

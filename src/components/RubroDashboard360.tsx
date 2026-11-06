@@ -112,6 +112,33 @@ export const getRubroTheme = (rubro: RubroCodigo) => {
         borderCls: 'border-emerald-700/50',
         glowCls: 'from-emerald-950/30 via-neutral-950 to-neutral-950'
       };
+    case 'LECHE_VENCAMPO':
+      return {
+        icon: Droplets,
+        accentText: 'text-sky-400',
+        accentBg: 'bg-sky-500',
+        badgeCls: 'bg-sky-950/50 text-sky-300 border-sky-700/50',
+        borderCls: 'border-sky-700/50',
+        glowCls: 'from-sky-950/30 via-neutral-950 to-neutral-950'
+      };
+    case 'MORTADELA_ASTURIAS':
+      return {
+        icon: Drumstick,
+        accentText: 'text-orange-400',
+        accentBg: 'bg-orange-500',
+        badgeCls: 'bg-orange-950/50 text-orange-300 border-orange-700/50',
+        borderCls: 'border-orange-700/50',
+        glowCls: 'from-orange-950/30 via-neutral-950 to-neutral-950'
+      };
+    case 'SALPICAO':
+      return {
+        icon: Sparkles,
+        accentText: 'text-cyan-400',
+        accentBg: 'bg-cyan-500',
+        badgeCls: 'bg-cyan-950/50 text-cyan-300 border-cyan-700/50',
+        borderCls: 'border-cyan-700/50',
+        glowCls: 'from-cyan-950/30 via-neutral-950 to-neutral-950'
+      };
     case 'MORTADELA_SALPICAO':
       return {
         icon: Sparkles,

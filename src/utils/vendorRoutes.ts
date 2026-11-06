@@ -58,9 +58,20 @@ export const VENDOR_PROFILES: Record<string, VendorProfile> = {
   },
   'MARIANA CHACIN': {
     canonicalUsername: 'MARIANA CHACIN',
-    displayName: 'Mariana Chacín',
+    displayName: 'Cuentas claves 1 - MC',
     routes: [
-      { id: 'CUENTAS CLAVE 1', label: 'Cuentas Clave 1 (MC)', aliases: ['CUENTAS CLAVE 1', 'CUENTAS CLAVE 1 - MC', 'MARIANA CHACIN'] }
+      {
+        id: 'CUENTAS CLAVES 1 - MC',
+        label: 'Cuentas claves 1 - MC',
+        aliases: [
+          'CUENTAS CLAVES 1 - MC',
+          'CUENTAS CLAVE 1 - MC',
+          'CUENTAS CLAVES 1',
+          'CUENTAS CLAVE 1',
+          'MARIANA CHACIN',
+          'MARIANA CHACÍN'
+        ]
+      }
     ]
   },
   'MIKELANGELO DIAZ': {
@@ -209,10 +220,20 @@ export const VENDOR_PROFILES: Record<string, VendorProfile> = {
   },
   'SAIRU VALLES': {
     canonicalUsername: 'SAIRU VALLES',
-    displayName: 'Sairú Valles',
+    displayName: 'Cuentas claves 2 - SV',
     routes: [
-      { id: 'CUENTAS CLAVE 2', label: 'Ruta Cuentas Clave 2 (SV)', aliases: ['CUENTAS CLAVE 2', 'CUENTAS CLAVE 2 - SV'] },
-      { id: 'SAIRU VALLES', label: 'Ruta Sairú Valles', aliases: ['SAIRU VALLES'] }
+      {
+        id: 'CUENTAS CLAVES 2 - SV',
+        label: 'Cuentas claves 2 - SV',
+        aliases: [
+          'CUENTAS CLAVES 2 - SV',
+          'CUENTAS CLAVE 2 - SV',
+          'CUENTAS CLAVES 2',
+          'CUENTAS CLAVE 2',
+          'SAIRU VALLES',
+          'SAIRÚ VALLES'
+        ]
+      }
     ]
   },
   'ELISA SOLER': {
@@ -304,8 +325,22 @@ VENDOR_PROFILES['JHONATAN'] = mikelProfile;
 VENDOR_PROFILES['JAIDER MEDINA'] = VENDOR_PROFILES['JAIDER MEDINA - FOOD SERVICE NORTE'];
 VENDOR_PROFILES['FOOD SERVICE NORTE'] = VENDOR_PROFILES['JAIDER MEDINA - FOOD SERVICE NORTE'];
 VENDOR_PROFILES['MARIANGEL'] = VENDOR_PROFILES['MARIANGEL GONZALEZ'];
+VENDOR_PROFILES['FOOD SERVICE SENIOR - JUAN HERNANDEZ'] = VENDOR_PROFILES['JUAN HERNANDEZ'];
+VENDOR_PROFILES['FOOD SERVICE SENIOR'] = VENDOR_PROFILES['JUAN HERNANDEZ'];
+VENDOR_PROFILES['CUENTAS CLAVES 1 - MC'] = VENDOR_PROFILES['MARIANA CHACIN'];
+VENDOR_PROFILES['CUENTAS CLAVE 1 - MC'] = VENDOR_PROFILES['MARIANA CHACIN'];
+VENDOR_PROFILES['CUENTAS CLAVES 1'] = VENDOR_PROFILES['MARIANA CHACIN'];
+VENDOR_PROFILES['CUENTAS CLAVE 1'] = VENDOR_PROFILES['MARIANA CHACIN'];
+VENDOR_PROFILES['CUENTAS CLAVES 2 - SV'] = VENDOR_PROFILES['SAIRU VALLES'];
+VENDOR_PROFILES['CUENTAS CLAVE 2 - SV'] = VENDOR_PROFILES['SAIRU VALLES'];
+VENDOR_PROFILES['CUENTAS CLAVES 2'] = VENDOR_PROFILES['SAIRU VALLES'];
+VENDOR_PROFILES['CUENTAS CLAVE 2'] = VENDOR_PROFILES['SAIRU VALLES'];
+VENDOR_PROFILES['OSCAR ORTIZ- LA COSTA'] = VENDOR_PROFILES['OSCAR ORTIZ'];
+VENDOR_PROFILES['OSCAR ORTIZ - LA COSTA'] = VENDOR_PROFILES['OSCAR ORTIZ'];
+VENDOR_PROFILES['OSCAR ORTIZ- CORO'] = VENDOR_PROFILES['OSCAR ORTIZ'];
+VENDOR_PROFILES['OSCAR ORTIZ - CORO'] = VENDOR_PROFILES['OSCAR ORTIZ'];
 
-// Perfiles de Supervisores (Alí Pérez ya NO es vendedor, sino únicamente Supervisor de los 3 vendedores de su antigua ruta)
+// Perfiles de los 3 Supervisores Comerciales Oficiales (Noviembre 2026)
 export const SUPERVISOR_PROFILES: Record<string, SupervisorProfile> = {
   'ALI PEREZ': {
     canonicalUsername: 'ALI PEREZ',
@@ -313,10 +348,83 @@ export const SUPERVISOR_PROFILES: Record<string, SupervisorProfile> = {
     supervisedVendors: [
       'ANGEL NAVARRO',
       'MARIANGEL GONZALEZ',
-      'VICTOR CAMPOS'
+      'VICTOR CAMPOS',
+      'ELISA SOLER',
+      'LEONARDO RIOS',
+      'LUIS GUANIPA',
+      'OSCAR ORTIZ'
+    ]
+  },
+  'JOHNATAN SOTO': {
+    canonicalUsername: 'JOHNATAN SOTO',
+    displayName: 'Johnatan Soto (Supervisor)',
+    supervisedVendors: [
+      'MIKELANGELO DIAZ',
+      'HERNAN PAZ',
+      'OSWALDO CHURION',
+      'ANGELICA MORENO',
+      'ADEL JARABA',
+      'JUAN HERNANDEZ',
+      'JAIDER MEDINA - FOOD SERVICE NORTE'
+    ]
+  },
+  'NELSON FINOL': {
+    canonicalUsername: 'NELSON FINOL',
+    displayName: 'Nelson Finol (Supervisor)',
+    supervisedVendors: [
+      'MARIA BRICEÑO',
+      'MARIANA CHACIN',
+      'CARLOS FUENMAYOR',
+      'SARAH REYES',
+      'J PABLO ARAUJO',
+      'J PABLO ARAUJO - CAB/OJE',
+      'JOSE G. GONZALEZ',
+      'FOOD SERVICE SUR',
+      'YOLEIDA LUGO',
+      'SAIRU VALLES',
+      'EDUARDO PIÑA',
+      'MARYERY GARCIA',
+      'PEDRO ABREU'
     ]
   }
 };
+
+/**
+ * Permite hidratar dinámicamente VENDOR_PROFILES y SUPERVISOR_PROFILES desde Supabase (`public.vendedores_maestro`).
+ */
+export function hydrateVendorProfilesFromMasterCatalog(
+  rows: Array<{
+    nombre_canonico?: string;
+    display_name?: string;
+    ruta_oficial?: string;
+    aliases?: string[];
+    supervisor?: string;
+    email?: string;
+    is_supervisor_route?: boolean;
+    activo?: boolean;
+  }>
+): void {
+  if (!Array.isArray(rows) || rows.length === 0) return;
+  for (const r of rows) {
+    if (r.activo === false) continue;
+    const canon = normalizeVendorName(r.nombre_canonico);
+    if (!canon || r.is_supervisor_route) continue;
+    const sup = normalizeVendorName(r.supervisor);
+    if (sup && SUPERVISOR_PROFILES[sup] && !SUPERVISOR_PROFILES[sup].supervisedVendors.includes(canon)) {
+      SUPERVISOR_PROFILES[sup].supervisedVendors.push(canon);
+    }
+    if (!VENDOR_PROFILES[canon]) {
+      const routeId = normalizeVendorName(r.ruta_oficial) || canon;
+      const aliases = Array.from(new Set([canon, routeId, ...(r.aliases || []).map((a) => normalizeVendorName(a)).filter(Boolean)]));
+      VENDOR_PROFILES[canon] = {
+        canonicalUsername: canon,
+        displayName: r.display_name || canon,
+        email: r.email || undefined,
+        routes: [{ id: routeId, label: `Ruta ${r.display_name || canon}`, aliases }],
+      };
+    }
+  }
+}
 
 export function getSupervisorProfile(username: string | null | undefined): SupervisorProfile | null {
   const norm = normalizeVendorName(username).replace(/^SUPERVISOR:/, '').trim();

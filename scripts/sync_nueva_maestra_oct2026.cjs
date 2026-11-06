@@ -174,15 +174,49 @@ async function main() {
     };
   });
 
-  const { error: delActErr } = await supabase.from('activacion_clientes').delete().neq('id', 0);
-  if (delActErr) throw new Error('Error limpiando activacion_clientes: ' + delActErr.message);
+  // Sincronización segura mediante UPSERT (sin DELETE masivo destructivo)
+  const existingRows = [];
+  let fromOffset = 0;
+  while (true) {
+    const { data, error } = await supabase
+      .from('activacion_clientes')
+      .select('id, periodo, cliente_codigo, vendedor_id, vendedor_nombre')
+      .range(fromOffset, fromOffset + 999);
+    if (error || !data || !data.length) break;
+    existingRows.push(...data);
+    if (data.length < 1000) break;
+    fromOffset += 1000;
+  }
 
-  for (let i = 0; i < activacionRecords.length; i += 200) {
-    const batch = activacionRecords.slice(i, i + 200);
+  const existingByKey = new Map();
+  for (const r of existingRows) {
+    const k = `${String(r.vendedor_nombre || '').toUpperCase().replace(/\s*-\s*/g, ' - ').trim()}::${String(r.cliente_codigo || '').replace(/#\d+$/, '').trim()}`;
+    if (!existingByKey.has(k)) existingByKey.set(k, r);
+  }
+
+  const upserts = [];
+  const inserts = [];
+  for (const rec of activacionRecords) {
+    const k = `${String(rec.vendedor_nombre || '').toUpperCase().replace(/\s*-\s*/g, ' - ').trim()}::${String(rec.cliente_codigo || '').trim()}`;
+    const prev = existingByKey.get(k);
+    if (prev && prev.id) {
+      upserts.push({ ...rec, id: prev.id, periodo: prev.periodo || rec.periodo });
+    } else {
+      inserts.push(rec);
+    }
+  }
+
+  for (let i = 0; i < upserts.length; i += 200) {
+    const batch = upserts.slice(i, i + 200);
+    const { error: upsErr } = await supabase.from('activacion_clientes').upsert(batch, { onConflict: 'id' });
+    if (upsErr) throw new Error(`Error upserting activacion_clientes lote ${i}: ` + upsErr.message);
+  }
+  for (let i = 0; i < inserts.length; i += 200) {
+    const batch = inserts.slice(i, i + 200);
     const { error: insErr } = await supabase.from('activacion_clientes').insert(batch);
     if (insErr) throw new Error(`Error insertando activacion_clientes lote ${i}: ` + insErr.message);
   }
-  console.log(`✓ Insertados ${activacionRecords.length} clientes en activacion_clientes (${activeCount} activos).`);
+  console.log(`✓ Sincronizados ${activacionRecords.length} clientes en activacion_clientes mediante UPSERT (${activeCount} activos).`);
 
   console.log('\n=== 4. SINCRONIZANDO ventas_volumen (SIN COLUMNAS DE SUPERVISOR) ===');
   const volumenRows = [];

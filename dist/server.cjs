@@ -4131,6 +4131,670 @@ var import_vite = require("vite");
 var import_dotenv = __toESM(require("dotenv"), 1);
 init_alkostoOcParser();
 init_productosCodizulca();
+var import_crypto = __toESM(require("crypto"), 1);
+
+// src/lib/rubros.ts
+var RUBROS_CONFIG = [
+  { codigo: "AZUCAR", label: "Az\xFAcar", categoriaServidor: "AZ\xDACAR", palabrasClave: "azucar montalban", activo: true },
+  {
+    codigo: "LECHE_VENCAMPO",
+    label: "Leche en polvo Vencampo",
+    categoriaServidor: "LECHE VENCAMPO",
+    palabrasClave: "leche en polvo vencampo lpv",
+    activo: true
+  },
+  {
+    codigo: "ESTANDAR_ASTURIAS",
+    label: "Jam\xF3n est\xE1ndar y superior Asturias",
+    categoriaServidor: "ESTANDAR Y SUPERIOR ASTURIAS",
+    palabrasClave: "jamon estandar superior asturias entero",
+    activo: true
+  },
+  {
+    codigo: "MORTADELA_ASTURIAS",
+    label: "Mortadela Asturias",
+    categoriaServidor: "MORTADELA ASTURIAS",
+    palabrasClave: "mortadela asturias",
+    activo: true
+  },
+  { codigo: "SALPICAO", label: "Salpicao", categoriaServidor: "SALPICAO", palabrasClave: "salpicao ligeros", activo: true },
+  // ---- Legacy (no se muestran) ----
+  { codigo: "ACEITE", label: "Aceite", categoriaServidor: "ACEITE", palabrasClave: "aceite oleo soya girasol", activo: false },
+  { codigo: "POLLO", label: "Pollo", categoriaServidor: "POLLO", palabrasClave: "pollo filet muslo alas higado molleja arroz", activo: false },
+  {
+    codigo: "MORTADELA_SALPICAO",
+    label: "Mortadela Salpicao y Asturias (hist\xF3rico)",
+    categoriaServidor: "MORTADELA SALPICAO Y ASTURIAS",
+    palabrasClave: "mortadela salpicao asturias ligeros",
+    activo: false
+  }
+];
+var RUBROS_ACTIVOS_CONFIG = RUBROS_CONFIG.filter((r) => r.activo);
+var RUBROS_ACTIVACION = RUBROS_ACTIVOS_CONFIG.map((r) => r.codigo);
+var RUBROS_CLAVE = RUBROS_ACTIVOS_CONFIG.map((r) => ({
+  codigo: r.codigo,
+  label: r.label
+}));
+var RUBRO_LABEL = {
+  ...Object.fromEntries(RUBROS_CONFIG.map((r) => [r.codigo, r.label])),
+  OTROS: "Otros"
+};
+var RUBRO_SERVER_CATEGORY = {
+  ...Object.fromEntries(RUBROS_CONFIG.map((r) => [r.codigo, r.categoriaServidor])),
+  OTROS: "OTROS"
+};
+var RUBRO_KEYWORDS = {
+  ...Object.fromEntries(RUBROS_CONFIG.map((r) => [r.codigo, r.palabrasClave])),
+  OTROS: "otros varios"
+};
+function esRubroActivo(codigo) {
+  return RUBROS_ACTIVACION.includes(codigo);
+}
+var sinAcentos = (s) => String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+function categoriaARubroCodigo(cat) {
+  const c = sinAcentos(cat);
+  if (c.includes("MORTADELA") && c.includes("SALPICAO")) return "MORTADELA_SALPICAO";
+  if (c.includes("LECHE")) return "LECHE_VENCAMPO";
+  if (c.includes("AZUCAR")) return "AZUCAR";
+  if (c.includes("ESTANDAR") || c.includes("SUPERIOR") || c.includes("JAMON") || c.includes("ENTERO")) return "ESTANDAR_ASTURIAS";
+  if (c.includes("SALPICAO") || c.includes("LIGEROS")) return "SALPICAO";
+  if (c.includes("MORTADELA")) return "MORTADELA_ASTURIAS";
+  if (c.includes("ACEITE")) return "ACEITE";
+  if (c.includes("POLLO") || c.includes("ARROZ")) return "POLLO";
+  return "OTROS";
+}
+var SKUS_MORTADELA_ASTURIAS = /* @__PURE__ */ new Set(["1464", "1462", "1512", "1521", "1561", "1522", "1564", "1496", "1511"]);
+var SKUS_SALPICAO = /* @__PURE__ */ new Set(["1563", "1562", "1519", "1599"]);
+var SKUS_LECHE_VENCAMPO = /* @__PURE__ */ new Set(["1536", "1555", "1556", "1574", "1579"]);
+var SKUS_POLLO = /* @__PURE__ */ new Set(["630", "629", "870", "393", "POLLO", "FILET", "MUSLO", "ALAS"]);
+function clasificarRubro(sku, nombre) {
+  const s = String(sku || "").trim();
+  const sU = s.toUpperCase();
+  const n = String(nombre || "").toUpperCase();
+  if (s === "1461" || s === "1463" || n.includes("ESTANDAR ASTURIAS") || n.includes("SUPERIOR ASTURIAS")) {
+    return "ESTANDAR_ASTURIAS";
+  }
+  if (n.includes("SALPICAO") || SKUS_SALPICAO.has(s)) return "SALPICAO";
+  if (SKUS_MORTADELA_ASTURIAS.has(s) || n.includes("ASTURIAS") && (n.includes("MORTADELA") || n.includes("MORT.") || n.includes("PECHUGA"))) {
+    return "MORTADELA_ASTURIAS";
+  }
+  if (SKUS_LECHE_VENCAMPO.has(s) || n.includes("LECHE") && n.includes("VENCAMPO")) return "LECHE_VENCAMPO";
+  if (sU === "ACEITE" || n.includes("ACEITE")) return "ACEITE";
+  if (sU === "AZUCAR" || sU === "AZ\xDACAR" || n.includes("AZUCAR") || n.includes("AZ\xDACAR")) return "AZUCAR";
+  if (SKUS_POLLO.has(s) || SKUS_POLLO.has(sU) || n.includes("POLLO ENTERO") || n.includes("POLLO TODAS") || n.includes("FILET") || n.includes("MUSLO") || n.includes("ALAS DESPRESADAS") || n.includes("HIGADO") || n.includes("MOLLEJA")) {
+    return "POLLO";
+  }
+  return "OTROS";
+}
+function clasificarRubroServerLabel(sku, nombre) {
+  return RUBRO_SERVER_CATEGORY[clasificarRubro(sku, nombre)];
+}
+
+// src/utils/maestraParser.ts
+var MaestraParseError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "MaestraParseError";
+  }
+};
+var REQUIRED_HEADERS = ["SUPERVISOR", "IDVENDEDOR", "VENDEDOR", "ID", "RAZONSOCIAL", "RIF"];
+var MAX_HEADER_SCAN_ROWS = 10;
+var RIF_NULL_TOKENS = /* @__PURE__ */ new Set(["", "#N/D", "#N/A", "N/D", "N/A", "NA", "NULL", "NAN", "UNDEFINED"]);
+function normHeader(s) {
+  return String(s ?? "").replace(/^\uFEFF/, "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+function cleanText(s) {
+  return String(s ?? "").replace(/[\uFEFF\u200B-\u200D]/g, "").replace(/\s+/g, " ").trim();
+}
+function decodeMaestraBytes(bytes) {
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  let texto;
+  let fallback = false;
+  try {
+    texto = new TextDecoder("utf-8", { fatal: true }).decode(view);
+  } catch {
+    texto = new TextDecoder("windows-1252").decode(view);
+    fallback = true;
+  }
+  return { texto: texto.replace(/^\uFEFF/, ""), fallback };
+}
+function parseCsvRows(texto, delimitador = ";") {
+  const rows = [];
+  let row = [];
+  let cur = "";
+  let inQuotes = false;
+  let fieldStart = true;
+  const endField = () => {
+    row.push(cur);
+    cur = "";
+    fieldStart = true;
+  };
+  const endRow = () => {
+    endField();
+    rows.push(row);
+    row = [];
+  };
+  for (let i = 0; i < texto.length; i++) {
+    const c = texto[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (texto[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cur += c;
+      }
+      continue;
+    }
+    if (c === '"' && fieldStart) {
+      inQuotes = true;
+      fieldStart = false;
+    } else if (c === delimitador) {
+      endField();
+    } else if (c === "\r") {
+      if (texto[i + 1] === "\n") i++;
+      endRow();
+    } else if (c === "\n") {
+      endRow();
+    } else {
+      cur += c;
+      fieldStart = false;
+    }
+  }
+  if (cur !== "" || row.length > 0) endRow();
+  return rows;
+}
+function sanitizarRifMaestra(raw) {
+  const t = cleanText(raw).replace(/^["']+|["']+$/g, "").trim();
+  if (RIF_NULL_TOKENS.has(t.toUpperCase())) return null;
+  return t.replace(/\s+/g, "").toUpperCase();
+}
+function aEnteroEstricto(raw) {
+  const t = cleanText(raw).replace(/\.0+$/, "");
+  if (!/^\d+$/.test(t)) return null;
+  const n = Number(t);
+  return Number.isSafeInteger(n) ? n : null;
+}
+function filaVacia(cells) {
+  return cells.every((c) => cleanText(c) === "");
+}
+function parseMaestraTexto(textoCrudo, opciones = {}) {
+  const texto = textoCrudo.replace(/^\uFEFF/, "");
+  const todas = parseCsvRows(texto, ";");
+  let headerIdx = -1;
+  let colIdx = null;
+  for (let i = 0; i < Math.min(todas.length, MAX_HEADER_SCAN_ROWS); i++) {
+    const norm = todas[i].map(normHeader);
+    const found = {};
+    let ok = true;
+    for (const h of REQUIRED_HEADERS) {
+      const pos = norm.indexOf(h);
+      if (pos < 0) {
+        ok = false;
+        break;
+      }
+      found[h] = pos;
+    }
+    if (ok) {
+      headerIdx = i;
+      colIdx = found;
+      break;
+    }
+  }
+  if (headerIdx < 0 || !colIdx) {
+    throw new MaestraParseError(
+      `No se encontr\xF3 la fila de encabezados. Se esperaba: SUPERVISOR; ID VENDEDOR; Vendedor; Id; Raz\xF3n Social; RIF (en las primeras ${MAX_HEADER_SCAN_ROWS} filas).`
+    );
+  }
+  const bannerCells = todas.slice(0, headerIdx).flatMap((r) => r.map(cleanText)).filter(Boolean);
+  const banner = bannerCells.length > 0 ? bannerCells.join(" ") : null;
+  const warnings = [];
+  if (opciones.codificacionFallback) {
+    warnings.push({
+      tipo: "CODIFICACION_NO_UTF8",
+      mensaje: "El archivo no era UTF-8 v\xE1lido; se decodific\xF3 como windows-1252. Revisa que los acentos y la \xD1 se vean bien."
+    });
+  }
+  const validas = [];
+  let filasLeidas = 0;
+  let filasDescartadas = 0;
+  for (let i = headerIdx + 1; i < todas.length; i++) {
+    const cells = todas[i];
+    if (filaVacia(cells)) continue;
+    filasLeidas++;
+    const linea = i + 1;
+    const get = (h) => cleanText(cells[colIdx[h]]);
+    const idVendRaw = get("IDVENDEDOR");
+    const idCliRaw = get("ID");
+    if (!idVendRaw || !idCliRaw || /^(NAN|#N\/D|#N\/A|N\/A|NULL)$/i.test(idVendRaw) || /^(NAN|#N\/D|#N\/A|N\/A|NULL)$/i.test(idCliRaw)) {
+      filasDescartadas++;
+      const rifRaw = get("RIF");
+      const razon = get("RAZONSOCIAL");
+      const sup = get("SUPERVISOR");
+      if (razon || sup || get("VENDEDOR") || idVendRaw || idCliRaw) {
+        warnings.push({
+          tipo: "FILA_PARCIAL_DESCARTADA",
+          mensaje: `L\xEDnea ${linea} descartada: falta Id (${idCliRaw || "vac\xEDo"}) o ID VENDEDOR (${idVendRaw || "vac\xEDo"}); raz\xF3n social "${razon}".`,
+          lineas: [linea]
+        });
+      } else if (rifRaw && !RIF_NULL_TOKENS.has(rifRaw.toUpperCase())) {
+        warnings.push({
+          tipo: "FILA_PARCIAL_DESCARTADA",
+          mensaje: `L\xEDnea ${linea} descartada pero tra\xEDa un RIF real (${rifRaw}) sin Id ni vendedor.`,
+          lineas: [linea]
+        });
+      }
+      continue;
+    }
+    const idVendedor = aEnteroEstricto(idVendRaw);
+    const idCliente = aEnteroEstricto(idCliRaw);
+    if (idVendedor === null || idCliente === null) {
+      filasDescartadas++;
+      warnings.push({
+        tipo: "ID_NO_NUMERICO_DESCARTADO",
+        mensaje: `L\xEDnea ${linea} descartada: Id ("${idCliRaw}") o ID VENDEDOR ("${idVendRaw}") no es un entero v\xE1lido.`,
+        lineas: [linea]
+      });
+      continue;
+    }
+    validas.push({
+      linea,
+      supervisor: get("SUPERVISOR"),
+      idVendedor,
+      vendedor: get("VENDEDOR"),
+      idCliente,
+      razonSocial: get("RAZONSOCIAL"),
+      rif: sanitizarRifMaestra(cells[colIdx.RIF])
+    });
+  }
+  const porId = /* @__PURE__ */ new Map();
+  for (const f of validas) {
+    const arr = porId.get(f.idCliente);
+    if (arr) arr.push(f);
+    else porId.set(f.idCliente, [f]);
+  }
+  const clientes = [];
+  let idsDuplicados = 0;
+  for (const [idCliente, filas] of porId) {
+    const ganadora = filas[filas.length - 1];
+    clientes.push(ganadora);
+    if (filas.length > 1) {
+      idsDuplicados++;
+      const detalle = filas.map((f) => `l\xEDnea ${f.linea} \u2192 vendedor ${f.idVendedor} (${f.vendedor})`).join(" | ");
+      warnings.push({
+        tipo: "ID_CLIENTE_DUPLICADO",
+        idCliente,
+        lineas: filas.map((f) => f.linea),
+        mensaje: `Id ${idCliente} ("${ganadora.razonSocial}") aparece ${filas.length} veces: ${detalle}. Se conserva la \xFAltima (l\xEDnea ${ganadora.linea}, vendedor ${ganadora.idVendedor}).`
+      });
+    }
+  }
+  const vendedoresMap = /* @__PURE__ */ new Map();
+  for (const f of validas) {
+    const existente = vendedoresMap.get(f.idVendedor);
+    if (!existente) {
+      vendedoresMap.set(f.idVendedor, { idVendedor: f.idVendedor, nombre: f.vendedor, supervisor: f.supervisor });
+    } else if (existente.nombre !== f.vendedor || existente.supervisor !== f.supervisor) {
+      warnings.push({
+        tipo: "VENDEDOR_INCONSISTENTE",
+        mensaje: `ID VENDEDOR ${f.idVendedor} aparece con datos distintos (l\xEDnea ${f.linea}: "${f.vendedor}" / ${f.supervisor}) vs. el primero ("${existente.nombre}" / ${existente.supervisor}). Se conserva el primero.`,
+        lineas: [f.linea]
+      });
+    }
+  }
+  const vendedores = Array.from(vendedoresMap.values()).sort((a, b) => a.idVendedor - b.idVendedor);
+  vendedores.forEach((v) => {
+    if (!v.supervisor) {
+      warnings.push({ tipo: "SUPERVISOR_VACIO", mensaje: `El vendedor ${v.idVendedor} (${v.nombre}) no tiene supervisor.` });
+    }
+  });
+  const supervisores = Array.from(new Set(vendedores.map((v) => v.supervisor).filter(Boolean))).sort();
+  const rifPendientesFilas = validas.filter((f) => f.rif === null).length;
+  const rifPendientesClientes = clientes.filter((c) => c.rif === null).length;
+  const porRif = /* @__PURE__ */ new Map();
+  for (const c of clientes) {
+    if (c.rif === null) continue;
+    if (!porRif.has(c.rif)) porRif.set(c.rif, /* @__PURE__ */ new Set());
+    porRif.get(c.rif).add(c.idCliente);
+  }
+  let gruposRif = 0;
+  let filasRif = 0;
+  for (const ids of porRif.values()) {
+    if (ids.size > 1) {
+      gruposRif++;
+      filasRif += ids.size;
+    }
+  }
+  return {
+    clientes,
+    vendedores,
+    supervisores,
+    reporte: {
+      banner,
+      filasLeidas,
+      filasValidas: validas.length,
+      filasDescartadas,
+      totalSupervisores: supervisores.length,
+      totalVendedores: vendedores.length,
+      clientesUnicos: clientes.length,
+      rifPendientesFilas,
+      rifPendientesClientes,
+      idsDuplicadosEnArchivo: idsDuplicados,
+      filasDuplicadasEliminadas: validas.length - clientes.length,
+      rifsCompartidos: { grupos: gruposRif, filas: filasRif },
+      warnings
+    }
+  };
+}
+function parseMaestraBytes(bytes) {
+  const { texto, fallback } = decodeMaestraBytes(bytes);
+  return parseMaestraTexto(texto, { codificacionFallback: fallback });
+}
+
+// src/utils/maestraSync.ts
+var MAESTRA_CHUNK_SIZE = 500;
+var MAESTRA_UMBRAL_BAJAS = 0.1;
+var MaestraEsquemaError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "MaestraEsquemaError";
+  }
+};
+var MaestraBajasMasivasError = class extends Error {
+  constructor(bajas, activos) {
+    super(
+      `La carga dar\xEDa de baja ${bajas} de ${activos} clientes activos (${(bajas / activos * 100).toFixed(1)} %), m\xE1s del ${MAESTRA_UMBRAL_BAJAS * 100} % permitido. Revisa que el archivo no est\xE9 truncado o confirma expl\xEDcitamente las bajas.`
+    );
+    this.name = "MaestraBajasMasivasError";
+    this.bajas = bajas;
+    this.activos = activos;
+  }
+};
+function chunk(arr, size = MAESTRA_CHUNK_SIZE) {
+  if (size < 1) throw new Error("size debe ser >= 1");
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+async function calcularPreviewDb(repo, parsed, opts = {}) {
+  try {
+    await repo.verificarEsquema();
+  } catch (e) {
+    if (e instanceof MaestraEsquemaError) {
+      return {
+        esquemaDisponible: false,
+        mensajeEsquema: e.message,
+        activosActuales: 0,
+        nuevos: 0,
+        actualizados: 0,
+        reactivados: 0,
+        aBaja: 0,
+        aBajaIds: [],
+        cambiosVendedor: 0,
+        porcentajeBajas: 0,
+        requiereConfirmarBajas: false,
+        yaCargado: false
+      };
+    }
+    throw e;
+  }
+  const actuales = await repo.listarClientes();
+  const porId = new Map(actuales.map((c) => [c.id_cliente, c]));
+  const enArchivo = new Set(parsed.clientes.map((c) => c.idCliente));
+  let nuevos = 0;
+  let actualizados = 0;
+  let reactivados = 0;
+  let cambiosVendedor = 0;
+  for (const c of parsed.clientes) {
+    const ex = porId.get(c.idCliente);
+    if (!ex) nuevos++;
+    else {
+      if (ex.activo) actualizados++;
+      else reactivados++;
+      if (ex.id_vendedor !== null && ex.id_vendedor !== c.idVendedor) cambiosVendedor++;
+    }
+  }
+  const activos = actuales.filter((c) => c.activo);
+  const aBajaIds = activos.filter((c) => !enArchivo.has(c.id_cliente)).map((c) => c.id_cliente);
+  const porcentajeBajas = activos.length > 0 ? aBajaIds.length / activos.length : 0;
+  const aplicada = opts.archivoSha256 ? await repo.buscarCargaAplicada(opts.archivoSha256) : null;
+  return {
+    esquemaDisponible: true,
+    activosActuales: activos.length,
+    nuevos,
+    actualizados,
+    reactivados,
+    aBaja: aBajaIds.length,
+    aBajaIds,
+    cambiosVendedor,
+    porcentajeBajas,
+    requiereConfirmarBajas: activos.length > 0 && porcentajeBajas > MAESTRA_UMBRAL_BAJAS,
+    yaCargado: Boolean(aplicada)
+  };
+}
+async function sincronizarMaestra(repo, parsed, opts = {}) {
+  if (parsed.clientes.length === 0) {
+    throw new Error("El archivo no tiene clientes v\xE1lidos; no se escribe nada (evita dar de baja toda la cartera).");
+  }
+  const reloj = opts.ahora ?? (() => /* @__PURE__ */ new Date());
+  await repo.verificarEsquema();
+  const preview = await calcularPreviewDb(repo, parsed, { archivoSha256: opts.archivoSha256 });
+  if (preview.requiereConfirmarBajas && !opts.forzarBajas) {
+    throw new MaestraBajasMasivasError(preview.aBaja, preview.activosActuales);
+  }
+  const cargaId = await repo.crearCarga({
+    periodo: opts.periodo,
+    archivoNombre: opts.archivoNombre,
+    archivoSha256: opts.archivoSha256,
+    creadoPor: opts.creadoPor
+  });
+  const ahoraIso = reloj().toISOString();
+  try {
+    await repo.upsertSupervisores(
+      parsed.supervisores.map((nombre) => ({ nombre, activo: true, fecha_baja: null, fecha_actualizacion: ahoraIso, ultima_carga_id: cargaId }))
+    );
+    await repo.upsertVendedores(
+      parsed.vendedores.map((v) => ({
+        id_vendedor: v.idVendedor,
+        nombre: v.nombre,
+        supervisor: v.supervisor || null,
+        activo: true,
+        fecha_baja: null,
+        fecha_actualizacion: ahoraIso,
+        ultima_carga_id: cargaId
+      }))
+    );
+    const filasClientes = parsed.clientes.map((c) => ({
+      id_cliente: c.idCliente,
+      razon_social: c.razonSocial,
+      rif: c.rif,
+      id_vendedor: c.idVendedor,
+      supervisor: c.supervisor || null,
+      activo: true,
+      fecha_baja: null,
+      fecha_actualizacion: ahoraIso,
+      ultima_carga_id: cargaId
+    }));
+    for (const lote of chunk(filasClientes, MAESTRA_CHUNK_SIZE)) {
+      await repo.upsertClientes(lote);
+    }
+    const clientesDesactivados = await repo.desactivarClientesNoVigentes(cargaId, ahoraIso);
+    const vendedoresDesactivados = await repo.desactivarVendedoresNoVigentes(cargaId, ahoraIso);
+    const supervisoresDesactivados = await repo.desactivarSupervisoresNoVigentes(cargaId, ahoraIso);
+    const esperadoPorVendedor = /* @__PURE__ */ new Map();
+    parsed.clientes.forEach((c) => esperadoPorVendedor.set(c.idVendedor, (esperadoPorVendedor.get(c.idVendedor) || 0) + 1));
+    const enBd = await repo.contarClientesActivosPorVendedor();
+    const diferencias = [];
+    const todosVendedores = /* @__PURE__ */ new Set([...esperadoPorVendedor.keys(), ...Object.keys(enBd).map(Number)]);
+    for (const idV of todosVendedores) {
+      const esperado = esperadoPorVendedor.get(idV) || 0;
+      const real = enBd[idV] || 0;
+      if (esperado !== real) diferencias.push({ idVendedor: idV, esperado, enBd: real });
+    }
+    const activosEnBd = Object.values(enBd).reduce((a, b) => a + b, 0);
+    const verificacionOk = diferencias.length === 0 && activosEnBd === parsed.clientes.length;
+    const estado = verificacionOk ? "OK" : "ADVERTENCIA";
+    const result = {
+      cargaId,
+      estado,
+      clientes: {
+        enArchivo: parsed.clientes.length,
+        nuevos: preview.nuevos,
+        actualizados: preview.actualizados,
+        reactivados: preview.reactivados,
+        desactivados: clientesDesactivados,
+        cambiosVendedor: preview.cambiosVendedor
+      },
+      vendedores: { enArchivo: parsed.vendedores.length, desactivados: vendedoresDesactivados },
+      supervisores: { enArchivo: parsed.supervisores.length, desactivados: supervisoresDesactivados },
+      lotes: { tamano: MAESTRA_CHUNK_SIZE, clientes: chunk(filasClientes, MAESTRA_CHUNK_SIZE).length },
+      verificacion: { ok: verificacionOk, activosEnBd, esperados: parsed.clientes.length, diferenciasPorVendedor: diferencias },
+      yaCargadoAntes: preview.yaCargado
+    };
+    await repo.cerrarCarga(cargaId, estado, { reporte: parsed.reporte, resultado: result });
+    return result;
+  } catch (err) {
+    try {
+      await repo.cerrarCarga(cargaId, "ERROR", { reporte: parsed.reporte }, String(err?.message || err));
+    } catch {
+    }
+    throw err;
+  }
+}
+function esErrorTablaInexistente(error) {
+  const code = String(error?.code || "");
+  const msg = String(error?.message || "");
+  return code === "42P01" || code === "PGRST205" || /does not exist|schema cache|Could not find the table/i.test(msg);
+}
+var MSG_ESQUEMA = "Las tablas de la maestra no existen en Supabase. Ejecuta una vez el script scripts/sql/02_maestra.sql en el SQL Editor y vuelve a intentar.";
+async function leerTodo(supabase2, tabla, columnas, orden, filtro) {
+  const out = [];
+  const PAGINA = 1e3;
+  for (let desde = 0; ; desde += PAGINA) {
+    let q = supabase2.from(tabla).select(columnas);
+    if (filtro) q = filtro(q);
+    const { data, error } = await q.order(orden).range(desde, desde + PAGINA - 1);
+    if (error) throw error;
+    if (!data || data.length === 0) break;
+    out.push(...data);
+    if (data.length < PAGINA) break;
+  }
+  return out;
+}
+function assertOk(error, contexto) {
+  if (error) throw new Error(`${contexto}: ${error.message || error}`);
+}
+function crearMaestraRepoSupabase(supabase2) {
+  const noVigente = (cargaId) => `ultima_carga_id.is.null,ultima_carga_id.neq.${cargaId}`;
+  return {
+    async verificarEsquema() {
+      for (const tabla of ["maestra_cargas", "maestra_supervisores", "maestra_vendedores", "maestra_clientes"]) {
+        const { error } = await supabase2.from(tabla).select("*", { head: true, count: "exact" }).limit(1);
+        if (error) {
+          if (esErrorTablaInexistente(error)) throw new MaestraEsquemaError(MSG_ESQUEMA);
+          throw new Error(`No se pudo verificar la tabla ${tabla}: ${error.message}`);
+        }
+      }
+    },
+    listarClientes: () => leerTodo(supabase2, "maestra_clientes", "id_cliente,activo,id_vendedor", "id_cliente"),
+    listarVendedores: () => leerTodo(supabase2, "maestra_vendedores", "id_vendedor,activo", "id_vendedor"),
+    async buscarCargaAplicada(sha256) {
+      const { data, error } = await supabase2.from("maestra_cargas").select("id,finalizado_en").eq("archivo_sha256", sha256).in("estado", ["OK", "ADVERTENCIA"]).order("creado_en", { ascending: false }).limit(1);
+      assertOk(error, "Consultando cargas previas");
+      return data && data.length > 0 ? data[0] : null;
+    },
+    async crearCarga(meta) {
+      const { data, error } = await supabase2.from("maestra_cargas").insert({
+        periodo: meta.periodo ?? null,
+        archivo_nombre: meta.archivoNombre ?? null,
+        archivo_sha256: meta.archivoSha256 ?? null,
+        creado_por: meta.creadoPor ?? null,
+        estado: "EN_CURSO"
+      }).select("id").single();
+      assertOk(error, "Creando registro de carga");
+      return data.id;
+    },
+    async upsertSupervisores(rows) {
+      const { error } = await supabase2.from("maestra_supervisores").upsert(rows, { onConflict: "nombre" });
+      assertOk(error, "UPSERT maestra_supervisores");
+    },
+    async upsertVendedores(rows) {
+      const { error } = await supabase2.from("maestra_vendedores").upsert(rows, { onConflict: "id_vendedor" });
+      assertOk(error, "UPSERT maestra_vendedores");
+    },
+    async upsertClientes(rows) {
+      const { error } = await supabase2.from("maestra_clientes").upsert(rows, { onConflict: "id_cliente" });
+      assertOk(error, `UPSERT maestra_clientes (lote de ${rows.length})`);
+    },
+    async desactivarClientesNoVigentes(cargaId, ahoraIso) {
+      const { error, count } = await supabase2.from("maestra_clientes").update({ activo: false, fecha_baja: ahoraIso, fecha_actualizacion: ahoraIso }, { count: "exact" }).eq("activo", true).or(noVigente(cargaId));
+      assertOk(error, "Soft delete de clientes");
+      return count ?? 0;
+    },
+    async desactivarVendedoresNoVigentes(cargaId, ahoraIso) {
+      const { error, count } = await supabase2.from("maestra_vendedores").update({ activo: false, fecha_baja: ahoraIso, fecha_actualizacion: ahoraIso }, { count: "exact" }).eq("activo", true).or(noVigente(cargaId));
+      assertOk(error, "Soft delete de vendedores");
+      return count ?? 0;
+    },
+    async desactivarSupervisoresNoVigentes(cargaId, ahoraIso) {
+      const { error, count } = await supabase2.from("maestra_supervisores").update({ activo: false, fecha_baja: ahoraIso, fecha_actualizacion: ahoraIso }, { count: "exact" }).eq("activo", true).or(noVigente(cargaId));
+      assertOk(error, "Soft delete de supervisores");
+      return count ?? 0;
+    },
+    async contarClientesActivosPorVendedor() {
+      const filas = await leerTodo(
+        supabase2,
+        "maestra_clientes",
+        "id_cliente,id_vendedor",
+        "id_cliente",
+        (q) => q.eq("activo", true)
+      );
+      const res = {};
+      for (const f of filas) res[f.id_vendedor] = (res[f.id_vendedor] || 0) + 1;
+      return res;
+    },
+    async cerrarCarga(id, estado, resumen, error) {
+      const { error: e } = await supabase2.from("maestra_cargas").update({ estado, resumen, error: error ?? null, finalizado_en: (/* @__PURE__ */ new Date()).toISOString() }).eq("id", id);
+      assertOk(e, "Cerrando registro de carga");
+    }
+  };
+}
+async function leerCarteraActivaMaestra(supabase2, idActivacionPorCodigo = /* @__PURE__ */ new Map()) {
+  try {
+    const clientes = await leerTodo(
+      supabase2,
+      "maestra_clientes",
+      "id_cliente,razon_social,id_vendedor",
+      "id_cliente",
+      (q) => q.eq("activo", true)
+    );
+    if (clientes.length === 0) return [];
+    const vendedores = await leerTodo(
+      supabase2,
+      "maestra_vendedores",
+      "id_vendedor,nombre",
+      "id_vendedor"
+    );
+    const nombrePorId = new Map(vendedores.map((v) => [v.id_vendedor, v.nombre]));
+    return clientes.map((c) => {
+      const codigo = String(c.id_cliente);
+      const nombre = nombrePorId.get(c.id_vendedor) || String(c.id_vendedor);
+      const idAct = idActivacionPorCodigo.get(codigo);
+      return {
+        ...idAct !== void 0 ? { id: idAct } : {},
+        cliente_codigo: codigo,
+        cliente_nombre: c.razon_social,
+        vendedor_id: nombre,
+        vendedor_nombre: nombre
+      };
+    });
+  } catch {
+    return [];
+  }
+}
 
 // src/services/venezuelanReceiptAuditor.ts
 var import_genai = require("@google/genai");
@@ -5655,9 +6319,20 @@ var VENDOR_PROFILES = {
   },
   "MARIANA CHACIN": {
     canonicalUsername: "MARIANA CHACIN",
-    displayName: "Mariana Chac\xEDn",
+    displayName: "Cuentas claves 1 - MC",
     routes: [
-      { id: "CUENTAS CLAVE 1", label: "Cuentas Clave 1 (MC)", aliases: ["CUENTAS CLAVE 1", "CUENTAS CLAVE 1 - MC", "MARIANA CHACIN"] }
+      {
+        id: "CUENTAS CLAVES 1 - MC",
+        label: "Cuentas claves 1 - MC",
+        aliases: [
+          "CUENTAS CLAVES 1 - MC",
+          "CUENTAS CLAVE 1 - MC",
+          "CUENTAS CLAVES 1",
+          "CUENTAS CLAVE 1",
+          "MARIANA CHACIN",
+          "MARIANA CHAC\xCDN"
+        ]
+      }
     ]
   },
   "MIKELANGELO DIAZ": {
@@ -5806,10 +6481,20 @@ var VENDOR_PROFILES = {
   },
   "SAIRU VALLES": {
     canonicalUsername: "SAIRU VALLES",
-    displayName: "Sair\xFA Valles",
+    displayName: "Cuentas claves 2 - SV",
     routes: [
-      { id: "CUENTAS CLAVE 2", label: "Ruta Cuentas Clave 2 (SV)", aliases: ["CUENTAS CLAVE 2", "CUENTAS CLAVE 2 - SV"] },
-      { id: "SAIRU VALLES", label: "Ruta Sair\xFA Valles", aliases: ["SAIRU VALLES"] }
+      {
+        id: "CUENTAS CLAVES 2 - SV",
+        label: "Cuentas claves 2 - SV",
+        aliases: [
+          "CUENTAS CLAVES 2 - SV",
+          "CUENTAS CLAVE 2 - SV",
+          "CUENTAS CLAVES 2",
+          "CUENTAS CLAVE 2",
+          "SAIRU VALLES",
+          "SAIR\xDA VALLES"
+        ]
+      }
     ]
   },
   "ELISA SOLER": {
@@ -5899,6 +6584,20 @@ VENDOR_PROFILES["JHONATAN"] = mikelProfile;
 VENDOR_PROFILES["JAIDER MEDINA"] = VENDOR_PROFILES["JAIDER MEDINA - FOOD SERVICE NORTE"];
 VENDOR_PROFILES["FOOD SERVICE NORTE"] = VENDOR_PROFILES["JAIDER MEDINA - FOOD SERVICE NORTE"];
 VENDOR_PROFILES["MARIANGEL"] = VENDOR_PROFILES["MARIANGEL GONZALEZ"];
+VENDOR_PROFILES["FOOD SERVICE SENIOR - JUAN HERNANDEZ"] = VENDOR_PROFILES["JUAN HERNANDEZ"];
+VENDOR_PROFILES["FOOD SERVICE SENIOR"] = VENDOR_PROFILES["JUAN HERNANDEZ"];
+VENDOR_PROFILES["CUENTAS CLAVES 1 - MC"] = VENDOR_PROFILES["MARIANA CHACIN"];
+VENDOR_PROFILES["CUENTAS CLAVE 1 - MC"] = VENDOR_PROFILES["MARIANA CHACIN"];
+VENDOR_PROFILES["CUENTAS CLAVES 1"] = VENDOR_PROFILES["MARIANA CHACIN"];
+VENDOR_PROFILES["CUENTAS CLAVE 1"] = VENDOR_PROFILES["MARIANA CHACIN"];
+VENDOR_PROFILES["CUENTAS CLAVES 2 - SV"] = VENDOR_PROFILES["SAIRU VALLES"];
+VENDOR_PROFILES["CUENTAS CLAVE 2 - SV"] = VENDOR_PROFILES["SAIRU VALLES"];
+VENDOR_PROFILES["CUENTAS CLAVES 2"] = VENDOR_PROFILES["SAIRU VALLES"];
+VENDOR_PROFILES["CUENTAS CLAVE 2"] = VENDOR_PROFILES["SAIRU VALLES"];
+VENDOR_PROFILES["OSCAR ORTIZ- LA COSTA"] = VENDOR_PROFILES["OSCAR ORTIZ"];
+VENDOR_PROFILES["OSCAR ORTIZ - LA COSTA"] = VENDOR_PROFILES["OSCAR ORTIZ"];
+VENDOR_PROFILES["OSCAR ORTIZ- CORO"] = VENDOR_PROFILES["OSCAR ORTIZ"];
+VENDOR_PROFILES["OSCAR ORTIZ - CORO"] = VENDOR_PROFILES["OSCAR ORTIZ"];
 var SUPERVISOR_PROFILES = {
   "ALI PEREZ": {
     canonicalUsername: "ALI PEREZ",
@@ -5906,10 +6605,68 @@ var SUPERVISOR_PROFILES = {
     supervisedVendors: [
       "ANGEL NAVARRO",
       "MARIANGEL GONZALEZ",
-      "VICTOR CAMPOS"
+      "VICTOR CAMPOS",
+      "ELISA SOLER",
+      "LEONARDO RIOS",
+      "LUIS GUANIPA",
+      "OSCAR ORTIZ"
+    ]
+  },
+  "JOHNATAN SOTO": {
+    canonicalUsername: "JOHNATAN SOTO",
+    displayName: "Johnatan Soto (Supervisor)",
+    supervisedVendors: [
+      "MIKELANGELO DIAZ",
+      "HERNAN PAZ",
+      "OSWALDO CHURION",
+      "ANGELICA MORENO",
+      "ADEL JARABA",
+      "JUAN HERNANDEZ",
+      "JAIDER MEDINA - FOOD SERVICE NORTE"
+    ]
+  },
+  "NELSON FINOL": {
+    canonicalUsername: "NELSON FINOL",
+    displayName: "Nelson Finol (Supervisor)",
+    supervisedVendors: [
+      "MARIA BRICE\xD1O",
+      "MARIANA CHACIN",
+      "CARLOS FUENMAYOR",
+      "SARAH REYES",
+      "J PABLO ARAUJO",
+      "J PABLO ARAUJO - CAB/OJE",
+      "JOSE G. GONZALEZ",
+      "FOOD SERVICE SUR",
+      "YOLEIDA LUGO",
+      "SAIRU VALLES",
+      "EDUARDO PI\xD1A",
+      "MARYERY GARCIA",
+      "PEDRO ABREU"
     ]
   }
 };
+function hydrateVendorProfilesFromMasterCatalog(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return;
+  for (const r of rows) {
+    if (r.activo === false) continue;
+    const canon = normalizeVendorName(r.nombre_canonico);
+    if (!canon || r.is_supervisor_route) continue;
+    const sup = normalizeVendorName(r.supervisor);
+    if (sup && SUPERVISOR_PROFILES[sup] && !SUPERVISOR_PROFILES[sup].supervisedVendors.includes(canon)) {
+      SUPERVISOR_PROFILES[sup].supervisedVendors.push(canon);
+    }
+    if (!VENDOR_PROFILES[canon]) {
+      const routeId = normalizeVendorName(r.ruta_oficial) || canon;
+      const aliases = Array.from(/* @__PURE__ */ new Set([canon, routeId, ...(r.aliases || []).map((a) => normalizeVendorName(a)).filter(Boolean)]));
+      VENDOR_PROFILES[canon] = {
+        canonicalUsername: canon,
+        displayName: r.display_name || canon,
+        email: r.email || void 0,
+        routes: [{ id: routeId, label: `Ruta ${r.display_name || canon}`, aliases }]
+      };
+    }
+  }
+}
 function getSupervisorProfile(username) {
   const norm = normalizeVendorName(username).replace(/^SUPERVISOR:/, "").trim();
   if (!norm) return null;
@@ -5985,59 +6742,680 @@ function getVendorProfile(username) {
   };
 }
 
-// src/lib/rubros.ts
-var RUBRO_SERVER_CATEGORY = {
-  ACEITE: "ACEITE",
-  AZUCAR: "AZ\xDACAR",
-  POLLO: "POLLO",
-  ESTANDAR_ASTURIAS: "ESTANDAR Y SUPERIOR ASTURIAS",
-  MORTADELA_SALPICAO: "MORTADELA SALPICAO Y ASTURIAS",
-  OTROS: "OTROS"
-};
-var SKUS_MORTADELA = /* @__PURE__ */ new Set([
-  "1464",
-  "1462",
-  "1512",
-  "1521",
-  "1561",
-  "1522",
-  "1563",
-  "1562",
-  "1564",
-  "1519",
-  "1496",
-  "1511",
-  "1599"
-]);
-var SKUS_POLLO = /* @__PURE__ */ new Set([
-  "630",
-  "629",
-  "870",
-  "393",
-  "POLLO",
-  "FILET",
-  "MUSLO",
-  "ALAS"
-]);
-function clasificarRubro(sku, nombre) {
-  const s = String(sku || "").trim();
-  const sU = s.toUpperCase();
-  const n = String(nombre || "").toUpperCase();
-  if (s === "1461" || s === "1463" || n.includes("ESTANDAR ASTURIAS") || n.includes("SUPERIOR ASTURIAS")) {
-    return "ESTANDAR_ASTURIAS";
-  }
-  if (n.includes("MORTADELA") || n.includes("MORT.") || n.includes("SALPICAO") || SKUS_MORTADELA.has(s)) {
-    return "MORTADELA_SALPICAO";
-  }
-  if (sU === "ACEITE" || n.includes("ACEITE")) return "ACEITE";
-  if (sU === "AZUCAR" || sU === "AZ\xDACAR" || n.includes("AZUCAR") || n.includes("AZ\xDACAR")) return "AZUCAR";
-  if (SKUS_POLLO.has(s) || SKUS_POLLO.has(sU) || n.includes("POLLO ENTERO") || n.includes("POLLO TODAS") || n.includes("FILET") || n.includes("MUSLO") || n.includes("ALAS DESPRESADAS") || n.includes("HIGADO") || n.includes("MOLLEJA")) {
-    return "POLLO";
-  }
-  return "OTROS";
+// src/utils/maestraCatalogSanitizer.ts
+function sanitizeCatalogText(val) {
+  if (val === null || val === void 0) return "";
+  return String(val).replace(/^\uFEFF/, "").replace(/[\u200B-\u200D\uFEFF]/g, "").replace(/Ã‘|Ã±/g, "\xD1").replace(/\s+/g, " ").trim();
 }
-function clasificarRubroServerLabel(sku, nombre) {
-  return RUBRO_SERVER_CATEGORY[clasificarRubro(sku, nombre)];
+function sanitizeCatalogUpper(val) {
+  return sanitizeCatalogText(val).toUpperCase();
+}
+function normalizeCatalogAsciiKey(val) {
+  return sanitizeCatalogUpper(val).replace(/Ñ/g, "N").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Z0-9]/g, "");
+}
+var OFFICIAL_MASTER_VENDEDORES_SEED = [
+  // =========================================================================
+  // SUPERVISOR: JOHNATAN SOTO (6 Vendedores Comerciales Activos)
+  // =========================================================================
+  {
+    vendedor_id: "3",
+    codigo_erp: "3",
+    nombre_canonico: "MIKELANGELO DIAZ",
+    display_name: "Mikelangelo Diaz",
+    ruta_oficial: "MIKELANGELO DIAZ",
+    aliases: [
+      "MIKELANGELO DIAZ",
+      "MIKELANGELO DIAZ1",
+      "MIKELANGELO",
+      "MIKELANGELO DIAZ - VILLA DEL ROS",
+      "MIKELANGELO DIAZ VILLA DEL ROS",
+      "MIKELANGELO VILLA DEL ROS",
+      "JOHNATAN SOTO",
+      "JOHNATAN SOTO VILLA DEL ROS",
+      "JOHNATAN SOTO - VILLA DEL ROS",
+      "MIKELANGELODIAZ@GMAIL.COM"
+    ],
+    supervisor: "JOHNATAN SOTO",
+    zona: "Machiques / Villa del Rosario / Perij\xE1",
+    region: "Supervisi\xF3n Johnatan Soto",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 69,
+    meta_volumen: 0,
+    email: "Mikelangelodiaz@gmail.com",
+    activo: true
+  },
+  {
+    vendedor_id: "4",
+    codigo_erp: "4",
+    nombre_canonico: "HERNAN PAZ",
+    display_name: "Hern\xE1n Paz",
+    ruta_oficial: "HERNAN PAZ",
+    aliases: ["HERNAN PAZ", "HERN\xC1N PAZ"],
+    supervisor: "JOHNATAN SOTO",
+    zona: "Maracaibo / Perij\xE1",
+    region: "Supervisi\xF3n Johnatan Soto",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 49,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "7",
+    codigo_erp: "7",
+    nombre_canonico: "OSWALDO CHURION",
+    display_name: "Oswaldo Churi\xF3n",
+    ruta_oficial: "OSWALDO CHURION",
+    aliases: ["OSWALDO CHURION", "OSWALDO CHURI\xD3N"],
+    supervisor: "JOHNATAN SOTO",
+    zona: "Maracaibo / Sur",
+    region: "Supervisi\xF3n Johnatan Soto",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 45,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "21",
+    codigo_erp: "21",
+    nombre_canonico: "ANGELICA MORENO",
+    display_name: "Ang\xE9lica Moreno",
+    ruta_oficial: "ANGELICA MORENO",
+    aliases: ["ANGELICA MORENO", "ANG\xC9LICA MORENO"],
+    supervisor: "JOHNATAN SOTO",
+    zona: "Maracaibo / Norte",
+    region: "Supervisi\xF3n Johnatan Soto",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 62,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "22",
+    codigo_erp: "22",
+    nombre_canonico: "ADEL JARABA",
+    display_name: "Adel Jaraba",
+    ruta_oficial: "ADEL JARABA",
+    aliases: ["ADEL JARABA"],
+    supervisor: "JOHNATAN SOTO",
+    zona: "Mayoristas / Maracaibo",
+    region: "Supervisi\xF3n Johnatan Soto",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 40,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "24",
+    codigo_erp: "24",
+    nombre_canonico: "JUAN HERNANDEZ",
+    display_name: "Juan Hern\xE1ndez",
+    ruta_oficial: "JUAN HERNANDEZ",
+    aliases: ["JUAN HERNANDEZ", "JUAN HERN\xC1NDEZ"],
+    supervisor: "JOHNATAN SOTO",
+    zona: "Sur del Lago / El Chivo",
+    region: "Supervisi\xF3n Johnatan Soto",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 39,
+    meta_volumen: 0,
+    activo: true
+  },
+  // =========================================================================
+  // SUPERVISOR: ALI PEREZ (7 Vendedores Comerciales Activos en Falcón)
+  // =========================================================================
+  {
+    vendedor_id: "29",
+    codigo_erp: "29",
+    nombre_canonico: "ANGEL NAVARRO",
+    display_name: "\xC1ngel Navarro",
+    ruta_oficial: "ANGEL NAVARRO",
+    aliases: ["ANGEL NAVARRO", "\xC1NGEL NAVARRO"],
+    supervisor: "ALI PEREZ",
+    zona: "Punto Fijo / Paraguan\xE1",
+    region: "Supervisi\xF3n Ali Perez",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 25,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "47",
+    codigo_erp: "47",
+    nombre_canonico: "MARIANGEL GONZALEZ",
+    display_name: "Mariangel Gonz\xE1lez",
+    ruta_oficial: "MARIANGEL GONZALEZ",
+    aliases: ["MARIANGEL GONZALEZ", "MARIANGEL GONZ\xC1LEZ", "MARIANGEL"],
+    supervisor: "ALI PEREZ",
+    zona: "Punto Fijo / Paraguan\xE1",
+    region: "Supervisi\xF3n Ali Perez",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 19,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "48",
+    codigo_erp: "48",
+    nombre_canonico: "VICTOR CAMPOS",
+    display_name: "V\xEDctor Campos",
+    ruta_oficial: "VICTOR CAMPOS",
+    aliases: ["VICTOR CAMPOS", "V\xCDCTOR CAMPOS"],
+    supervisor: "ALI PEREZ",
+    zona: "Punto Fijo / Paraguan\xE1",
+    region: "Supervisi\xF3n Ali Perez",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 20,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "28",
+    codigo_erp: "28",
+    nombre_canonico: "ELISA SOLER",
+    display_name: "Elisa Soler",
+    ruta_oficial: "ELISA SOLER",
+    aliases: ["ELISA SOLER"],
+    supervisor: "ALI PEREZ",
+    zona: "Punto Fijo / Paraguan\xE1",
+    region: "Supervisi\xF3n Ali Perez",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 59,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "38",
+    codigo_erp: "38",
+    nombre_canonico: "LEONARDO RIOS",
+    display_name: "Leonardo R\xEDos",
+    ruta_oficial: "LEONARDO RIOS",
+    aliases: ["LEONARDO RIOS", "LEONARDO R\xCDOS"],
+    supervisor: "ALI PEREZ",
+    zona: "Punto Fijo / Paraguan\xE1",
+    region: "Supervisi\xF3n Ali Perez",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 49,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "40",
+    codigo_erp: "40",
+    nombre_canonico: "LUIS GUANIPA",
+    display_name: "Luis Guanipa",
+    ruta_oficial: "LUIS GUANIPA",
+    aliases: ["LUIS GUANIPA"],
+    supervisor: "ALI PEREZ",
+    zona: "Coro / Falc\xF3n",
+    region: "Supervisi\xF3n Ali Perez",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 57,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "46",
+    codigo_erp: "46",
+    nombre_canonico: "OSCAR ORTIZ",
+    display_name: "\xD3scar Ortiz",
+    ruta_oficial: "OSCAR ORTIZ",
+    aliases: [
+      "OSCAR ORTIZ",
+      "OSCAR ORTIZ - CORO",
+      "OSCAR ORTIZ- CORO",
+      "OSCAR ORTIZ - LA COSTA",
+      "OSCAR ORTIZ- LA COSTA",
+      "OSCAR ORTIZ-  LA COSTA"
+    ],
+    supervisor: "ALI PEREZ",
+    zona: "Coro / La Costa",
+    region: "Supervisi\xF3n Ali Perez",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 96,
+    meta_volumen: 0,
+    activo: true
+  },
+  // =========================================================================
+  // SUPERVISOR: NELSON FINOL (12 Carteras de Fuerza de Ventas y Cuentas Clave)
+  // =========================================================================
+  {
+    vendedor_id: "1",
+    codigo_erp: "1",
+    nombre_canonico: "MARIA BRICE\xD1O",
+    display_name: "Mar\xEDa Brice\xF1o",
+    ruta_oficial: "MARIA BRICE\xD1O",
+    aliases: ["MARIA BRICE\xD1O", "MARIA BRICENO", "MAR\xCDA BRICE\xD1O", "MARIA BRICEO"],
+    supervisor: "NELSON FINOL",
+    zona: "Maracaibo",
+    region: "Supervisi\xF3n Nelson Finol",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 59,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "55",
+    codigo_erp: "55",
+    nombre_canonico: "MARIANA CHACIN",
+    display_name: "Cuentas claves 1 - MC",
+    ruta_oficial: "CUENTAS CLAVES 1 - MC",
+    aliases: [
+      "MARIANA CHACIN",
+      "MARIANA CHAC\xCDN",
+      "CUENTAS CLAVES 1 - MC",
+      "CUENTAS CLAVE 1 - MC",
+      "CUENTAS CLAVES 1",
+      "CUENTAS CLAVE 1",
+      "CUENTAS CLAVE 1 - MC (MARIANA CHACIN)",
+      "CUENTAS CLAVES 1 - MC (MARIANA CHACIN)"
+    ],
+    supervisor: "NELSON FINOL",
+    zona: "Cuentas claves 1 - MC",
+    region: "Supervisi\xF3n Nelson Finol",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 39,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "12",
+    codigo_erp: "12",
+    nombre_canonico: "CARLOS FUENMAYOR",
+    display_name: "Carlos Fuenmayor",
+    ruta_oficial: "CARLOS FUENMAYOR",
+    aliases: ["CARLOS FUENMAYOR"],
+    supervisor: "NELSON FINOL",
+    zona: "Maracaibo",
+    region: "Supervisi\xF3n Nelson Finol",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 31,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "14",
+    codigo_erp: "14",
+    nombre_canonico: "SARAH REYES",
+    display_name: "Sarah Reyes",
+    ruta_oficial: "SARAH REYES",
+    aliases: ["SARAH REYES"],
+    supervisor: "NELSON FINOL",
+    zona: "Maracaibo / San Francisco",
+    region: "Supervisi\xF3n Nelson Finol",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 49,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "15",
+    codigo_erp: "15",
+    nombre_canonico: "J PABLO ARAUJO - CAB/OJE",
+    display_name: "J Pablo Araujo (Cabimas / Ojeda)",
+    ruta_oficial: "J PABLO ARAUJO - CAB/OJE",
+    aliases: ["J PABLO ARAUJO - CAB/OJE", "J PABLO ARAUJO- CAB/OJE", "J PABLO ARAUJO - CAB"],
+    supervisor: "NELSON FINOL",
+    zona: "Cabimas / Ciudad Ojeda",
+    region: "Supervisi\xF3n Nelson Finol",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 36,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "16",
+    codigo_erp: "16",
+    nombre_canonico: "JOSE G. GONZALEZ",
+    display_name: "Jos\xE9 G. Gonz\xE1lez",
+    ruta_oficial: "JOSE G. GONZALEZ",
+    aliases: ["JOSE G. GONZALEZ", "JOSE GONZALEZ", "JOS\xC9 G. GONZ\xC1LEZ"],
+    supervisor: "NELSON FINOL",
+    zona: "Maracaibo",
+    region: "Supervisi\xF3n Nelson Finol",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 59,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "25",
+    codigo_erp: "25",
+    nombre_canonico: "YOLEIDA LUGO",
+    display_name: "Yoleida Lugo",
+    ruta_oficial: "YOLEIDA LUGO",
+    aliases: ["YOLEIDA LUGO"],
+    supervisor: "NELSON FINOL",
+    zona: "Maracaibo",
+    region: "Supervisi\xF3n Nelson Finol",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 44,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "56",
+    codigo_erp: "56",
+    nombre_canonico: "SAIRU VALLES",
+    display_name: "Cuentas claves 2 - SV",
+    ruta_oficial: "CUENTAS CLAVES 2 - SV",
+    aliases: [
+      "SAIRU VALLES",
+      "SAIR\xDA VALLES",
+      "CUENTAS CLAVES 2 - SV",
+      "CUENTAS CLAVE 2 - SV",
+      "CUENTAS CLAVES 2",
+      "CUENTAS CLAVE 2",
+      "CUENTAS CLAVE 2 - SV (SAIRU VALLES)",
+      "CUENTAS CLAVES 2 - SV (SAIRU VALLES)"
+    ],
+    supervisor: "NELSON FINOL",
+    zona: "Cuentas claves 2 - SV",
+    region: "Supervisi\xF3n Nelson Finol",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 36,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "31",
+    codigo_erp: "31",
+    nombre_canonico: "J PABLO ARAUJO",
+    display_name: "J Pablo Araujo",
+    ruta_oficial: "J PABLO ARAUJO",
+    aliases: ["J PABLO ARAUJO"],
+    supervisor: "NELSON FINOL",
+    zona: "Costa Oriental del Lago",
+    region: "Supervisi\xF3n Nelson Finol",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 41,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "33",
+    codigo_erp: "33",
+    nombre_canonico: "EDUARDO PI\xD1A",
+    display_name: "Eduardo Pi\xF1a",
+    ruta_oficial: "EDUARDO PI\xD1A",
+    aliases: ["EDUARDO PI\xD1A", "EDUARDO PINA", "EDUARDO PIA"],
+    supervisor: "NELSON FINOL",
+    zona: "Maracaibo",
+    region: "Supervisi\xF3n Nelson Finol",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 59,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "39",
+    codigo_erp: "39",
+    nombre_canonico: "MARYERY GARCIA",
+    display_name: "Maryery Garc\xEDa",
+    ruta_oficial: "MARYERY GARCIA",
+    aliases: ["MARYERY GARCIA", "MARYERY GARC\xCDA"],
+    supervisor: "NELSON FINOL",
+    zona: "Ciudad Ojeda / COL",
+    region: "Supervisi\xF3n Nelson Finol",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 39,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "45",
+    codigo_erp: "45",
+    nombre_canonico: "PEDRO ABREU",
+    display_name: "Pedro Abreu",
+    ruta_oficial: "PEDRO ABREU",
+    aliases: ["PEDRO ABREU"],
+    supervisor: "NELSON FINOL",
+    zona: "Punto Fijo / Paraguan\xE1",
+    region: "Supervisi\xF3n Nelson Finol",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: true,
+    meta_activacion: 53,
+    meta_volumen: 0,
+    activo: true
+  },
+  // =========================================================================
+  // RUTAS ESPECIALES DE FOOD SERVICE (Excluidas de Ranking de Volumen FDV)
+  // =========================================================================
+  {
+    vendedor_id: "19",
+    codigo_erp: "19",
+    nombre_canonico: "FOOD SERVICE SUR",
+    display_name: "Food Service Sur",
+    ruta_oficial: "FOOD SERVICE SUR",
+    aliases: ["FOOD SERVICE SUR"],
+    supervisor: "NELSON FINOL",
+    zona: "Food Service Sur",
+    region: "Supervisi\xF3n Nelson Finol",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: false,
+    meta_activacion: 39,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "20",
+    codigo_erp: "20",
+    nombre_canonico: "JAIDER MEDINA - FOOD SERVICE NORTE",
+    display_name: "Jaider Medina (Food Service Norte)",
+    ruta_oficial: "JAIDER MEDINA - FOOD SERVICE NORTE",
+    aliases: ["JAIDER MEDINA - FOOD SERVICE NORTE", "JAIDER MEDINA", "FOOD SERVICE NORTE"],
+    supervisor: "JOHNATAN SOTO",
+    zona: "Food Service Norte",
+    region: "Supervisi\xF3n Johnatan Soto",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: false,
+    meta_activacion: 30,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "57",
+    codigo_erp: "57",
+    nombre_canonico: "FOOD SERVICE SENIOR - JUAN HERNANDEZ",
+    display_name: "Food Service Senior (Juan Hern\xE1ndez)",
+    ruta_oficial: "FOOD SERVICE SENIOR - JUAN HERNANDEZ",
+    aliases: ["FOOD SERVICE SENIOR - JUAN HERNANDEZ", "FOOD SERVICE SENIOR"],
+    supervisor: "JOHNATAN SOTO",
+    zona: "Food Service Senior",
+    region: "Supervisi\xF3n Johnatan Soto",
+    role: "VENDEDOR",
+    is_supervisor_route: false,
+    incluir_en_volumen: false,
+    meta_activacion: 58,
+    meta_volumen: 0,
+    activo: true
+  },
+  // =========================================================================
+  // PERFILES DE LOS 3 SUPERVISORES COMERCIALES OFICIALES
+  // =========================================================================
+  {
+    vendedor_id: "SUPERVISOR_JOHNATAN_SOTO",
+    codigo_erp: "SUP-01",
+    nombre_canonico: "JOHNATAN SOTO",
+    display_name: "Johnatan Soto (Supervisor)",
+    ruta_oficial: "SUPERVISOR JOHNATAN SOTO",
+    aliases: ["SUPERVISOR:JOHNATAN SOTO"],
+    supervisor: "JOHNATAN SOTO",
+    zona: "Occidente / Perij\xE1 / Maracaibo",
+    region: "Supervisi\xF3n Johnatan Soto",
+    role: "SUPERVISOR",
+    is_supervisor_route: true,
+    incluir_en_volumen: false,
+    meta_activacion: 0,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "SUPERVISOR_ALI_PEREZ",
+    codigo_erp: "SUP-02",
+    nombre_canonico: "ALI PEREZ",
+    display_name: "Al\xED P\xE9rez (Supervisor)",
+    ruta_oficial: "SUPERVISOR ALI PEREZ",
+    aliases: ["SUPERVISOR:ALI PEREZ", "AL\xCD P\xC9REZ"],
+    supervisor: "ALI PEREZ",
+    zona: "Falc\xF3n / Punto Fijo / Coro",
+    region: "Supervisi\xF3n Ali Perez",
+    role: "SUPERVISOR",
+    is_supervisor_route: true,
+    incluir_en_volumen: false,
+    meta_activacion: 0,
+    meta_volumen: 0,
+    activo: true
+  },
+  {
+    vendedor_id: "SUPERVISOR_NELSON_FINOL",
+    codigo_erp: "SUP-03",
+    nombre_canonico: "NELSON FINOL",
+    display_name: "Nelson Finol (Supervisor)",
+    ruta_oficial: "SUPERVISOR NELSON FINOL",
+    aliases: ["SUPERVISOR:NELSON FINOL"],
+    supervisor: "NELSON FINOL",
+    zona: "Maracaibo / COL / Cuentas Clave",
+    region: "Supervisi\xF3n Nelson Finol",
+    role: "SUPERVISOR",
+    is_supervisor_route: true,
+    incluir_en_volumen: false,
+    meta_activacion: 0,
+    meta_volumen: 0,
+    activo: true
+  }
+];
+var runtimeSellerCatalog = [...OFFICIAL_MASTER_VENDEDORES_SEED];
+var runtimeAliasLookup = /* @__PURE__ */ new Map();
+function rebuildRuntimeAliasIndex() {
+  runtimeAliasLookup.clear();
+  for (const s of runtimeSellerCatalog) {
+    if (!s.is_supervisor_route) {
+      runtimeAliasLookup.set(normalizeCatalogAsciiKey(s.nombre_canonico), s);
+      runtimeAliasLookup.set(normalizeCatalogAsciiKey(s.ruta_oficial), s);
+      runtimeAliasLookup.set(normalizeCatalogAsciiKey(s.display_name), s);
+      for (const alias of s.aliases || []) {
+        runtimeAliasLookup.set(normalizeCatalogAsciiKey(alias), s);
+      }
+    }
+  }
+}
+rebuildRuntimeAliasIndex();
+function hydrateRuntimeSellerCatalog(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return runtimeSellerCatalog;
+  }
+  const byCanonical = /* @__PURE__ */ new Map();
+  for (const seed of OFFICIAL_MASTER_VENDEDORES_SEED) {
+    byCanonical.set(
+      `${seed.is_supervisor_route ? "SUP::" : "VEN::"}${sanitizeCatalogUpper(seed.nombre_canonico)}`,
+      { ...seed, aliases: [...seed.aliases] }
+    );
+  }
+  for (const raw of rows) {
+    const canon = sanitizeCatalogUpper(raw.nombre_canonico || raw.ruta_oficial || raw.display_name);
+    if (!canon) continue;
+    const isSup = Boolean(raw.is_supervisor_route) || sanitizeCatalogUpper(raw.role) === "SUPERVISOR";
+    const key = `${isSup ? "SUP::" : "VEN::"}${canon}`;
+    const existing = byCanonical.get(key);
+    const rawAliases = Array.isArray(raw.aliases) ? raw.aliases.map((a) => sanitizeCatalogUpper(a)).filter(Boolean) : [];
+    if (existing) {
+      const mergedAliases = Array.from(/* @__PURE__ */ new Set([...existing.aliases, ...rawAliases, canon]));
+      byCanonical.set(key, {
+        ...existing,
+        vendedor_id: sanitizeCatalogText(raw.vendedor_id) || existing.vendedor_id,
+        codigo_erp: sanitizeCatalogText(raw.codigo_erp) || existing.codigo_erp,
+        nombre_canonico: canon,
+        display_name: sanitizeCatalogText(raw.display_name) || existing.display_name,
+        ruta_oficial: sanitizeCatalogUpper(raw.ruta_oficial) || existing.ruta_oficial,
+        aliases: mergedAliases,
+        supervisor: sanitizeCatalogUpper(raw.supervisor) || existing.supervisor,
+        zona: sanitizeCatalogText(raw.zona) || existing.zona,
+        region: sanitizeCatalogText(raw.region) || existing.region,
+        role: sanitizeCatalogUpper(raw.role) || existing.role,
+        is_supervisor_route: isSup,
+        incluir_en_volumen: typeof raw.incluir_en_volumen === "boolean" ? raw.incluir_en_volumen : existing.incluir_en_volumen,
+        meta_activacion: Number(raw.meta_activacion) > 0 ? Number(raw.meta_activacion) : existing.meta_activacion,
+        meta_volumen: Number(raw.meta_volumen) > 0 ? Number(raw.meta_volumen) : existing.meta_volumen,
+        email: sanitizeCatalogText(raw.email) || existing.email,
+        activo: typeof raw.activo === "boolean" ? raw.activo : existing.activo
+      });
+    } else {
+      byCanonical.set(key, {
+        vendedor_id: sanitizeCatalogText(raw.vendedor_id) || canon,
+        codigo_erp: sanitizeCatalogText(raw.codigo_erp) || "",
+        nombre_canonico: canon,
+        display_name: sanitizeCatalogText(raw.display_name) || canon,
+        ruta_oficial: sanitizeCatalogUpper(raw.ruta_oficial) || canon,
+        aliases: Array.from(/* @__PURE__ */ new Set([canon, ...rawAliases])),
+        supervisor: sanitizeCatalogUpper(raw.supervisor) || "NELSON FINOL",
+        zona: sanitizeCatalogText(raw.zona) || "Maracaibo",
+        region: sanitizeCatalogText(raw.region) || "OCCIDENTE",
+        role: isSup ? "SUPERVISOR" : "VENDEDOR",
+        is_supervisor_route: isSup,
+        incluir_en_volumen: typeof raw.incluir_en_volumen === "boolean" ? raw.incluir_en_volumen : !isSup,
+        meta_activacion: Number(raw.meta_activacion) || 0,
+        meta_volumen: Number(raw.meta_volumen) || 0,
+        email: sanitizeCatalogText(raw.email) || void 0,
+        activo: typeof raw.activo === "boolean" ? raw.activo : true
+      });
+    }
+  }
+  runtimeSellerCatalog = Array.from(byCanonical.values());
+  rebuildRuntimeAliasIndex();
+  return runtimeSellerCatalog;
+}
+function getRuntimeSellerCatalog() {
+  return runtimeSellerCatalog;
 }
 
 // src/services/googleSheetsParser.ts
@@ -6302,7 +7680,24 @@ function isSupervisorSummaryHeader(vendorRaw) {
   const norm = normalizeVendorName(clean);
   return SUPERVISOR_SUMMARY_COLUMNS.has(norm);
 }
+function normalizeCuentasClavesVendor(vendorName) {
+  const u = String(vendorName || "").replace(/\s+/g, " ").trim().toUpperCase();
+  if (u === "MARIANA CHACIN" || u === "MARIANA CHAC\xCDN" || u === "CUENTAS CLAVE 1" || u === "CUENTAS CLAVES 1" || u === "CUENTAS CLAVE 1 - MC" || u === "CUENTAS CLAVES 1 - MC") {
+    return { id: "CUENTAS CLAVES 1 - MC", display: "Cuentas claves 1 - MC" };
+  }
+  if (u === "SAIRU VALLES" || u === "SAIR\xDA VALLES" || u === "CUENTAS CLAVE 2" || u === "CUENTAS CLAVES 2" || u === "CUENTAS CLAVE 2 - SV" || u === "CUENTAS CLAVES 2 - SV") {
+    return { id: "CUENTAS CLAVES 2 - SV", display: "Cuentas claves 2 - SV" };
+  }
+  return null;
+}
 function formatVolumenVendorDisplay(vendorName) {
+  const cc = normalizeCuentasClavesVendor(vendorName);
+  if (cc) {
+    return {
+      finalVendedorId: cc.id,
+      finalVendedorNombre: cc.display
+    };
+  }
   const vendorUpper = vendorName.toUpperCase();
   const isMikelRoute1 = vendorUpper === "MIKELANGELO DIAZ1" || vendorUpper.includes("MIKELANGELO DIAZ 1") || vendorUpper.includes("MIKELANGELO DIAZ - PRINCIPAL");
   const isMikelVilla = (vendorUpper.includes("MIKELANGELO") || vendorUpper.includes("SOTO") || vendorUpper.includes("DIAZ")) && vendorUpper.includes("VILLA");
@@ -6356,7 +7751,7 @@ function extractSheetRows(XLSX2, sheet) {
   });
 }
 function parseWorkbookFull(XLSX2, workbook, options) {
-  const { periodo, masterClients = [] } = options;
+  const { periodo, masterClients = [], ventasMes = [] } = options;
   const warnings = [];
   const metrics = {};
   const volumenSupabaseRows = [];
@@ -6449,13 +7844,15 @@ function parseWorkbookFull(XLSX2, workbook, options) {
           const ejecutadoKg = parseLocaleNumber(row[block.ejecutadoCol], 0);
           if (metaKg > 0 || ejecutadoKg > 0) {
             tabMetric.validRecordsRead++;
+            const ccVol = normalizeCuentasClavesVendor(block.vendorName);
+            const canonicalBlockVendor = ccVol ? ccVol.id : block.vendorName;
             volumenSupabaseRows.push({
               periodo,
               sku,
               articulo,
               categoria: cat,
-              vendedor_id: block.vendorName,
-              vendedor_nombre: block.vendorName,
+              vendedor_id: canonicalBlockVendor,
+              vendedor_nombre: canonicalBlockVendor,
               meta_kg: metaKg,
               ejecutado_kg: ejecutadoKg,
               zona: "General"
@@ -6514,6 +7911,7 @@ function parseWorkbookFull(XLSX2, workbook, options) {
         },
         { codigo: 0, cliente: 1, cajas: 2 }
       );
+      let prevCajas = -1;
       for (let r = 1; r < rows.length; r++) {
         const row = rows[r];
         if (isRowCompletelyEmpty(row)) {
@@ -6531,6 +7929,12 @@ function parseWorkbookFull(XLSX2, workbook, options) {
           continue;
         }
         const cajas = parseLocaleNumber(row[cols.cajas], 0);
+        if (tabMetric.validRecordsRead >= 50 && prevCajas >= 15 && cajas > 0 && cajas <= prevCajas * 0.05) {
+          break;
+        }
+        if (cajas > 0) {
+          prevCajas = cajas;
+        }
         const addVal = cajas > 0 ? cajas : 1;
         tabMetric.validRecordsRead++;
         const nextTotal = +((clientMap.get(canonical) || 0) + addVal).toFixed(4);
@@ -6543,12 +7947,34 @@ function parseWorkbookFull(XLSX2, workbook, options) {
     metrics[resolved.sheetName] = tabMetric;
     return clientMap;
   };
+  const unirMapas = (a, b) => {
+    const out = new Map(a);
+    b.forEach((v, k) => out.set(k, +((out.get(k) || 0) + v).toFixed(4)));
+    return out;
+  };
+  const ventasMesPorRubro = (rubro) => {
+    const acc = /* @__PURE__ */ new Map();
+    for (const v of ventasMes) {
+      const cajas = Number(v.cajas) || 0;
+      if (cajas <= 0) continue;
+      if (clasificarRubro(v.id_articulo, v.articulo) !== rubro) continue;
+      const { rawClean, canonical } = normalizeClientCode(v.id_cliente);
+      if (!canonical) continue;
+      acc.set(canonical, +((acc.get(canonical) || 0) + cajas).toFixed(4));
+      if (rawClean && rawClean !== canonical) acc.set(rawClean, acc.get(canonical));
+    }
+    return acc;
+  };
   const productMaps = {
     ACEITE: readProductPurchaseSheet(["aceite"], ["aceite"]),
     AZUCAR: readProductPurchaseSheet(["azucar"], ["azucar"]),
     POLLO: readProductPurchaseSheet(["pollo"], ["pollo"]),
     ESTANDAR_ASTURIAS: readProductPurchaseSheet(["jamon_asturias", "estandar_asturias"], ["jamon", "asturias"]),
-    MORTADELA_SALPICAO: readProductPurchaseSheet(["enteros_ligeros", "mortadela_salpicao"], ["ligeros", "salpicao", "mortadela"])
+    MORTADELA_SALPICAO: readProductPurchaseSheet(["enteros_ligeros", "mortadela_salpicao"], ["ligeros", "salpicao", "mortadela"]),
+    // Rubros activos desde Noviembre 2026
+    LECHE_VENCAMPO: unirMapas(readProductPurchaseSheet(["leche", "leche_vencampo", "leche_en_polvo_vencampo"], ["leche"]), ventasMesPorRubro("LECHE_VENCAMPO")),
+    MORTADELA_ASTURIAS: unirMapas(readProductPurchaseSheet(["mortadela_asturias"], []), ventasMesPorRubro("MORTADELA_ASTURIAS")),
+    SALPICAO: unirMapas(readProductPurchaseSheet(["salpicao"], []), ventasMesPorRubro("SALPICAO"))
   };
   const actResolved = resolveSheetByAliases(
     workbook,
@@ -6578,7 +8004,9 @@ function parseWorkbookFull(XLSX2, workbook, options) {
           azucar: ["azucar"],
           pollo: ["pollo", "arroz"],
           asturias: ["estandar_y_superior_asturias", "jamon_asturias", "estandar_asturias"],
-          salpicao: ["mortadela_salpicao_y_asturias", "enteros_ligeros", "mortadela_salpicao"]
+          salpicao: ["mortadela_salpicao_y_asturias", "enteros_ligeros", "mortadela_salpicao"],
+          leche: ["leche_en_polvo_vencampo", "leche_vencampo", "leche"],
+          mortadelaAsturias: ["mortadela_asturias"]
         },
         {
           codigo: 0,
@@ -6588,9 +8016,12 @@ function parseWorkbookFull(XLSX2, workbook, options) {
           azucar: 4,
           pollo: 5,
           asturias: 6,
-          salpicao: 7
+          salpicao: 7,
+          leche: -1,
+          mortadelaAsturias: -1
         }
       );
+      const salpicaoNuevoIdx = (rows[0] || []).map(normalizeHeaderKey).indexOf("salpicao");
       for (let r = 1; r < rows.length; r++) {
         const row = rows[r];
         if (isRowCompletelyEmpty(row)) {
@@ -6614,7 +8045,11 @@ function parseWorkbookFull(XLSX2, workbook, options) {
         const flagPollo = cols.pollo >= 0 ? parseTruthySheetFlag(row[cols.pollo]) : false;
         const flagAsturias = cols.asturias >= 0 ? parseTruthySheetFlag(row[cols.asturias]) : false;
         const flagSalpicao = cols.salpicao >= 0 ? parseTruthySheetFlag(row[cols.salpicao]) : false;
-        const mappedVendor = rawVendor.toUpperCase() === "FOOD SERVICE NORTE" ? "JAIDER MEDINA - FOOD SERVICE NORTE" : rawVendor;
+        const flagLeche = cols.leche >= 0 ? parseTruthySheetFlag(row[cols.leche]) : false;
+        const flagMortadelaAsturias = cols.mortadelaAsturias >= 0 ? parseTruthySheetFlag(row[cols.mortadelaAsturias]) : false;
+        const flagSalpicaoNuevo = salpicaoNuevoIdx >= 0 ? parseTruthySheetFlag(row[salpicaoNuevoIdx]) : false;
+        const ccSheet = normalizeCuentasClavesVendor(rawVendor);
+        const mappedVendor = ccSheet ? ccSheet.id : rawVendor.toUpperCase() === "FOOD SERVICE NORTE" ? "JAIDER MEDINA - FOOD SERVICE NORTE" : rawVendor;
         if (sheetClientsByCanonical.has(canonical)) {
           const prev = sheetClientsByCanonical.get(canonical);
           prev.flagAceite = prev.flagAceite || flagAceite;
@@ -6622,6 +8057,9 @@ function parseWorkbookFull(XLSX2, workbook, options) {
           prev.flagPollo = prev.flagPollo || flagPollo;
           prev.flagAsturias = prev.flagAsturias || flagAsturias;
           prev.flagSalpicao = prev.flagSalpicao || flagSalpicao;
+          prev.flagLeche = prev.flagLeche || flagLeche;
+          prev.flagMortadelaAsturias = prev.flagMortadelaAsturias || flagMortadelaAsturias;
+          prev.flagSalpicaoNuevo = prev.flagSalpicaoNuevo || flagSalpicaoNuevo;
           warnings.push({
             sheet: actResolved.sheetName,
             row: r + 1,
@@ -6639,7 +8077,10 @@ function parseWorkbookFull(XLSX2, workbook, options) {
           flagAzucar,
           flagPollo,
           flagAsturias,
-          flagSalpicao
+          flagSalpicao,
+          flagLeche,
+          flagMortadelaAsturias,
+          flagSalpicaoNuevo
         });
       }
     }
@@ -6647,34 +8088,45 @@ function parseWorkbookFull(XLSX2, workbook, options) {
   }
   const mergedClientsMap = /* @__PURE__ */ new Map();
   for (const mc of masterClients) {
-    const { rawClean, canonical } = normalizeClientCode(mc.cliente_codigo);
+    const rawCodeClean = String(mc.cliente_codigo || "").replace(/#\d+$/, "").trim();
+    const { rawClean, canonical } = normalizeClientCode(rawCodeClean);
     if (!canonical) continue;
+    const rawVId = String(mc.vendedor_id || mc.vendedor_nombre || "").replace(/\s+/g, " ").trim();
+    if (rawVId.toUpperCase().startsWith("INACTIVO_MAESTRA::")) continue;
+    const rawVNombre = String(mc.vendedor_nombre || mc.vendedor_id || "").replace(/\s+/g, " ").trim();
+    const ccMc = normalizeCuentasClavesVendor(rawVNombre) || normalizeCuentasClavesVendor(rawVId);
+    const vIdClean = ccMc ? ccMc.id : rawVId;
+    const vNombreClean = ccMc ? ccMc.id : rawVNombre;
+    const compositeKey = `${normalizeVendorName(vNombreClean)}::${canonical}`;
     const sheetMatch = sheetClientsByCanonical.get(canonical);
-    if (!mergedClientsMap.has(canonical)) {
-      mergedClientsMap.set(canonical, {
+    if (!mergedClientsMap.has(compositeKey)) {
+      mergedClientsMap.set(compositeKey, {
         dbId: mc.id,
-        codigo: rawClean || canonical,
+        codigo: String(mc.cliente_codigo || rawClean || canonical).trim(),
         canonical,
         razonSocial: String(mc.cliente_nombre || sheetMatch?.razonSocial || "").trim(),
-        vendedorId: String(mc.vendedor_id || mc.vendedor_nombre || "").replace(/\s+/g, " ").trim(),
-        vendedorNombre: String(mc.vendedor_nombre || mc.vendedor_id || "").replace(/\s+/g, " ").trim(),
+        vendedorId: vIdClean,
+        vendedorNombre: vNombreClean,
         isNewFromSheet: false,
         sheetFlags: sheetMatch
       });
     }
   }
-  for (const [canonical, sc] of sheetClientsByCanonical.entries()) {
-    if (mergedClientsMap.has(canonical)) continue;
-    if (sc.vendedor.toUpperCase() === "ALI PEREZ") continue;
-    mergedClientsMap.set(canonical, {
-      codigo: sc.rawCode || canonical,
-      canonical,
-      razonSocial: sc.razonSocial,
-      vendedorId: sc.vendedor,
-      vendedorNombre: sc.vendedor,
-      isNewFromSheet: true,
-      sheetFlags: sc
-    });
+  if (masterClients.length === 0) {
+    for (const [canonical, sc] of sheetClientsByCanonical.entries()) {
+      const compositeKey = `${normalizeVendorName(sc.vendedor)}::${canonical}`;
+      if (mergedClientsMap.has(compositeKey)) continue;
+      if (sc.vendedor.toUpperCase() === "ALI PEREZ") continue;
+      mergedClientsMap.set(compositeKey, {
+        codigo: sc.rawCode || canonical,
+        canonical,
+        razonSocial: sc.razonSocial,
+        vendedorId: sc.vendedor,
+        vendedorNombre: sc.vendedor,
+        isNewFromSheet: true,
+        sheetFlags: sc
+      });
+    }
   }
   const activacionApiRows = [];
   const activacionSupabaseUpserts = [];
@@ -6687,12 +8139,18 @@ function parseWorkbookFull(XLSX2, workbook, options) {
     const cPollo = productMaps.POLLO.get(c.canonical) || productMaps.POLLO.get(c.codigo) || 0;
     const cAsturias = productMaps.ESTANDAR_ASTURIAS.get(c.canonical) || productMaps.ESTANDAR_ASTURIAS.get(c.codigo) || 0;
     const cSalpicao = productMaps.MORTADELA_SALPICAO.get(c.canonical) || productMaps.MORTADELA_SALPICAO.get(c.codigo) || 0;
+    const cLeche = productMaps.LECHE_VENCAMPO.get(c.canonical) || productMaps.LECHE_VENCAMPO.get(c.codigo) || 0;
+    const cMortAst = productMaps.MORTADELA_ASTURIAS.get(c.canonical) || productMaps.MORTADELA_ASTURIAS.get(c.codigo) || 0;
+    const cSalpNuevo = productMaps.SALPICAO.get(c.canonical) || productMaps.SALPICAO.get(c.codigo) || 0;
     const hasAceite = cAceite > 0 || Boolean(c.sheetFlags?.flagAceite);
     const hasAzucar = cAzucar > 0 || Boolean(c.sheetFlags?.flagAzucar);
     const hasPollo = cPollo > 0 || Boolean(c.sheetFlags?.flagPollo);
     const hasAsturias = cAsturias > 0 || Boolean(c.sheetFlags?.flagAsturias);
     const hasSalpicao = cSalpicao > 0 || Boolean(c.sheetFlags?.flagSalpicao);
-    const isActivo = hasAceite || hasAzucar || hasPollo || hasAsturias || hasSalpicao;
+    const hasLeche = cLeche > 0 || Boolean(c.sheetFlags?.flagLeche);
+    const hasMortAst = cMortAst > 0 || Boolean(c.sheetFlags?.flagMortadelaAsturias);
+    const hasSalpNuevo = cSalpNuevo > 0 || Boolean(c.sheetFlags?.flagSalpicaoNuevo);
+    const isActivo = hasAzucar || hasLeche || hasAsturias || hasMortAst || hasSalpNuevo;
     const vNorm = normalizeVendorName(c.vendedorNombre || c.vendedorId);
     if (!clientActByVendor.has(vNorm)) {
       clientActByVendor.set(vNorm, {
@@ -6701,7 +8159,10 @@ function parseWorkbookFull(XLSX2, workbook, options) {
         AZUCAR: 0,
         POLLO: 0,
         "ESTANDAR Y SUPERIOR ASTURIAS": 0,
-        "MORTADELA SALPICAO Y ASTURIAS": 0
+        "MORTADELA SALPICAO Y ASTURIAS": 0,
+        "LECHE VENCAMPO": 0,
+        "MORTADELA ASTURIAS": 0,
+        SALPICAO: 0
       });
     }
     const vCounts = clientActByVendor.get(vNorm);
@@ -6713,6 +8174,9 @@ function parseWorkbookFull(XLSX2, workbook, options) {
     if (hasPollo) vCounts.POLLO++;
     if (hasAsturias) vCounts["ESTANDAR Y SUPERIOR ASTURIAS"]++;
     if (hasSalpicao) vCounts["MORTADELA SALPICAO Y ASTURIAS"]++;
+    if (hasLeche) vCounts["LECHE VENCAMPO"]++;
+    if (hasMortAst) vCounts["MORTADELA ASTURIAS"]++;
+    if (hasSalpNuevo) vCounts.SALPICAO++;
     const supaPayload = {
       ...c.dbId !== void 0 ? { id: c.dbId } : {},
       periodo,
@@ -6730,17 +8194,25 @@ function parseWorkbookFull(XLSX2, workbook, options) {
       has_azucar: hasAzucar,
       has_pollo: hasPollo,
       has_estandar_asturias: hasAsturias,
-      has_mortadela_salpicao: hasSalpicao
+      has_mortadela_salpicao: hasSalpicao,
+      // Rubros nuevos (requieren scripts/sql/03_rubros_noviembre_2026.sql; el servidor las omite si la BD aún no las tiene)
+      cajas_leche_vencampo: cLeche,
+      cajas_mortadela_asturias: cMortAst,
+      cajas_salpicao: cSalpNuevo,
+      has_leche_vencampo: hasLeche,
+      has_mortadela_asturias: hasMortAst,
+      has_salpicao: hasSalpNuevo
     };
     if (c.dbId !== void 0) {
       activacionSupabaseUpserts.push(supaPayload);
     } else if (c.isNewFromSheet) {
       newSheetClientsForSupabase.push(supaPayload);
     }
+    const ccAct = normalizeCuentasClavesVendor(c.vendedorNombre) || normalizeCuentasClavesVendor(c.vendedorId);
     const vendUpper = c.vendedorId.toUpperCase();
     const isVilla = vendUpper.includes("VILLA");
     const isJohnatanOrMikel = vendUpper.includes("JOHNATAN") || vendUpper.includes("MIKELANGELO") || vendUpper.includes("SOTO");
-    const displayVendedorNombre = isJohnatanOrMikel ? isVilla ? "Mikelangelo Diaz (Villa del Rosario)" : "Mikelangelo Diaz (Principal)" : c.vendedorNombre;
+    const displayVendedorNombre = ccAct ? ccAct.display : isJohnatanOrMikel ? isVilla ? "Mikelangelo Diaz (Villa del Rosario)" : "Mikelangelo Diaz (Principal)" : c.vendedorNombre;
     const displayEmail = isJohnatanOrMikel ? "Mikelangelodiaz@gmail.com" : void 0;
     activacionApiRows.push({
       id: String(c.codigo),
@@ -6755,6 +8227,9 @@ function parseWorkbookFull(XLSX2, workbook, options) {
         POLLO: hasPollo,
         ESTANDAR_ASTURIAS: hasAsturias,
         MORTADELA_SALPICAO: hasSalpicao,
+        LECHE_VENCAMPO: hasLeche,
+        MORTADELA_ASTURIAS: hasMortAst,
+        SALPICAO: hasSalpNuevo,
         ARROZ: hasPollo,
         ENTERO: hasAsturias,
         LIGEROS: hasSalpicao
@@ -6764,7 +8239,10 @@ function parseWorkbookFull(XLSX2, workbook, options) {
         AZUCAR: cAzucar,
         POLLO: cPollo,
         ESTANDAR_ASTURIAS: cAsturias,
-        MORTADELA_SALPICAO: cSalpicao
+        MORTADELA_SALPICAO: cSalpicao,
+        LECHE_VENCAMPO: cLeche,
+        MORTADELA_ASTURIAS: cMortAst,
+        SALPICAO: cSalpNuevo
       }
     });
   }
@@ -6791,24 +8269,34 @@ function parseWorkbookFull(XLSX2, workbook, options) {
       const h1 = (rows[1] || []).map(normalizeHeaderKey);
       const vendorCol = h1.findIndex((h) => h === "vendedor" || h === "ruta" || h === "ejecutivo");
       const resolvedVendorCol = vendorCol !== -1 ? vendorCol : 0;
-      const findCategoryCols = (catKeywords, fallbackMeta, fallbackAct) => {
-        for (let c = 0; c < Math.max(h0.length, h1.length); c++) {
-          const cell1 = h1[c] || "";
+      const findCategoryCols = (catKeywords, fallbackMeta, fallbackAct, exact = false) => {
+        const matches = (cell, kw) => exact ? cell === kw : cell === kw || cell.includes(kw);
+        const maxCols = Math.max(h0.length, h1.length);
+        for (let c = 0; c < maxCols; c++) {
           const cell0 = h0[c] || "";
-          if (cell1.startsWith("meta") && catKeywords.some((kw) => cell1.includes(kw)) || catKeywords.some((kw) => cell0 === kw || cell0.includes(kw))) {
-            const actCol = h1[c + 1]?.includes("activad") ? c + 1 : c + 1;
-            return { metaIdx: c, actIdx: actCol };
+          if (cell0 && catKeywords.some((kw) => matches(cell0, kw))) {
+            return { metaIdx: c, actIdx: c + 1 };
+          }
+        }
+        for (let c = 0; c < maxCols; c++) {
+          const cell1 = h1[c] || "";
+          if (cell1.startsWith("meta") && catKeywords.some((kw) => exact ? cell1 === `meta_${kw}` : cell1.includes(kw))) {
+            return { metaIdx: c, actIdx: c + 1 };
           }
         }
         return { metaIdx: fallbackMeta, actIdx: fallbackAct };
       };
-      const catDefs = [
-        { name: "ACEITE", ...findCategoryCols(["aceite"], 2, 3) },
-        { name: "AZ\xDACAR", ...findCategoryCols(["azucar"], 4, 5) },
-        { name: "POLLO", ...findCategoryCols(["pollo", "arroz"], 6, 7) },
-        { name: "ESTANDAR Y SUPERIOR ASTURIAS", ...findCategoryCols(["estandar", "superior"], 8, 9) },
-        { name: "MORTADELA SALPICAO Y ASTURIAS", ...findCategoryCols(["mortadela", "salpicao"], 10, 11) }
-      ];
+      const GRID_KEYWORDS = {
+        AZUCAR: { kw: ["azucar"] },
+        LECHE_VENCAMPO: { kw: ["leche_vencampo", "leche_en_polvo_vencampo", "leche"] },
+        ESTANDAR_ASTURIAS: { kw: ["estandar", "superior"] },
+        MORTADELA_ASTURIAS: { kw: ["mortadela_asturias"], exact: true },
+        SALPICAO: { kw: ["salpicao"], exact: true }
+      };
+      const catDefs = RUBROS_ACTIVOS_CONFIG.map((r) => {
+        const g = GRID_KEYWORDS[r.codigo] || { kw: [r.categoriaServidor.toLowerCase()] };
+        return { name: r.categoriaServidor, ...findCategoryCols(g.kw, -1, -1, g.exact) };
+      });
       for (let r = 2; r < rows.length; r++) {
         const row = rows[r];
         if (isRowCompletelyEmpty(row)) {
@@ -6831,7 +8319,7 @@ function parseWorkbookFull(XLSX2, workbook, options) {
         for (const cDef of catDefs) {
           const meta = Math.round(parseLocaleNumber(row[cDef.metaIdx], 0));
           let activados = Math.round(parseLocaleNumber(row[cDef.actIdx], 0));
-          if (activados === 0 && liveCounts && liveCounts[cDef.name] !== void 0) {
+          if (cDef.actIdx < 0 && liveCounts && liveCounts[cDef.name] !== void 0) {
             activados = liveCounts[cDef.name];
           }
           metasSupabaseRows.push({
@@ -6851,13 +8339,7 @@ function parseWorkbookFull(XLSX2, workbook, options) {
       }
       if (!metasSupabaseRows.some((m) => normalizeVendorName(m.vendedor_id).includes("ANGEL NAVARRO"))) {
         const angelCounts = clientActByVendor.get("ANGEL NAVARRO") || {};
-        for (const cat of [
-          "ACEITE",
-          "AZ\xDACAR",
-          "POLLO",
-          "ESTANDAR Y SUPERIOR ASTURIAS",
-          "MORTADELA SALPICAO Y ASTURIAS"
-        ]) {
+        for (const cat of RUBROS_ACTIVOS_CONFIG.map((r) => r.categoriaServidor)) {
           const act = angelCounts[cat] || 0;
           metasSupabaseRows.push({ periodo, vendedor_id: "ANGEL NAVARRO", categoria: cat, meta: 0, activados: act });
           metasApiRows.push({ vendedorId: "ANGEL NAVARRO", categoria: cat, meta: 0, activados: act });
@@ -10040,7 +11522,7 @@ async function startServer() {
             return;
           }
           const chunks = [];
-          resp.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+          resp.on("data", (chunk2) => chunks.push(Buffer.isBuffer(chunk2) ? chunk2 : Buffer.from(chunk2)));
           resp.on("end", () => resolve(Buffer.concat(chunks)));
           resp.on("error", reject);
         }
@@ -10371,6 +11853,156 @@ async function startServer() {
       return res.status(500).json({ error: "Internal server error" });
     }
   });
+  let maestraSyncEnCurso = false;
+  function leerCsvMaestraDeBody(body) {
+    const b64 = String(body?.csvBase64 || "").replace(/^data:[^;]+;base64,/, "").replace(/\s+/g, "");
+    if (!b64) throw new MaestraParseError("Falta el archivo CSV (csvBase64).");
+    const bytes = Buffer.from(b64, "base64");
+    if (bytes.length === 0) throw new MaestraParseError("El archivo CSV est\xE1 vac\xEDo.");
+    if (bytes.length > 20 * 1024 * 1024) throw new MaestraParseError("El archivo CSV supera el m\xE1ximo de 20 MB.");
+    return {
+      bytes,
+      archivoNombre: String(body?.archivo || "maestra.csv").slice(0, 200),
+      sha256: import_crypto.default.createHash("sha256").update(bytes).digest("hex")
+    };
+  }
+  function responderErrorMaestra(res, err, contexto) {
+    if (err instanceof MaestraParseError) {
+      return res.status(400).json({ success: false, code: "CSV_INVALIDO", error: err.message });
+    }
+    if (err instanceof MaestraEsquemaError) {
+      return res.status(412).json({ success: false, code: "ESQUEMA_FALTANTE", error: err.message });
+    }
+    if (err instanceof MaestraBajasMasivasError) {
+      return res.status(409).json({
+        success: false,
+        code: "BAJAS_MASIVAS",
+        error: err.message,
+        bajas: err.bajas,
+        activos: err.activos
+      });
+    }
+    console.error(`[MAESTRA] Error en ${contexto}:`, err?.message || err);
+    return res.status(500).json({ success: false, code: "ERROR_INTERNO", error: err?.message || `Error en ${contexto}` });
+  }
+  app2.post(
+    "/api/maestra/preview",
+    authenticateToken,
+    requireAdmin,
+    rateLimiter(6e4, 20, "maestra-preview"),
+    async (req, res) => {
+      try {
+        const { bytes, archivoNombre, sha256 } = leerCsvMaestraDeBody(req.body);
+        const parsed = parseMaestraBytes(new Uint8Array(bytes));
+        const conteoPorVendedor = /* @__PURE__ */ new Map();
+        parsed.clientes.forEach((c) => conteoPorVendedor.set(c.idVendedor, (conteoPorVendedor.get(c.idVendedor) || 0) + 1));
+        let db2 = null;
+        if (supabase) {
+          const { aBajaIds, ...resto } = await calcularPreviewDb(crearMaestraRepoSupabase(supabase), parsed, { archivoSha256: sha256 });
+          db2 = { ...resto, aBajaMuestra: aBajaIds.slice(0, 25) };
+        }
+        res.json({
+          success: true,
+          archivo: { nombre: archivoNombre, sha256, bytes: bytes.length },
+          reporte: parsed.reporte,
+          supervisores: parsed.supervisores,
+          vendedores: parsed.vendedores.map((v) => ({ ...v, clientes: conteoPorVendedor.get(v.idVendedor) || 0 })),
+          db: db2
+        });
+      } catch (err) {
+        responderErrorMaestra(res, err, "preview");
+      }
+    }
+  );
+  app2.post(
+    "/api/maestra/sync",
+    authenticateToken,
+    requireAdmin,
+    rateLimiter(6e4, 6, "maestra-sync"),
+    async (req, res) => {
+      if (maestraSyncEnCurso) {
+        return res.status(409).json({ success: false, code: "SYNC_EN_CURSO", error: "Ya hay una sincronizaci\xF3n de la maestra en curso." });
+      }
+      maestraSyncEnCurso = true;
+      try {
+        if (!supabase) {
+          return res.status(503).json({ success: false, code: "SIN_BASE_DE_DATOS", error: "Supabase no est\xE1 configurado en el servidor." });
+        }
+        const { bytes, archivoNombre, sha256 } = leerCsvMaestraDeBody(req.body);
+        const parsed = parseMaestraBytes(new Uint8Array(bytes));
+        const resultado = await sincronizarMaestra(crearMaestraRepoSupabase(supabase), parsed, {
+          periodo: metasPeriodoActual(),
+          archivoNombre,
+          archivoSha256: sha256,
+          creadoPor: String(req.user?.username || req.user?.nombre || "ADMIN"),
+          forzarBajas: req.body?.forzarBajas === true
+        });
+        cachedVolumenParsed = null;
+        cachedActivacionParsed = null;
+        cachedMetasParsed = null;
+        lastVolumenParsedTime = 0;
+        lastActivacionParsedTime = 0;
+        lastMetasParsedTime = 0;
+        console.log(
+          `[MAESTRA] Carga ${resultado.cargaId} (${resultado.estado}): ${resultado.clientes.enArchivo} clientes | nuevos ${resultado.clientes.nuevos} | actualizados ${resultado.clientes.actualizados} | reactivados ${resultado.clientes.reactivados} | dados de baja ${resultado.clientes.desactivados} | vendedores ${resultado.vendedores.enArchivo} | activos en BD ${resultado.verificacion.activosEnBd}`
+        );
+        res.json({ success: true, resultado, reporte: parsed.reporte });
+      } catch (err) {
+        responderErrorMaestra(res, err, "sync");
+      } finally {
+        maestraSyncEnCurso = false;
+      }
+    }
+  );
+  app2.get("/api/maestra/estado", authenticateToken, requireAdmin, async (_req, res) => {
+    try {
+      if (!supabase) return res.json({ success: true, esquemaDisponible: false, ultimaCarga: null });
+      const { data, error } = await supabase.from("maestra_cargas").select("id,periodo,archivo_nombre,estado,creado_por,creado_en,finalizado_en").order("creado_en", { ascending: false }).limit(1);
+      if (error) {
+        const faltaEsquema = /does not exist|schema cache|Could not find the table/i.test(error.message || "") || error.code === "42P01" || error.code === "PGRST205";
+        if (faltaEsquema) return res.json({ success: true, esquemaDisponible: false, ultimaCarga: null });
+        throw error;
+      }
+      res.json({ success: true, esquemaDisponible: true, ultimaCarga: data && data[0] ? data[0] : null });
+    } catch (err) {
+      responderErrorMaestra(res, err, "estado");
+    }
+  });
+  const COLUMNAS_ACTIVACION_NUEVAS = [
+    "cajas_leche_vencampo",
+    "cajas_mortadela_asturias",
+    "cajas_salpicao",
+    "has_leche_vencampo",
+    "has_mortadela_asturias",
+    "has_salpicao"
+  ];
+  const NUEVOS_RUBROS_CODES = ["LECHE_VENCAMPO", "MORTADELA_ASTURIAS", "SALPICAO"];
+  let activacionColsNuevasCache = null;
+  async function activacionTieneColumnasNuevas() {
+    if (!supabase) return false;
+    if (activacionColsNuevasCache && Date.now() - activacionColsNuevasCache.at < 6e4) return activacionColsNuevasCache.ok;
+    const { error } = await supabase.from("activacion_clientes").select(COLUMNAS_ACTIVACION_NUEVAS.join(",")).limit(1);
+    activacionColsNuevasCache = { ok: !error, at: Date.now() };
+    if (error) console.warn("[RUBROS] activacion_clientes a\xFAn no tiene las columnas de los rubros nuevos; ejecuta scripts/sql/03_rubros_noviembre_2026.sql");
+    return !error;
+  }
+  const sinColumnasNuevas = (row) => {
+    const copia = { ...row };
+    for (const k of COLUMNAS_ACTIVACION_NUEVAS) delete copia[k];
+    return copia;
+  };
+  async function cargarVentasMesActual() {
+    if (!supabase) return [];
+    try {
+      const hoy = /* @__PURE__ */ new Date();
+      const rows = await histFetchAll(
+        (a, b) => supabase.from("ventas_historial").select("id_cliente,id_articulo,articulo,cajas").eq("ano", hoy.getFullYear()).eq("mes", hoy.getMonth() + 1).order("id_cliente").order("id_articulo").range(a, b)
+      );
+      return rows.map((r) => ({ id_cliente: String(r.id_cliente || ""), id_articulo: String(r.id_articulo || ""), articulo: String(r.articulo || ""), cajas: Number(r.cajas) || 0 }));
+    } catch {
+      return [];
+    }
+  }
   async function syncWorkbookToSupabase(workbook) {
     const XLSX2 = await import("xlsx");
     const periodo = metasPeriodoActual();
@@ -10389,29 +12021,29 @@ async function startServer() {
         }
         if (allClients.length > 0) {
           hadDbClients = true;
-          const seenCodes = /* @__PURE__ */ new Map();
-          const duplicateIds = [];
+          const seenComposite = /* @__PURE__ */ new Map();
           for (const c of allClients) {
-            const codKey = String(c.cliente_codigo || "").trim();
-            if (!codKey) continue;
-            if (!seenCodes.has(codKey)) {
-              seenCodes.set(codKey, c);
+            const rawVid = String(c.vendedor_id || "").trim();
+            if (rawVid.toUpperCase().startsWith("INACTIVO_MAESTRA::") || String(c.status || "").toUpperCase() === "BAJA_MAESTRA" || c.activo === false) {
+              continue;
+            }
+            const rawCod = String(c.cliente_codigo || "").trim();
+            const cleanCod = rawCod.replace(/#\d+$/, "").trim();
+            if (!cleanCod) continue;
+            const vNorm = normalizeVendorName(c.vendedor_nombre || c.vendedor_id);
+            const compKey = `${vNorm}::${cleanCod}`;
+            if (!seenComposite.has(compKey)) {
+              seenComposite.set(compKey, c);
             } else {
-              const prev = seenCodes.get(codKey);
+              const prev = seenComposite.get(compKey);
               prev.has_aceite = Boolean(prev.has_aceite || c.has_aceite);
               prev.has_azucar = Boolean(prev.has_azucar || c.has_azucar);
               prev.has_pollo = Boolean(prev.has_pollo || c.has_pollo);
               prev.has_estandar_asturias = Boolean(prev.has_estandar_asturias || c.has_estandar_asturias);
               prev.has_mortadela_salpicao = Boolean(prev.has_mortadela_salpicao || c.has_mortadela_salpicao);
-              duplicateIds.push(c.id);
             }
           }
-          if (duplicateIds.length > 0) {
-            for (let i = 0; i < duplicateIds.length; i += 200) {
-              await supabase.from("activacion_clientes").delete().in("id", duplicateIds.slice(i, i + 200));
-            }
-          }
-          masterClients = Array.from(seenCodes.values()).map((c) => ({
+          masterClients = Array.from(seenComposite.values()).map((c) => ({
             id: c.id,
             cliente_codigo: String(c.cliente_codigo || "").trim(),
             cliente_nombre: String(c.cliente_nombre || "").trim(),
@@ -10431,9 +12063,20 @@ async function startServer() {
     if (masterClients.length === 0) {
       masterClients = loadLocalMasterClientSeed();
     }
+    if (supabase) {
+      const idActivacionPorCodigo = /* @__PURE__ */ new Map();
+      for (const mc of masterClients) {
+        if (mc.id !== void 0) idActivacionPorCodigo.set(String(mc.cliente_codigo).trim(), mc.id);
+      }
+      const carteraMaestra = await leerCarteraActivaMaestra(supabase, idActivacionPorCodigo);
+      if (carteraMaestra.length > 0) {
+        masterClients = carteraMaestra;
+      }
+    }
     const parsed = parseWorkbookFull(XLSX2, workbook, {
       periodo,
-      masterClients
+      masterClients,
+      ventasMes: await cargarVentasMesActual()
     });
     cachedVolumenParsed = parsed.volumenApiRows;
     lastVolumenParsedTime = Date.now();
@@ -10463,15 +12106,16 @@ async function startServer() {
         console.warn("[SERVER] Error sincronizando ventas_volumen:", vErr?.message);
       }
       try {
+        const colsNuevasOk = await activacionTieneColumnasNuevas();
         if (parsed.activacionSupabaseUpserts.length > 0) {
           for (let i = 0; i < parsed.activacionSupabaseUpserts.length; i += 200) {
-            const batch = parsed.activacionSupabaseUpserts.slice(i, i + 200);
+            const batch = parsed.activacionSupabaseUpserts.slice(i, i + 200).map((row) => colsNuevasOk ? row : sinColumnasNuevas(row));
             await supabase.from("activacion_clientes").upsert(batch, { onConflict: "id" });
           }
         }
         if (hadDbClients && parsed.newSheetClientsForSupabase.length > 0) {
           for (let i = 0; i < parsed.newSheetClientsForSupabase.length; i += 200) {
-            const batch = parsed.newSheetClientsForSupabase.slice(i, i + 200);
+            const batch = parsed.newSheetClientsForSupabase.slice(i, i + 200).map((row) => colsNuevasOk ? row : sinColumnasNuevas(row));
             await supabase.from("activacion_clientes").insert(batch);
           }
         }
@@ -10562,14 +12206,9 @@ async function startServer() {
   });
   const normHist = (s) => String(s || "").replace(/Ã‘|Ã±/g, "N").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().replace(/[^A-Z0-9]/g, "");
   const normalizeHistRubroCode = (raw) => {
-    const s = normHist(raw);
-    if (!s) return null;
-    if (s.includes("ACEITE")) return "ACEITE";
-    if (s.includes("AZUCAR")) return "AZUCAR";
-    if (s.includes("POLLO") || s.includes("ARROZ")) return "POLLO";
-    if (s.includes("ESTANDAR") || s.includes("SUPERIOR") || s.includes("ENTERO")) return "ESTANDAR_ASTURIAS";
-    if (s.includes("MORTADELA") || s.includes("SALPICAO") || s.includes("LIGEROS")) return "MORTADELA_SALPICAO";
-    return null;
+    if (!normHist(raw)) return null;
+    const code = categoriaARubroCodigo(String(raw || ""));
+    return code === "OTROS" ? null : code;
   };
   const histFail = (res, e) => {
     const msg = String(e?.message || e || "");
@@ -10711,7 +12350,7 @@ async function startServer() {
         const k = `${r.ano}|${r.mes}|${r.id_articulo}`;
         let m = merged.get(k);
         if (!m) {
-          m = { ano: r.ano, mes: r.mes, sku: r.id_articulo, articulo: r.articulo, rubro: r.rubro, cajas: 0, unidades: 0, kgs: 0, monto: 0, clientes: 0 };
+          m = { ano: r.ano, mes: r.mes, sku: r.id_articulo, articulo: r.articulo, rubro: clasificarRubro(r.id_articulo, r.articulo), cajas: 0, unidades: 0, kgs: 0, monto: 0, clientes: 0 };
           merged.set(k, m);
         }
         m.cajas += nz(r.cajas);
@@ -10734,7 +12373,7 @@ async function startServer() {
           const k = `${r.ano}|${r.mes}|${r.id_articulo}`;
           let m = merged.get(k);
           if (!m) {
-            m = { ano: r.ano, mes: r.mes, sku: r.id_articulo, articulo: r.articulo, rubro: r.rubro, cajas: 0, unidades: 0, kgs: 0, monto: 0, clientes: 0 };
+            m = { ano: r.ano, mes: r.mes, sku: r.id_articulo, articulo: r.articulo, rubro: clasificarRubro(r.id_articulo, r.articulo), cajas: 0, unidades: 0, kgs: 0, monto: 0, clientes: 0 };
             merged.set(k, m);
           }
           m.cajas += nz(r.cajas);
@@ -10792,7 +12431,7 @@ async function startServer() {
           const k = `${ano}|${mes}`;
           let m = meses.get(k);
           if (!m) {
-            m = { ano, mes, kgs: {}, cajas: {}, monto: {}, activos: { ACEITE: 0, AZUCAR: 0, POLLO: 0, ESTANDAR_ASTURIAS: 0, MORTADELA_SALPICAO: 0, TOTAL: 0 }, clientesConMovimiento: 0, fueraCartera: 0 };
+            m = { ano, mes, kgs: {}, cajas: {}, monto: {}, activos: { ACEITE: 0, AZUCAR: 0, POLLO: 0, ESTANDAR_ASTURIAS: 0, MORTADELA_SALPICAO: 0, LECHE_VENCAMPO: 0, MORTADELA_ASTURIAS: 0, SALPICAO: 0, TOTAL: 0 }, clientesConMovimiento: 0, fueraCartera: 0 };
             meses.set(k, m);
           }
           return m;
@@ -10812,7 +12451,7 @@ async function startServer() {
         });
         if (scope.clientIds && scope.clientIds.size > 0) {
           const clientRows = await histFetchAll(
-            (a, b) => supabase.from("ventas_historial").select("ano,mes,id_cliente,rubro,cajas").in("vendedor", scope.names).order("ano").order("mes").order("id_cliente").order("id_articulo").range(a, b)
+            (a, b) => supabase.from("ventas_historial").select("ano,mes,id_cliente,id_articulo,articulo,rubro,cajas").in("vendedor", scope.names).order("ano").order("mes").order("id_cliente").order("id_articulo").range(a, b)
           );
           const byMesCliRub = /* @__PURE__ */ new Map();
           clientRows.forEach((r) => {
@@ -10824,17 +12463,18 @@ async function startServer() {
               obj = {};
               byMesCliRub.set(mk, obj);
             }
-            obj[r.rubro] = (obj[r.rubro] || 0) + nz(r.cajas);
+            const rk = r.id_articulo || r.articulo ? clasificarRubro(r.id_articulo, r.articulo) : r.rubro;
+            obj[rk] = (obj[rk] || 0) + nz(r.cajas);
             obj._ANY = (obj._ANY || 0) + nz(r.cajas);
           });
           byMesCliRub.forEach((obj, mk) => {
             const [anoS, mesS] = mk.split("|");
             const m = mesRow(Number(anoS), Number(mesS));
             let anyKeyRub = false;
-            for (const rub of ["ACEITE", "AZUCAR", "POLLO", "ESTANDAR_ASTURIAS", "MORTADELA_SALPICAO"]) {
+            for (const rub of ["AZUCAR", "LECHE_VENCAMPO", "ESTANDAR_ASTURIAS", "MORTADELA_ASTURIAS", "SALPICAO", "ACEITE", "POLLO", "MORTADELA_SALPICAO"]) {
               if ((obj[rub] || 0) > 0) {
                 m.activos[rub] = (m.activos[rub] || 0) + 1;
-                anyKeyRub = true;
+                if (esRubroActivo(rub)) anyKeyRub = true;
               }
             }
             if (anyKeyRub) m.activos.TOTAL += 1;
@@ -10853,6 +12493,9 @@ async function startServer() {
             m.activos.POLLO += nz(r.act_pollo);
             m.activos.ESTANDAR_ASTURIAS += nz(r.act_estandar_asturias);
             m.activos.MORTADELA_SALPICAO += nz(r.act_mortadela_salpicao);
+            m.activos.LECHE_VENCAMPO += nz(r.act_leche_vencampo);
+            m.activos.MORTADELA_ASTURIAS += nz(r.act_mortadela_asturias);
+            m.activos.SALPICAO += nz(r.act_salpicao);
             m.activos.TOTAL += nz(r.act_total ?? r.clientes_con_compra);
             m.clientesConMovimiento += nz(r.clientes_con_movimiento ?? r.clientes_con_compra);
             m.fueraCartera += nz(r.clientes_fuera_cartera);
@@ -10945,7 +12588,10 @@ async function startServer() {
               AZUCAR: nz(r.cajas_azucar),
               POLLO: nz(r.cajas_pollo),
               ESTANDAR_ASTURIAS: nz(r.cajas_estandar_asturias) || +(em?.ESTANDAR_ASTURIAS || 0).toFixed(2),
-              MORTADELA_SALPICAO: nz(r.cajas_mortadela_salpicao) || +(em?.MORTADELA_SALPICAO || 0).toFixed(2)
+              MORTADELA_SALPICAO: nz(r.cajas_mortadela_salpicao) || +(em?.MORTADELA_SALPICAO || 0).toFixed(2),
+              LECHE_VENCAMPO: nz(r.cajas_leche_vencampo),
+              MORTADELA_ASTURIAS: nz(r.cajas_mortadela_asturias),
+              SALPICAO: nz(r.cajas_salpicao)
             },
             kgs: nz(r.kgs ?? r.kgs_total),
             monto: nz(r.monto ?? r.monto_total)
@@ -10986,7 +12632,7 @@ async function startServer() {
         const k = `${r.ano}|${r.mes}|${r.id_articulo}`;
         let m = pm.get(k);
         if (!m) {
-          m = { ano: r.ano, mes: r.mes, sku: r.id_articulo, articulo: r.articulo, rubro: r.rubro, cajas: 0, kgs: 0, monto: 0 };
+          m = { ano: r.ano, mes: r.mes, sku: r.id_articulo, articulo: r.articulo, rubro: clasificarRubro(r.id_articulo, r.articulo), cajas: 0, kgs: 0, monto: 0 };
           pm.set(k, m);
         }
         m.cajas += nz(r.cajas);
@@ -10998,7 +12644,8 @@ async function startServer() {
           cm = {};
           cajasByMesRubro.set(mk, cm);
         }
-        cm[r.rubro] = (cm[r.rubro] || 0) + nz(r.cajas);
+        const rkc = clasificarRubro(r.id_articulo, r.articulo);
+        cm[rkc] = (cm[rkc] || 0) + nz(r.cajas);
       });
       res.json({
         meses: meses.map((r) => {
@@ -11013,7 +12660,10 @@ async function startServer() {
               AZUCAR: nz(r.cajas_azucar) || +(cm.AZUCAR || 0).toFixed(2),
               POLLO: nz(r.cajas_pollo) || +(cm.POLLO || 0).toFixed(2),
               ESTANDAR_ASTURIAS: nz(r.cajas_estandar_asturias) || +(cm.ESTANDAR_ASTURIAS || 0).toFixed(2),
-              MORTADELA_SALPICAO: nz(r.cajas_mortadela_salpicao) || +(cm.MORTADELA_SALPICAO || 0).toFixed(2)
+              MORTADELA_SALPICAO: nz(r.cajas_mortadela_salpicao) || +(cm.MORTADELA_SALPICAO || 0).toFixed(2),
+              LECHE_VENCAMPO: nz(r.cajas_leche_vencampo) || +(cm.LECHE_VENCAMPO || 0).toFixed(2),
+              MORTADELA_ASTURIAS: nz(r.cajas_mortadela_asturias) || +(cm.MORTADELA_ASTURIAS || 0).toFixed(2),
+              SALPICAO: nz(r.cajas_salpicao) || +(cm.SALPICAO || 0).toFixed(2)
             },
             kgs: nz(r.kgs ?? r.kgs_total),
             monto: nz(r.monto ?? r.monto_total)
@@ -11112,6 +12762,12 @@ async function startServer() {
               return !!c.has_estandar_asturias || nz(c.cajas_estandar_asturias) > 0;
             case "MORTADELA_SALPICAO":
               return !!c.has_mortadela_salpicao || nz(c.cajas_mortadela_salpicao) > 0;
+            case "LECHE_VENCAMPO":
+              return !!c.has_leche_vencampo || nz(c.cajas_leche_vencampo) > 0;
+            case "MORTADELA_ASTURIAS":
+              return !!c.has_mortadela_asturias || nz(c.cajas_mortadela_asturias) > 0;
+            case "SALPICAO":
+              return !!c.has_salpicao || nz(c.cajas_salpicao) > 0;
             default:
               return false;
           }
@@ -11440,7 +13096,8 @@ async function startServer() {
     const XLSX2 = await import("xlsx");
     const parsed = parseWorkbookFull(XLSX2, workbook, {
       periodo: metasPeriodoActual(),
-      masterClients: loadLocalMasterClientSeed()
+      masterClients: loadLocalMasterClientSeed(),
+      ventasMes: await cargarVentasMesActual()
     });
     cachedVolumenParsed = parsed.volumenApiRows;
     lastVolumenParsedTime = Date.now();
@@ -11622,7 +13279,7 @@ async function startServer() {
         setNoCacheSyncHeaders(res, "memory");
         return res.json(filterByVendor(cachedActivacionParsed));
       }
-      if (supabase) {
+      if (supabase && await activacionTieneColumnasNuevas()) {
         try {
           let supaRows = [];
           let from = 0;
@@ -11637,26 +13294,38 @@ async function startServer() {
           if (Array.isArray(supaRows) && supaRows.length > 0) {
             const byClientMap = /* @__PURE__ */ new Map();
             for (const r of supaRows) {
-              const cid = String(r.cliente_codigo || "").trim();
+              const rawVid = String(r.vendedor_id || "").trim();
+              if (rawVid.toUpperCase().startsWith("INACTIVO_MAESTRA::") || String(r.status || "").toUpperCase() === "BAJA_MAESTRA" || r.activo === false) {
+                continue;
+              }
+              const cid = String(r.cliente_codigo || "").replace(/#\d+$/, "").trim();
               if (!cid) continue;
+              const vNorm = normalizeVendorName(r.vendedor_nombre || r.vendedor_id);
+              const compKey = `${vNorm}::${cid}`;
               const hasAceite = Boolean(r.has_aceite) || (Number(r.cajas_aceite) || 0) > 0;
               const hasAzucar = Boolean(r.has_azucar) || (Number(r.cajas_azucar) || 0) > 0;
               const hasPollo = Boolean(r.has_pollo) || (Number(r.cajas_pollo) || 0) > 0;
               const hasAsturias = Boolean(r.has_estandar_asturias) || (Number(r.cajas_estandar_asturias) || 0) > 0;
               const hasSalpicao = Boolean(r.has_mortadela_salpicao) || (Number(r.cajas_mortadela_salpicao) || 0) > 0;
-              if (!byClientMap.has(cid)) {
-                byClientMap.set(cid, {
+              const hasLeche = Boolean(r.has_leche_vencampo) || (Number(r.cajas_leche_vencampo) || 0) > 0;
+              const hasMortAst = Boolean(r.has_mortadela_asturias) || (Number(r.cajas_mortadela_asturias) || 0) > 0;
+              const hasSalpNuevo = Boolean(r.has_salpicao) || (Number(r.cajas_salpicao) || 0) > 0;
+              if (!byClientMap.has(compKey)) {
+                byClientMap.set(compKey, {
                   id: cid,
                   cliente: r.cliente_nombre,
                   vendedorId: r.vendedor_id,
                   vendedorNombre: r.vendedor_nombre,
-                  status: hasAceite || hasAzucar || hasPollo || hasAsturias || hasSalpicao || r.status === "ACTIVO" ? "ACTIVO" : "INACTIVO",
+                  status: hasAzucar || hasLeche || hasAsturias || hasMortAst || hasSalpNuevo || r.status === "ACTIVO" ? "ACTIVO" : "INACTIVO",
                   cajas: {
                     ACEITE: Number(r.cajas_aceite) || 0,
                     AZUCAR: Number(r.cajas_azucar) || 0,
                     POLLO: Number(r.cajas_pollo) || 0,
                     ESTANDAR_ASTURIAS: Number(r.cajas_estandar_asturias) || 0,
-                    MORTADELA_SALPICAO: Number(r.cajas_mortadela_salpicao) || 0
+                    MORTADELA_SALPICAO: Number(r.cajas_mortadela_salpicao) || 0,
+                    LECHE_VENCAMPO: Number(r.cajas_leche_vencampo) || 0,
+                    MORTADELA_ASTURIAS: Number(r.cajas_mortadela_asturias) || 0,
+                    SALPICAO: Number(r.cajas_salpicao) || 0
                   },
                   cats: {
                     ACEITE: hasAceite,
@@ -11664,18 +13333,24 @@ async function startServer() {
                     POLLO: hasPollo,
                     ESTANDAR_ASTURIAS: hasAsturias,
                     MORTADELA_SALPICAO: hasSalpicao,
+                    LECHE_VENCAMPO: hasLeche,
+                    MORTADELA_ASTURIAS: hasMortAst,
+                    SALPICAO: hasSalpNuevo,
                     ARROZ: hasPollo,
                     ENTERO: hasAsturias,
                     LIGEROS: hasSalpicao
                   }
                 });
               } else {
-                const prev = byClientMap.get(cid);
+                const prev = byClientMap.get(compKey);
                 prev.cats.ACEITE = prev.cats.ACEITE || hasAceite;
                 prev.cats.AZUCAR = prev.cats.AZUCAR || hasAzucar;
                 prev.cats.POLLO = prev.cats.POLLO || hasPollo;
                 prev.cats.ESTANDAR_ASTURIAS = prev.cats.ESTANDAR_ASTURIAS || hasAsturias;
                 prev.cats.MORTADELA_SALPICAO = prev.cats.MORTADELA_SALPICAO || hasSalpicao;
+                prev.cats.LECHE_VENCAMPO = prev.cats.LECHE_VENCAMPO || hasLeche;
+                prev.cats.MORTADELA_ASTURIAS = prev.cats.MORTADELA_ASTURIAS || hasMortAst;
+                prev.cats.SALPICAO = prev.cats.SALPICAO || hasSalpNuevo;
                 prev.cats.ARROZ = prev.cats.POLLO;
                 prev.cats.ENTERO = prev.cats.ESTANDAR_ASTURIAS;
                 prev.cats.LIGEROS = prev.cats.MORTADELA_SALPICAO;
@@ -11684,7 +13359,10 @@ async function startServer() {
                 prev.cajas.POLLO = Math.max(prev.cajas.POLLO, Number(r.cajas_pollo) || 0);
                 prev.cajas.ESTANDAR_ASTURIAS = Math.max(prev.cajas.ESTANDAR_ASTURIAS, Number(r.cajas_estandar_asturias) || 0);
                 prev.cajas.MORTADELA_SALPICAO = Math.max(prev.cajas.MORTADELA_SALPICAO, Number(r.cajas_mortadela_salpicao) || 0);
-                if (prev.cats.ACEITE || prev.cats.AZUCAR || prev.cats.POLLO || prev.cats.ESTANDAR_ASTURIAS || prev.cats.MORTADELA_SALPICAO) {
+                prev.cajas.LECHE_VENCAMPO = Math.max(prev.cajas.LECHE_VENCAMPO || 0, Number(r.cajas_leche_vencampo) || 0);
+                prev.cajas.MORTADELA_ASTURIAS = Math.max(prev.cajas.MORTADELA_ASTURIAS || 0, Number(r.cajas_mortadela_asturias) || 0);
+                prev.cajas.SALPICAO = Math.max(prev.cajas.SALPICAO || 0, Number(r.cajas_salpicao) || 0);
+                if (prev.cats.AZUCAR || prev.cats.LECHE_VENCAMPO || prev.cats.ESTANDAR_ASTURIAS || prev.cats.MORTADELA_ASTURIAS || prev.cats.SALPICAO) {
                   prev.status = "ACTIVO";
                 }
               }
@@ -11706,6 +13384,30 @@ async function startServer() {
       res.status(500).json([]);
     }
   });
+  app2.get("/api/catalog/vendors", async (_req, res) => {
+    try {
+      let vendedores = getRuntimeSellerCatalog();
+      let syncedAt = null;
+      if (supabase) {
+        try {
+          const { data: supaVendedores } = await supabase.from("vendedores_maestro").select("*");
+          if (Array.isArray(supaVendedores) && supaVendedores.length > 0) {
+            vendedores = hydrateRuntimeSellerCatalog(supaVendedores);
+            hydrateVendorProfilesFromMasterCatalog(supaVendedores);
+          }
+          const { data: syncMeta } = await supabase.from("catalog_sync_meta").select("*").eq("id", "GLOBAL_MASTER_SYNC").maybeSingle();
+          if (syncMeta?.last_synced_at) {
+            syncedAt = syncMeta.last_synced_at;
+          }
+        } catch {
+        }
+      }
+      setNoCacheSyncHeaders(res, "supabase");
+      return res.json({ vendedores, syncedAt });
+    } catch (err) {
+      return res.status(500).json({ error: err?.message || "Error consultando cat\xE1logo de vendedores" });
+    }
+  });
   app2.post("/api/data/activacion/toggle-rubro", authenticateToken, async (req, res) => {
     try {
       const { clienteCodigo, rubro, active } = req.body || {};
@@ -11720,9 +13422,16 @@ async function startServer() {
         AZUCAR: "has_azucar",
         POLLO: "has_pollo",
         ESTANDAR_ASTURIAS: "has_estandar_asturias",
-        MORTADELA_SALPICAO: "has_mortadela_salpicao"
+        MORTADELA_SALPICAO: "has_mortadela_salpicao",
+        LECHE_VENCAMPO: "has_leche_vencampo",
+        MORTADELA_ASTURIAS: "has_mortadela_asturias",
+        SALPICAO: "has_salpicao"
       };
       const dbCol = colMap[normRubro];
+      const colsNuevasOk = await activacionTieneColumnasNuevas();
+      if (dbCol && !colsNuevasOk && NUEVOS_RUBROS_CODES.includes(normRubro)) {
+        return res.status(412).json({ error: "Faltan columnas en activacion_clientes. Ejecuta scripts/sql/03_rubros_noviembre_2026.sql en Supabase.", code: "ESQUEMA_FALTANTE" });
+      }
       if (supabase && dbCol) {
         const { data: rows } = await supabase.from("activacion_clientes").select("*").eq("cliente_codigo", cleanCod);
         if (Array.isArray(rows) && rows.length > 0) {
@@ -11732,9 +13441,14 @@ async function startServer() {
               has_azucar: normRubro === "AZUCAR" ? boolActive : Boolean(r.has_azucar),
               has_pollo: normRubro === "POLLO" ? boolActive : Boolean(r.has_pollo),
               has_estandar_asturias: normRubro === "ESTANDAR_ASTURIAS" ? boolActive : Boolean(r.has_estandar_asturias),
-              has_mortadela_salpicao: normRubro === "MORTADELA_SALPICAO" ? boolActive : Boolean(r.has_mortadela_salpicao)
+              has_mortadela_salpicao: normRubro === "MORTADELA_SALPICAO" ? boolActive : Boolean(r.has_mortadela_salpicao),
+              ...colsNuevasOk ? {
+                has_leche_vencampo: normRubro === "LECHE_VENCAMPO" ? boolActive : Boolean(r.has_leche_vencampo),
+                has_mortadela_asturias: normRubro === "MORTADELA_ASTURIAS" ? boolActive : Boolean(r.has_mortadela_asturias),
+                has_salpicao: normRubro === "SALPICAO" ? boolActive : Boolean(r.has_salpicao)
+              } : {}
             };
-            const isActivo = Object.values(nextState).some(Boolean);
+            const isActivo = [nextState.has_azucar, nextState.has_estandar_asturias, nextState.has_leche_vencampo, nextState.has_mortadela_asturias, nextState.has_salpicao].some(Boolean);
             await supabase.from("activacion_clientes").update({
               ...nextState,
               status: isActivo ? "ACTIVO" : "INACTIVO"
@@ -11752,7 +13466,7 @@ async function startServer() {
             if (normRubro === "ESTANDAR_ASTURIAS") c.cats.ENTERO = boolActive;
             if (normRubro === "MORTADELA_SALPICAO") c.cats.LIGEROS = boolActive;
             const anyActive = Boolean(
-              c.cats.ACEITE || c.cats.AZUCAR || c.cats.POLLO || c.cats.ESTANDAR_ASTURIAS || c.cats.MORTADELA_SALPICAO
+              c.cats.AZUCAR || c.cats.LECHE_VENCAMPO || c.cats.ESTANDAR_ASTURIAS || c.cats.MORTADELA_ASTURIAS || c.cats.SALPICAO
             );
             c.status = anyActive ? "ACTIVO" : "INACTIVO";
           }

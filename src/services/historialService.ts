@@ -1,5 +1,5 @@
 import { getAuthHeaders } from './googleSheetsService';
-import { RubroCodigo } from '../lib/rubros';
+import { RubroCodigo, categoriaARubroCodigo } from '../lib/rubros';
 
 export interface HistPeriodo { ano: number; mes: number }
 
@@ -117,13 +117,7 @@ export interface Rubro360Data {
 }
 
 export function categoryToRubroCode(cat: string): RubroCodigo {
-  const c = (cat || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
-  if (c.includes('ACEITE')) return 'ACEITE';
-  if (c.includes('AZUCAR')) return 'AZUCAR';
-  if (c.includes('POLLO') || c.includes('ARROZ')) return 'POLLO';
-  if (c.includes('ESTANDAR') || c.includes('SUPERIOR') || c.includes('ENTERO')) return 'ESTANDAR_ASTURIAS';
-  if (c.includes('MORTADELA') || c.includes('SALPICAO') || c.includes('LIGEROS')) return 'MORTADELA_SALPICAO';
-  return 'ACEITE';
+  return categoriaARubroCodigo(cat);
 }
 
 export class HistorialError extends Error {
