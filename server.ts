@@ -5786,7 +5786,7 @@ async function startServer() {
                   cliente: r.cliente_nombre,
                   vendedorId: r.vendedor_id,
                   vendedorNombre: r.vendedor_nombre,
-                  status: (hasAzucar || hasLeche || hasAsturias || hasMortAst || hasSalpNuevo || r.status === 'ACTIVO') ? 'ACTIVO' : 'INACTIVO',
+                  status: (hasAzucar || hasLeche || hasPollo || hasAsturias || hasSalpicao || r.status === 'ACTIVO') ? 'ACTIVO' : 'INACTIVO',
                   cajas: {
                     ACEITE: Number(r.cajas_aceite) || 0,
                     AZUCAR: Number(r.cajas_azucar) || 0,
@@ -5832,7 +5832,7 @@ async function startServer() {
                 prev.cajas.LECHE_VENCAMPO = Math.max(prev.cajas.LECHE_VENCAMPO || 0, Number(r.cajas_leche_vencampo) || 0);
                 prev.cajas.MORTADELA_ASTURIAS = Math.max(prev.cajas.MORTADELA_ASTURIAS || 0, Number(r.cajas_mortadela_asturias) || 0);
                 prev.cajas.SALPICAO = Math.max(prev.cajas.SALPICAO || 0, Number(r.cajas_salpicao) || 0);
-                if (prev.cats.AZUCAR || prev.cats.LECHE_VENCAMPO || prev.cats.ESTANDAR_ASTURIAS || prev.cats.MORTADELA_ASTURIAS || prev.cats.SALPICAO) {
+                if (prev.cats.AZUCAR || prev.cats.LECHE_VENCAMPO || prev.cats.POLLO || prev.cats.ESTANDAR_ASTURIAS || prev.cats.MORTADELA_SALPICAO) {
                   prev.status = 'ACTIVO';
                 }
               }
@@ -5934,7 +5934,7 @@ async function startServer() {
                   }
                 : {})
             };
-            const isActivo = [nextState.has_azucar, nextState.has_estandar_asturias, (nextState as any).has_leche_vencampo, (nextState as any).has_mortadela_asturias, (nextState as any).has_salpicao].some(Boolean);
+            const isActivo = [nextState.has_azucar, nextState.has_pollo, nextState.has_estandar_asturias, nextState.has_mortadela_salpicao, (nextState as any).has_leche_vencampo].some(Boolean);
             await supabase
               .from('activacion_clientes')
               .update({
@@ -5956,7 +5956,7 @@ async function startServer() {
             if (normRubro === 'ESTANDAR_ASTURIAS') c.cats.ENTERO = boolActive;
             if (normRubro === 'MORTADELA_SALPICAO') c.cats.LIGEROS = boolActive;
             const anyActive = Boolean(
-              c.cats.AZUCAR || c.cats.LECHE_VENCAMPO || c.cats.ESTANDAR_ASTURIAS || c.cats.MORTADELA_ASTURIAS || c.cats.SALPICAO
+              c.cats.AZUCAR || c.cats.LECHE_VENCAMPO || c.cats.POLLO || c.cats.ESTANDAR_ASTURIAS || c.cats.MORTADELA_SALPICAO
             );
             c.status = anyActive ? 'ACTIVO' : 'INACTIVO';
           }

@@ -15,22 +15,22 @@
 export type RubroCodigo =
   | 'AZUCAR'
   | 'LECHE_VENCAMPO'
+  | 'POLLO'
   | 'ESTANDAR_ASTURIAS'
+  | 'MORTADELA_SALPICAO'
+  // Legacy / auxiliares: se conservan para historial y compatibilidad de datos
+  | 'ACEITE'
   | 'MORTADELA_ASTURIAS'
   | 'SALPICAO'
-  // Legacy (inactivos desde Noviembre 2026): se conservan para historial y compatibilidad de datos
-  | 'ACEITE'
-  | 'POLLO'
-  | 'MORTADELA_SALPICAO'
   | 'OTROS';
 
-export type RubroActivoCodigo = 'AZUCAR' | 'LECHE_VENCAMPO' | 'ESTANDAR_ASTURIAS' | 'MORTADELA_ASTURIAS' | 'SALPICAO';
+export type RubroActivoCodigo = 'AZUCAR' | 'LECHE_VENCAMPO' | 'POLLO' | 'ESTANDAR_ASTURIAS' | 'MORTADELA_SALPICAO';
 
 export interface RubroConfig {
   codigo: Exclude<RubroCodigo, 'OTROS'>;
   /** Nombre comercial exacto mostrado al usuario (KPIs, tablas, filtros, tooltips y PDF). */
   label: string;
-  /** Clave interna de categoría usada por el Grid de metas / servidor (NO se muestra al usuario). */
+  /** Clave interna de categoría usada por el Grid de metas / servidor. */
   categoriaServidor: string;
   /** Palabras clave (sin acentos, minúsculas) para el buscador del módulo. */
   palabrasClave: string;
@@ -38,42 +38,54 @@ export interface RubroConfig {
   activo: boolean;
 }
 
-/** Rubros del mes, en el orden exacto en que se muestran. */
+/** Rubros del mes, en el orden exacto de las 5 columnas del Grid de Activación por Vendedor (C-D, E-F, G-H, I-J, K-L). */
 export const RUBROS_CONFIG: RubroConfig[] = [
-  { codigo: 'AZUCAR', label: 'Azúcar', categoriaServidor: 'AZÚCAR', palabrasClave: 'azucar montalban', activo: true },
+  {
+    codigo: 'AZUCAR',
+    label: 'AZUCAR',
+    categoriaServidor: 'AZUCAR',
+    palabrasClave: 'azucar montalban vencampo',
+    activo: true
+  },
   {
     codigo: 'LECHE_VENCAMPO',
-    label: 'Leche en polvo Vencampo',
+    label: 'LECHE VENCAMPO',
     categoriaServidor: 'LECHE VENCAMPO',
     palabrasClave: 'leche en polvo vencampo lpv',
     activo: true
   },
   {
+    codigo: 'POLLO',
+    label: 'POLLO',
+    categoriaServidor: 'POLLO',
+    palabrasClave: 'pollo filet muslo alas higado molleja arroz vencampo',
+    activo: true
+  },
+  {
     codigo: 'ESTANDAR_ASTURIAS',
-    label: 'Jamón estándar y superior Asturias',
+    label: 'ESTANDAR Y SUPERIOR ASTURIAS',
     categoriaServidor: 'ESTANDAR Y SUPERIOR ASTURIAS',
     palabrasClave: 'jamon estandar superior asturias entero',
     activo: true
   },
   {
-    codigo: 'MORTADELA_ASTURIAS',
-    label: 'Mortadela Asturias',
-    categoriaServidor: 'MORTADELA ASTURIAS',
-    palabrasClave: 'mortadela asturias',
+    codigo: 'MORTADELA_SALPICAO',
+    label: 'MORTADELA SALPICAO Y ASTURIAS',
+    categoriaServidor: 'MORTADELA SALPICAO Y ASTURIAS',
+    palabrasClave: 'mortadela salpicao asturias ligeros enteros',
     activo: true
   },
-  { codigo: 'SALPICAO', label: 'Salpicao', categoriaServidor: 'SALPICAO', palabrasClave: 'salpicao ligeros', activo: true },
 
-  // ---- Legacy (no se muestran) ----
-  { codigo: 'ACEITE', label: 'Aceite', categoriaServidor: 'ACEITE', palabrasClave: 'aceite oleo soya girasol', activo: false },
-  { codigo: 'POLLO', label: 'Pollo', categoriaServidor: 'POLLO', palabrasClave: 'pollo filet muslo alas higado molleja arroz', activo: false },
+  // ---- Legacy / auxiliares (no se muestran como tarjeta independiente) ----
+  { codigo: 'ACEITE', label: 'ACEITE', categoriaServidor: 'ACEITE', palabrasClave: 'aceite oleo soya girasol', activo: false },
   {
-    codigo: 'MORTADELA_SALPICAO',
-    label: 'Mortadela Salpicao y Asturias (histórico)',
-    categoriaServidor: 'MORTADELA SALPICAO Y ASTURIAS',
-    palabrasClave: 'mortadela salpicao asturias ligeros',
+    codigo: 'MORTADELA_ASTURIAS',
+    label: 'MORTADELA ASTURIAS',
+    categoriaServidor: 'MORTADELA ASTURIAS',
+    palabrasClave: 'mortadela asturias',
     activo: false
-  }
+  },
+  { codigo: 'SALPICAO', label: 'SALPICAO', categoriaServidor: 'SALPICAO', palabrasClave: 'salpicao ligeros', activo: false }
 ];
 
 export const RUBROS_ACTIVOS_CONFIG: RubroConfig[] = RUBROS_CONFIG.filter(r => r.activo);
@@ -127,29 +139,30 @@ const sinAcentos = (s: string) =>
  * al código canónico del rubro. Tolera el nombre comercial nuevo y los nombres anteriores.
  */
 export function categoriaARubroCodigo(cat: string): RubroCodigo {
-  const c = sinAcentos(cat);
-  // Categoría legacy combinada (no se puede separar sin el artículo): se conserva como código histórico
-  if (c.includes('MORTADELA') && c.includes('SALPICAO')) return 'MORTADELA_SALPICAO';
+  const c = sinAcentos(cat).trim();
+  if (c === 'MORTADELA_ASTURIAS' || c === 'MORTADELA ASTURIAS') return 'MORTADELA_SALPICAO';
+  if (c === 'SALPICAO') return 'MORTADELA_SALPICAO';
+  if (c.includes('MORTADELA') || c.includes('SALPICAO') || c.includes('LIGEROS')) return 'MORTADELA_SALPICAO';
   if (c.includes('LECHE')) return 'LECHE_VENCAMPO';
   if (c.includes('AZUCAR')) return 'AZUCAR';
   if (c.includes('ESTANDAR') || c.includes('SUPERIOR') || c.includes('JAMON') || c.includes('ENTERO')) return 'ESTANDAR_ASTURIAS';
-  if (c.includes('SALPICAO') || c.includes('LIGEROS')) return 'SALPICAO';
-  if (c.includes('MORTADELA')) return 'MORTADELA_ASTURIAS';
-  if (c.includes('ACEITE')) return 'ACEITE';
   if (c.includes('POLLO') || c.includes('ARROZ')) return 'POLLO';
+  if (c.includes('ACEITE')) return 'ACEITE';
   return 'OTROS';
 }
 
 const SKUS_MORTADELA_ASTURIAS = new Set(['1464', '1462', '1512', '1521', '1561', '1522', '1564', '1496', '1511']);
 const SKUS_SALPICAO = new Set(['1563', '1562', '1519', '1599']);
-const SKUS_LECHE_VENCAMPO = new Set(['1536', '1555', '1556', '1574', '1579']);
-const SKUS_POLLO = new Set(['630', '629', '870', '393', 'POLLO', 'FILET', 'MUSLO', 'ALAS']);
+const SKUS_LECHE_VENCAMPO = new Set(['1536', '1555', '1556', '1574', '1579', '1622']);
+const SKUS_POLLO = new Set(['630', '629', '870', '393', '1568', '681', 'POLLO', 'FILET', 'MUSLO', 'ALAS']);
 
 /**
- * Clasifica un artículo en un rubro. Orden de prioridad (el primero que coincide gana):
- *  1. Jamón estándar y superior Asturias   2. Salpicao   3. Mortadela Asturias
- *  4. Leche en polvo Vencampo   5. (legacy) Aceite   6. Azúcar   7. (legacy) Pollo   8. Otros
- * Mortadelas sin marca Asturias ni Salpicao (p. ej. Corral, Caracas) NO pertenecen a ningún rubro del mes.
+ * Clasifica un artículo en una de las 5 categorías de activación del mes:
+ *  1. ESTANDAR Y SUPERIOR ASTURIAS
+ *  2. MORTADELA SALPICAO Y ASTURIAS
+ *  3. LECHE VENCAMPO
+ *  4. AZUCAR
+ *  5. POLLO
  */
 export function clasificarRubro(sku: string, nombre: string): RubroCodigo {
   const s = String(sku || '').trim();
@@ -159,12 +172,13 @@ export function clasificarRubro(sku: string, nombre: string): RubroCodigo {
   if (s === '1461' || s === '1463' || n.includes('ESTANDAR ASTURIAS') || n.includes('SUPERIOR ASTURIAS')) {
     return 'ESTANDAR_ASTURIAS';
   }
-  if (n.includes('SALPICAO') || SKUS_SALPICAO.has(s)) return 'SALPICAO';
   if (
+    n.includes('SALPICAO') ||
+    SKUS_SALPICAO.has(s) ||
     SKUS_MORTADELA_ASTURIAS.has(s) ||
     (n.includes('ASTURIAS') && (n.includes('MORTADELA') || n.includes('MORT.') || n.includes('PECHUGA')))
   ) {
-    return 'MORTADELA_ASTURIAS';
+    return 'MORTADELA_SALPICAO';
   }
   if (SKUS_LECHE_VENCAMPO.has(s) || (n.includes('LECHE') && n.includes('VENCAMPO'))) return 'LECHE_VENCAMPO';
   if (sU === 'ACEITE' || n.includes('ACEITE')) return 'ACEITE';
@@ -174,6 +188,7 @@ export function clasificarRubro(sku: string, nombre: string): RubroCodigo {
     SKUS_POLLO.has(sU) ||
     n.includes('POLLO ENTERO') ||
     n.includes('POLLO TODAS') ||
+    n.includes('POLLO VENCAMPO') ||
     n.includes('FILET') ||
     n.includes('MUSLO') ||
     n.includes('ALAS DESPRESADAS') ||

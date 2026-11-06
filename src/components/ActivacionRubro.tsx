@@ -83,11 +83,11 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
         return <Flame className="w-4 h-4 text-rose-500" />;
       case 'LECHE_VENCAMPO':
         return <Droplets className="w-4 h-4 text-sky-400" />;
+      case 'POLLO':
+        return <Drumstick className="w-4 h-4 text-orange-400" />;
       case 'ESTANDAR_ASTURIAS':
         return <PkgIcon className="w-4 h-4 text-emerald-500" />;
-      case 'MORTADELA_ASTURIAS':
-        return <Drumstick className="w-4 h-4 text-orange-400" />;
-      case 'SALPICAO':
+      case 'MORTADELA_SALPICAO':
         return <Sparkles className="w-4 h-4 text-cyan-400" />;
       default:
         return <Target className="w-4 h-4 text-neutral-400" />;
@@ -116,7 +116,12 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
         const ov = manualMap[key];
         const code = categoryToRubroCode(cat);
         // Alias de claves antiguas que aún pueden venir en el payload (compatibilidad)
-        const aliasCats: Record<string, string[]> = { AZUCAR: ['AZÚCAR'], ESTANDAR_ASTURIAS: ['ENTERO'] };
+        const aliasCats: Record<string, string[]> = {
+          AZUCAR: ['AZÚCAR'],
+          POLLO: ['ARROZ'],
+          ESTANDAR_ASTURIAS: ['ENTERO'],
+          MORTADELA_SALPICAO: ['LIGEROS']
+        };
         const claves = [code, ...(aliasCats[code] || [])];
         const ovVal = ov?.[code];
         const isActive =

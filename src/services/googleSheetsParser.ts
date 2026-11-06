@@ -1103,8 +1103,8 @@ export function parseWorkbookFull(
     const hasLeche = cLeche > 0 || Boolean(c.sheetFlags?.flagLeche);
     const hasMortAst = cMortAst > 0 || Boolean(c.sheetFlags?.flagMortadelaAsturias);
     const hasSalpNuevo = cSalpNuevo > 0 || Boolean(c.sheetFlags?.flagSalpicaoNuevo);
-    // Cliente 'ACTIVO' = compró al menos uno de los rubros activos del mes (ver src/lib/rubros.ts)
-    const isActivo = hasAzucar || hasLeche || hasAsturias || hasMortAst || hasSalpNuevo;
+    // Cliente 'ACTIVO' = compró al menos uno de los 5 rubros activos del mes (AZUCAR, LECHE VENCAMPO, POLLO, ESTANDAR Y SUPERIOR ASTURIAS, MORTADELA SALPICAO Y ASTURIAS)
+    const isActivo = hasAzucar || hasLeche || hasPollo || hasAsturias || hasSalpicao;
 
     const vNorm = normalizeVendorName(c.vendedorNombre || c.vendedorId);
     if (!clientActByVendor.has(vNorm)) {
@@ -1268,19 +1268,22 @@ export function parseWorkbookFull(
         return { metaIdx: fallbackMeta, actIdx: fallbackAct };
       };
 
-      // Categorías = rubros ACTIVOS de la configuración central (src/lib/rubros.ts). Cada una busca su columna de
-      // meta/activados por encabezado; si el Grid aún no trae esa columna (-1) la meta queda en 0 y los activados
-      // se calculan con la cartera real (liveCounts).
-      const GRID_KEYWORDS: Record<string, { kw: string[]; exact?: boolean }> = {
-        AZUCAR: { kw: ['azucar'] },
-        LECHE_VENCAMPO: { kw: ['leche_vencampo', 'leche_en_polvo_vencampo', 'leche'] },
-        ESTANDAR_ASTURIAS: { kw: ['estandar', 'superior'] },
-        MORTADELA_ASTURIAS: { kw: ['mortadela_asturias'], exact: true },
-        SALPICAO: { kw: ['salpicao'], exact: true }
+      // Categorías = 5 rubros ACTIVOS de la configuración central (src/lib/rubros.ts):
+      // 1. AZUCAR (Cols C-D: 2, 3)
+      // 2. LECHE VENCAMPO (Cols E-F: 4, 5)
+      // 3. POLLO (Cols G-H: 6, 7)
+      // 4. ESTANDAR Y SUPERIOR ASTURIAS (Cols I-J: 8, 9)
+      // 5. MORTADELA SALPICAO Y ASTURIAS (Cols K-L: 10, 11)
+      const GRID_KEYWORDS: Record<string, { kw: string[]; fallbackMeta: number; fallbackAct: number; exact?: boolean }> = {
+        AZUCAR: { kw: ['azucar'], fallbackMeta: 2, fallbackAct: 3 },
+        LECHE_VENCAMPO: { kw: ['leche_vencampo', 'leche_en_polvo_vencampo', 'leche'], fallbackMeta: 4, fallbackAct: 5 },
+        POLLO: { kw: ['pollo', 'arroz'], fallbackMeta: 6, fallbackAct: 7 },
+        ESTANDAR_ASTURIAS: { kw: ['estandar', 'superior'], fallbackMeta: 8, fallbackAct: 9 },
+        MORTADELA_SALPICAO: { kw: ['mortadela_salpicao', 'mortadela', 'salpicao', 'ligeros'], fallbackMeta: 10, fallbackAct: 11 }
       };
       const catDefs = RUBROS_ACTIVOS_CONFIG.map((r) => {
-        const g = GRID_KEYWORDS[r.codigo] || { kw: [r.categoriaServidor.toLowerCase()] };
-        return { name: r.categoriaServidor, ...findCategoryCols(g.kw, -1, -1, g.exact) };
+        const g = GRID_KEYWORDS[r.codigo] || { kw: [r.categoriaServidor.toLowerCase()], fallbackMeta: -1, fallbackAct: -1 };
+        return { name: r.categoriaServidor, ...findCategoryCols(g.kw, g.fallbackMeta, g.fallbackAct, g.exact) };
       });
 
       for (let r = 2; r < rows.length; r++) {

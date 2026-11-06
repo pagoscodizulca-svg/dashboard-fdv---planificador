@@ -4135,39 +4135,51 @@ var import_crypto = __toESM(require("crypto"), 1);
 
 // src/lib/rubros.ts
 var RUBROS_CONFIG = [
-  { codigo: "AZUCAR", label: "Az\xFAcar", categoriaServidor: "AZ\xDACAR", palabrasClave: "azucar montalban", activo: true },
+  {
+    codigo: "AZUCAR",
+    label: "AZUCAR",
+    categoriaServidor: "AZUCAR",
+    palabrasClave: "azucar montalban vencampo",
+    activo: true
+  },
   {
     codigo: "LECHE_VENCAMPO",
-    label: "Leche en polvo Vencampo",
+    label: "LECHE VENCAMPO",
     categoriaServidor: "LECHE VENCAMPO",
     palabrasClave: "leche en polvo vencampo lpv",
     activo: true
   },
   {
+    codigo: "POLLO",
+    label: "POLLO",
+    categoriaServidor: "POLLO",
+    palabrasClave: "pollo filet muslo alas higado molleja arroz vencampo",
+    activo: true
+  },
+  {
     codigo: "ESTANDAR_ASTURIAS",
-    label: "Jam\xF3n est\xE1ndar y superior Asturias",
+    label: "ESTANDAR Y SUPERIOR ASTURIAS",
     categoriaServidor: "ESTANDAR Y SUPERIOR ASTURIAS",
     palabrasClave: "jamon estandar superior asturias entero",
     activo: true
   },
   {
-    codigo: "MORTADELA_ASTURIAS",
-    label: "Mortadela Asturias",
-    categoriaServidor: "MORTADELA ASTURIAS",
-    palabrasClave: "mortadela asturias",
+    codigo: "MORTADELA_SALPICAO",
+    label: "MORTADELA SALPICAO Y ASTURIAS",
+    categoriaServidor: "MORTADELA SALPICAO Y ASTURIAS",
+    palabrasClave: "mortadela salpicao asturias ligeros enteros",
     activo: true
   },
-  { codigo: "SALPICAO", label: "Salpicao", categoriaServidor: "SALPICAO", palabrasClave: "salpicao ligeros", activo: true },
-  // ---- Legacy (no se muestran) ----
-  { codigo: "ACEITE", label: "Aceite", categoriaServidor: "ACEITE", palabrasClave: "aceite oleo soya girasol", activo: false },
-  { codigo: "POLLO", label: "Pollo", categoriaServidor: "POLLO", palabrasClave: "pollo filet muslo alas higado molleja arroz", activo: false },
+  // ---- Legacy / auxiliares (no se muestran como tarjeta independiente) ----
+  { codigo: "ACEITE", label: "ACEITE", categoriaServidor: "ACEITE", palabrasClave: "aceite oleo soya girasol", activo: false },
   {
-    codigo: "MORTADELA_SALPICAO",
-    label: "Mortadela Salpicao y Asturias (hist\xF3rico)",
-    categoriaServidor: "MORTADELA SALPICAO Y ASTURIAS",
-    palabrasClave: "mortadela salpicao asturias ligeros",
+    codigo: "MORTADELA_ASTURIAS",
+    label: "MORTADELA ASTURIAS",
+    categoriaServidor: "MORTADELA ASTURIAS",
+    palabrasClave: "mortadela asturias",
     activo: false
-  }
+  },
+  { codigo: "SALPICAO", label: "SALPICAO", categoriaServidor: "SALPICAO", palabrasClave: "salpicao ligeros", activo: false }
 ];
 var RUBROS_ACTIVOS_CONFIG = RUBROS_CONFIG.filter((r) => r.activo);
 var RUBROS_ACTIVACION = RUBROS_ACTIVOS_CONFIG.map((r) => r.codigo);
@@ -4192,21 +4204,21 @@ function esRubroActivo(codigo) {
 }
 var sinAcentos = (s) => String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
 function categoriaARubroCodigo(cat) {
-  const c = sinAcentos(cat);
-  if (c.includes("MORTADELA") && c.includes("SALPICAO")) return "MORTADELA_SALPICAO";
+  const c = sinAcentos(cat).trim();
+  if (c === "MORTADELA_ASTURIAS" || c === "MORTADELA ASTURIAS") return "MORTADELA_SALPICAO";
+  if (c === "SALPICAO") return "MORTADELA_SALPICAO";
+  if (c.includes("MORTADELA") || c.includes("SALPICAO") || c.includes("LIGEROS")) return "MORTADELA_SALPICAO";
   if (c.includes("LECHE")) return "LECHE_VENCAMPO";
   if (c.includes("AZUCAR")) return "AZUCAR";
   if (c.includes("ESTANDAR") || c.includes("SUPERIOR") || c.includes("JAMON") || c.includes("ENTERO")) return "ESTANDAR_ASTURIAS";
-  if (c.includes("SALPICAO") || c.includes("LIGEROS")) return "SALPICAO";
-  if (c.includes("MORTADELA")) return "MORTADELA_ASTURIAS";
-  if (c.includes("ACEITE")) return "ACEITE";
   if (c.includes("POLLO") || c.includes("ARROZ")) return "POLLO";
+  if (c.includes("ACEITE")) return "ACEITE";
   return "OTROS";
 }
 var SKUS_MORTADELA_ASTURIAS = /* @__PURE__ */ new Set(["1464", "1462", "1512", "1521", "1561", "1522", "1564", "1496", "1511"]);
 var SKUS_SALPICAO = /* @__PURE__ */ new Set(["1563", "1562", "1519", "1599"]);
-var SKUS_LECHE_VENCAMPO = /* @__PURE__ */ new Set(["1536", "1555", "1556", "1574", "1579"]);
-var SKUS_POLLO = /* @__PURE__ */ new Set(["630", "629", "870", "393", "POLLO", "FILET", "MUSLO", "ALAS"]);
+var SKUS_LECHE_VENCAMPO = /* @__PURE__ */ new Set(["1536", "1555", "1556", "1574", "1579", "1622"]);
+var SKUS_POLLO = /* @__PURE__ */ new Set(["630", "629", "870", "393", "1568", "681", "POLLO", "FILET", "MUSLO", "ALAS"]);
 function clasificarRubro(sku, nombre) {
   const s = String(sku || "").trim();
   const sU = s.toUpperCase();
@@ -4214,14 +4226,13 @@ function clasificarRubro(sku, nombre) {
   if (s === "1461" || s === "1463" || n.includes("ESTANDAR ASTURIAS") || n.includes("SUPERIOR ASTURIAS")) {
     return "ESTANDAR_ASTURIAS";
   }
-  if (n.includes("SALPICAO") || SKUS_SALPICAO.has(s)) return "SALPICAO";
-  if (SKUS_MORTADELA_ASTURIAS.has(s) || n.includes("ASTURIAS") && (n.includes("MORTADELA") || n.includes("MORT.") || n.includes("PECHUGA"))) {
-    return "MORTADELA_ASTURIAS";
+  if (n.includes("SALPICAO") || SKUS_SALPICAO.has(s) || SKUS_MORTADELA_ASTURIAS.has(s) || n.includes("ASTURIAS") && (n.includes("MORTADELA") || n.includes("MORT.") || n.includes("PECHUGA"))) {
+    return "MORTADELA_SALPICAO";
   }
   if (SKUS_LECHE_VENCAMPO.has(s) || n.includes("LECHE") && n.includes("VENCAMPO")) return "LECHE_VENCAMPO";
   if (sU === "ACEITE" || n.includes("ACEITE")) return "ACEITE";
   if (sU === "AZUCAR" || sU === "AZ\xDACAR" || n.includes("AZUCAR") || n.includes("AZ\xDACAR")) return "AZUCAR";
-  if (SKUS_POLLO.has(s) || SKUS_POLLO.has(sU) || n.includes("POLLO ENTERO") || n.includes("POLLO TODAS") || n.includes("FILET") || n.includes("MUSLO") || n.includes("ALAS DESPRESADAS") || n.includes("HIGADO") || n.includes("MOLLEJA")) {
+  if (SKUS_POLLO.has(s) || SKUS_POLLO.has(sU) || n.includes("POLLO ENTERO") || n.includes("POLLO TODAS") || n.includes("POLLO VENCAMPO") || n.includes("FILET") || n.includes("MUSLO") || n.includes("ALAS DESPRESADAS") || n.includes("HIGADO") || n.includes("MOLLEJA")) {
     return "POLLO";
   }
   return "OTROS";
@@ -8150,7 +8161,7 @@ function parseWorkbookFull(XLSX2, workbook, options) {
     const hasLeche = cLeche > 0 || Boolean(c.sheetFlags?.flagLeche);
     const hasMortAst = cMortAst > 0 || Boolean(c.sheetFlags?.flagMortadelaAsturias);
     const hasSalpNuevo = cSalpNuevo > 0 || Boolean(c.sheetFlags?.flagSalpicaoNuevo);
-    const isActivo = hasAzucar || hasLeche || hasAsturias || hasMortAst || hasSalpNuevo;
+    const isActivo = hasAzucar || hasLeche || hasPollo || hasAsturias || hasSalpicao;
     const vNorm = normalizeVendorName(c.vendedorNombre || c.vendedorId);
     if (!clientActByVendor.has(vNorm)) {
       clientActByVendor.set(vNorm, {
@@ -8287,15 +8298,15 @@ function parseWorkbookFull(XLSX2, workbook, options) {
         return { metaIdx: fallbackMeta, actIdx: fallbackAct };
       };
       const GRID_KEYWORDS = {
-        AZUCAR: { kw: ["azucar"] },
-        LECHE_VENCAMPO: { kw: ["leche_vencampo", "leche_en_polvo_vencampo", "leche"] },
-        ESTANDAR_ASTURIAS: { kw: ["estandar", "superior"] },
-        MORTADELA_ASTURIAS: { kw: ["mortadela_asturias"], exact: true },
-        SALPICAO: { kw: ["salpicao"], exact: true }
+        AZUCAR: { kw: ["azucar"], fallbackMeta: 2, fallbackAct: 3 },
+        LECHE_VENCAMPO: { kw: ["leche_vencampo", "leche_en_polvo_vencampo", "leche"], fallbackMeta: 4, fallbackAct: 5 },
+        POLLO: { kw: ["pollo", "arroz"], fallbackMeta: 6, fallbackAct: 7 },
+        ESTANDAR_ASTURIAS: { kw: ["estandar", "superior"], fallbackMeta: 8, fallbackAct: 9 },
+        MORTADELA_SALPICAO: { kw: ["mortadela_salpicao", "mortadela", "salpicao", "ligeros"], fallbackMeta: 10, fallbackAct: 11 }
       };
       const catDefs = RUBROS_ACTIVOS_CONFIG.map((r) => {
-        const g = GRID_KEYWORDS[r.codigo] || { kw: [r.categoriaServidor.toLowerCase()] };
-        return { name: r.categoriaServidor, ...findCategoryCols(g.kw, -1, -1, g.exact) };
+        const g = GRID_KEYWORDS[r.codigo] || { kw: [r.categoriaServidor.toLowerCase()], fallbackMeta: -1, fallbackAct: -1 };
+        return { name: r.categoriaServidor, ...findCategoryCols(g.kw, g.fallbackMeta, g.fallbackAct, g.exact) };
       });
       for (let r = 2; r < rows.length; r++) {
         const row = rows[r];
@@ -13316,7 +13327,7 @@ async function startServer() {
                   cliente: r.cliente_nombre,
                   vendedorId: r.vendedor_id,
                   vendedorNombre: r.vendedor_nombre,
-                  status: hasAzucar || hasLeche || hasAsturias || hasMortAst || hasSalpNuevo || r.status === "ACTIVO" ? "ACTIVO" : "INACTIVO",
+                  status: hasAzucar || hasLeche || hasPollo || hasAsturias || hasSalpicao || r.status === "ACTIVO" ? "ACTIVO" : "INACTIVO",
                   cajas: {
                     ACEITE: Number(r.cajas_aceite) || 0,
                     AZUCAR: Number(r.cajas_azucar) || 0,
@@ -13362,7 +13373,7 @@ async function startServer() {
                 prev.cajas.LECHE_VENCAMPO = Math.max(prev.cajas.LECHE_VENCAMPO || 0, Number(r.cajas_leche_vencampo) || 0);
                 prev.cajas.MORTADELA_ASTURIAS = Math.max(prev.cajas.MORTADELA_ASTURIAS || 0, Number(r.cajas_mortadela_asturias) || 0);
                 prev.cajas.SALPICAO = Math.max(prev.cajas.SALPICAO || 0, Number(r.cajas_salpicao) || 0);
-                if (prev.cats.AZUCAR || prev.cats.LECHE_VENCAMPO || prev.cats.ESTANDAR_ASTURIAS || prev.cats.MORTADELA_ASTURIAS || prev.cats.SALPICAO) {
+                if (prev.cats.AZUCAR || prev.cats.LECHE_VENCAMPO || prev.cats.POLLO || prev.cats.ESTANDAR_ASTURIAS || prev.cats.MORTADELA_SALPICAO) {
                   prev.status = "ACTIVO";
                 }
               }
@@ -13448,7 +13459,7 @@ async function startServer() {
                 has_salpicao: normRubro === "SALPICAO" ? boolActive : Boolean(r.has_salpicao)
               } : {}
             };
-            const isActivo = [nextState.has_azucar, nextState.has_estandar_asturias, nextState.has_leche_vencampo, nextState.has_mortadela_asturias, nextState.has_salpicao].some(Boolean);
+            const isActivo = [nextState.has_azucar, nextState.has_pollo, nextState.has_estandar_asturias, nextState.has_mortadela_salpicao, nextState.has_leche_vencampo].some(Boolean);
             await supabase.from("activacion_clientes").update({
               ...nextState,
               status: isActivo ? "ACTIVO" : "INACTIVO"
@@ -13466,7 +13477,7 @@ async function startServer() {
             if (normRubro === "ESTANDAR_ASTURIAS") c.cats.ENTERO = boolActive;
             if (normRubro === "MORTADELA_SALPICAO") c.cats.LIGEROS = boolActive;
             const anyActive = Boolean(
-              c.cats.AZUCAR || c.cats.LECHE_VENCAMPO || c.cats.ESTANDAR_ASTURIAS || c.cats.MORTADELA_ASTURIAS || c.cats.SALPICAO
+              c.cats.AZUCAR || c.cats.LECHE_VENCAMPO || c.cats.POLLO || c.cats.ESTANDAR_ASTURIAS || c.cats.MORTADELA_SALPICAO
             );
             c.status = anyActive ? "ACTIVO" : "INACTIVO";
           }

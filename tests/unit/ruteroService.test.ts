@@ -45,7 +45,7 @@ describe('Unit: ruteroService (Planificador Inteligente de Ruta - Fase 1)', () =
         vendedorId: 'OSCAR ORTIZ',
         cliente: 'ABASTO EL SOL',
         status: 'ACTIVO',
-        cats: { AZUCAR: 1, LECHE_VENCAMPO: 1, ESTANDAR_ASTURIAS: 1, MORTADELA_ASTURIAS: 1, SALPICAO: 1 }
+        cats: { AZUCAR: 1, LECHE_VENCAMPO: 1, POLLO: 1, ESTANDAR_ASTURIAS: 1, MORTADELA_SALPICAO: 1 }
       },
       {
         id: '1002',
@@ -59,7 +59,7 @@ describe('Unit: ruteroService (Planificador Inteligente de Ruta - Fase 1)', () =
         vendedorId: 'OSCAR ORTIZ',
         cliente: 'CHARCUTERIA CENTRAL',
         status: 'ACTIVO',
-        cats: { AZUCAR: 1, LECHE_VENCAMPO: 1, ESTANDAR_ASTURIAS: 1, MORTADELA_ASTURIAS: 0, SALPICAO: 0 }
+        cats: { AZUCAR: 1, LECHE_VENCAMPO: 1, POLLO: 1, ESTANDAR_ASTURIAS: 0, MORTADELA_SALPICAO: 0 }
       }
     ];
 
@@ -123,7 +123,10 @@ describe('Unit: ruteroService (Planificador Inteligente de Ruta - Fase 1)', () =
     expect(enriched[1].clienteId).toBe('1003');
     expect(enriched[1].totalRubrosActivos).toBe(3);
     // Faltan exactamente los 2 rubros nuevos sin compra (claves internas de servidor)
-    expect((enriched[1].rubrosFaltantes as string[]).map((r) => RUBRO_SHORT_LABELS[r])).toEqual(['Mortadela Asturias', 'Salpicao']);
+    expect((enriched[1].rubrosFaltantes as string[]).map((r) => RUBRO_SHORT_LABELS[r])).toEqual([
+      'ESTANDAR Y SUPERIOR ASTURIAS',
+      'MORTADELA SALPICAO Y ASTURIAS'
+    ]);
     expect(enriched[1].ejecutadoKgMes).toBe(145.5);
 
     expect(enriched[2].clienteId).toBe('1001');
