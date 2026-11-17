@@ -29,19 +29,74 @@ import {
   VendorProfile
 } from './utils/vendorRoutes';
 
-const RecorridoMes = lazy(() => import('./components/RecorridoMes').then(m => ({ default: m.RecorridoMes })));
-const ActivacionRubro = lazy(() => import('./components/ActivacionRubro').then(m => ({ default: m.ActivacionRubro })));
-const VolumenTab = lazy(() => import('./components/VolumenTab').then(m => ({ default: m.VolumenTab })));
-const ActivacionClientes = lazy(() => import('./components/ActivacionClientes').then(m => ({ default: m.ActivacionClientes })));
-const HistorialSection = lazy(() => import('./components/HistorialPanel').then(m => ({ default: m.HistorialSection })));
-const CobrosOCR = lazy(() => import('./components/CobrosOCR').then(m => ({ default: m.CobrosOCR })));
-const TrazabilidadTab = lazy(() => import('./components/TrazabilidadTab').then(m => ({ default: m.TrazabilidadTab })));
-const ActualizarMaestra = lazy(() => import('./components/ActualizarMaestra').then(m => ({ default: m.ActualizarMaestra })));
-const DegustacionesTab = lazy(() => import('./components/DegustacionesTab').then(m => ({ default: m.DegustacionesTab })));
-const AlkostoTab = lazy(() => import('./components/AlkostoTab').then(m => ({ default: m.AlkostoTab })));
-const PlanificadorRutaTab = lazy(() => import('./components/PlanificadorRutaTab').then(m => ({ default: m.PlanificadorRutaTab })));
+import { AlkostoTab } from './components/AlkostoTab';
 import { subscribeDegustaciones } from './services/degustacionesService';
 import { Degustacion } from './types';
+
+function lazyWithRetry<T extends React.ComponentType<any>>(
+  factory: () => Promise<{ default: T }>,
+  chunkName: string
+): React.LazyExoticComponent<T> {
+  return lazy(async () => {
+    try {
+      return await factory();
+    } catch (err) {
+      const reloadKey = `fdv_chunk_reload_${chunkName}`;
+      const alreadyReloaded = sessionStorage.getItem(reloadKey);
+      if (!alreadyReloaded) {
+        sessionStorage.setItem(reloadKey, '1');
+        window.location.reload();
+      }
+      throw err;
+    }
+  });
+}
+
+class TabErrorBoundary extends React.Component<
+  { children: React.ReactNode; tabKey: string },
+  { hasError: boolean; errorMsg: string }
+> {
+  constructor(props: { children: React.ReactNode; tabKey: string }) {
+    super(props);
+    this.state = { hasError: false, errorMsg: '' };
+  }
+  static getDerivedStateFromError(error: any) {
+    return { hasError: true, errorMsg: String(error?.message || error || 'Error al cargar el módulo') };
+  }
+  componentDidUpdate(prevProps: { tabKey: string }) {
+    if (prevProps.tabKey !== this.props.tabKey && this.state.hasError) {
+      this.setState({ hasError: false, errorMsg: '' });
+    }
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="p-8 bg-neutral-950 border border-red-900/60 rounded-2xl text-center space-y-4">
+          <p className="text-sm font-bold text-red-400">Ocurrió un problema al cargar esta vista</p>
+          <p className="text-xs text-neutral-400 font-mono">{this.state.errorMsg}</p>
+          <button
+            onClick={() => window.location.reload()}
+            className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-lg transition-colors cursor-pointer"
+          >
+            Recargar aplicación
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+const RecorridoMes = lazyWithRetry(() => import('./components/RecorridoMes').then(m => ({ default: m.RecorridoMes })), 'RecorridoMes');
+const ActivacionRubro = lazyWithRetry(() => import('./components/ActivacionRubro').then(m => ({ default: m.ActivacionRubro })), 'ActivacionRubro');
+const VolumenTab = lazyWithRetry(() => import('./components/VolumenTab').then(m => ({ default: m.VolumenTab })), 'VolumenTab');
+const ActivacionClientes = lazyWithRetry(() => import('./components/ActivacionClientes').then(m => ({ default: m.ActivacionClientes })), 'ActivacionClientes');
+const HistorialSection = lazyWithRetry(() => import('./components/HistorialPanel').then(m => ({ default: m.HistorialSection })), 'HistorialSection');
+const CobrosOCR = lazyWithRetry(() => import('./components/CobrosOCR').then(m => ({ default: m.CobrosOCR })), 'CobrosOCR');
+const TrazabilidadTab = lazyWithRetry(() => import('./components/TrazabilidadTab').then(m => ({ default: m.TrazabilidadTab })), 'TrazabilidadTab');
+const ActualizarMaestra = lazyWithRetry(() => import('./components/ActualizarMaestra').then(m => ({ default: m.ActualizarMaestra })), 'ActualizarMaestra');
+const DegustacionesTab = lazyWithRetry(() => import('./components/DegustacionesTab').then(m => ({ default: m.DegustacionesTab })), 'DegustacionesTab');
+const PlanificadorRutaTab = lazyWithRetry(() => import('./components/PlanificadorRutaTab').then(m => ({ default: m.PlanificadorRutaTab })), 'PlanificadorRutaTab');
 
 type TabId = 'ACTIVACION_RUBRO' | 'VOLUMEN' | 'ACTIVACION_CLIENTES' | 'RUTERO' | 'COBROS_OCR' | 'DEGUSTACIONES' | 'ALKOSTO' | 'TRAZABILIDAD' | 'MAESTRA';
 
@@ -1035,12 +1090,13 @@ export default function App() {
           )}
         </Suspense>
 
-        <Suspense fallback={
-          <div className="flex flex-col items-center justify-center p-16 space-y-3 bg-neutral-950/60 border border-neutral-800 rounded-2xl min-h-[300px]">
-            <div className="w-8 h-8 border-3 border-red-500/30 border-t-red-500 rounded-full animate-spin" />
-            <span className="text-xs font-sans font-bold text-neutral-400 uppercase tracking-wider">Cargando módulo...</span>
-          </div>
-        }>
+        <TabErrorBoundary tabKey={activeTab}>
+          <Suspense fallback={
+            <div className="flex flex-col items-center justify-center p-16 space-y-3 bg-neutral-950/60 border border-neutral-800 rounded-2xl min-h-[300px]">
+              <div className="w-8 h-8 border-3 border-red-500/30 border-t-red-500 rounded-full animate-spin" />
+              <span className="text-xs font-sans font-bold text-neutral-400 uppercase tracking-wider">Cargando módulo...</span>
+            </div>
+          }>
           <div className="animate-in fade-in slide-in-from-bottom-2 duration-500 space-y-6">
             {(activeTab === 'VOLUMEN' || activeTab === 'ACTIVACION_RUBRO' || activeTab === 'ACTIVACION_CLIENTES') && (
               <HistorialSection
@@ -1111,7 +1167,8 @@ export default function App() {
               <ActualizarMaestra onSynced={() => loadData(true)} />
             )}
           </div>
-        </Suspense>
+          </Suspense>
+        </TabErrorBoundary>
       </main>
     </div>
   );

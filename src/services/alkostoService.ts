@@ -11,7 +11,6 @@ import { db } from '../lib/firebase';
 import { AlkostoOrder, EstadoPedidoAlkosto, AlkostoOrderItem, ParsedOrdenCompraAlkosto } from '../types';
 import { getAuthHeaders } from './authService';
 import { PRODUCTOS_CODIZULCA, matchProductoCodizulca, toSafeNumber, hasPrimaryNounConflict, isBrandOrPresentationToken } from './productosCodizulca';
-import * as parserMod from './alkostoOcParser';
 
 export const ALKOSTO_COLLECTION = 'alkosto_orders';
 const STORAGE_KEY = 'dashboard_fdv_alkosto_orders_cache';
@@ -1812,6 +1811,7 @@ export async function parseAlkostoOrderImage(
   mimeType: string = 'image/jpeg',
   fileName?: string
 ): Promise<ParsedOrdenCompraAlkosto> {
+  const parserMod = await import('./alkostoOcParser');
   const readerResult = String(imageBase64 || '').trim();
   const base64Data = (readerResult.includes(',') ? readerResult.split(',')[1] : readerResult)
     .replace(/^data:[^;]+;base64,/i, '')

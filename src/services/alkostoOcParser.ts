@@ -121,20 +121,57 @@ export class AlkostoOcrStageError extends Error {
   }
 }
 
+const FALLBACK_ABREV_ALKOSTO = ['AK01', 'AK02', 'AK03', 'AK04', 'AK05', 'AK06', 'AK07', 'AK08', 'AK09', 'AK10', 'AK11', 'AKOP'];
+const FALLBACK_ABREV_FAMILIA = ['FC01', 'FC02', 'FC03', 'FC04', 'FC05', 'FC06', 'FC07', 'FC08', 'FCOP'];
+
+function getSafeAbrevAlkosto(): string[] {
+  try {
+    return CADENAS_ABREVIATURAS?.ALKOSTO || FALLBACK_ABREV_ALKOSTO;
+  } catch {
+    return FALLBACK_ABREV_ALKOSTO;
+  }
+}
+
+function getSafeAbrevFamilia(): string[] {
+  try {
+    return CADENAS_ABREVIATURAS?.FAMILIA_CENTER || FALLBACK_ABREV_FAMILIA;
+  } catch {
+    return FALLBACK_ABREV_FAMILIA;
+  }
+}
+
+function getSafeSucursalesAlkosto() {
+  try {
+    return SUCURSALES_ALKOSTO || [];
+  } catch {
+    return [];
+  }
+}
+
+function getSafeSucursalesFamilia() {
+  try {
+    return SUCURSALES_FAMILIA_CENTER || [];
+  } catch {
+    return [];
+  }
+}
+
 /**
- * Construye dinámicamente el System Prompt del motor OCR inyectando las 17 abreviaturas sincronizadas
- * en base de datos (`AK01` a `AK10` para Alkosto y `FC01` a `FC07` para Familia Center), ignorando `AKOP` y `CI`.
+ * Construye dinámicamente el System Prompt del motor OCR inyectando las abreviaturas sincronizadas
+ * en base de datos (`AK01` a `AK11`/`AKOP` para Alkosto y `FC01` a `FC08`/`FCOP` para Familia Center), ignorando `CI`.
  */
 export function buildAlkostoOcSystemPrompt(
-  abrevAlkosto: string[] = CADENAS_ABREVIATURAS?.ALKOSTO || ['AK01', 'AK02', 'AK03', 'AK04', 'AK05', 'AK06', 'AK07', 'AK08', 'AK09', 'AK10'],
-  abrevFamilia: string[] = CADENAS_ABREVIATURAS?.FAMILIA_CENTER || ['FC01', 'FC02', 'FC03', 'FC04', 'FC05', 'FC06', 'FC07']
+  abrevAlkosto?: string[],
+  abrevFamilia?: string[]
 ): string {
-  const akTagsStr = (abrevAlkosto || []).join(', ');
-  const fcTagsStr = (abrevFamilia || []).join(', ');
-  const sucursalesAkDetalle = (SUCURSALES_ALKOSTO || [])
+  const resolvedAk = abrevAlkosto || getSafeAbrevAlkosto();
+  const resolvedFc = abrevFamilia || getSafeAbrevFamilia();
+  const akTagsStr = (resolvedAk || []).join(', ');
+  const fcTagsStr = (resolvedFc || []).join(', ');
+  const sucursalesAkDetalle = getSafeSucursalesAlkosto()
     .map(s => `${s.tag || s.codigo}: "${s.nombre}" (ID ${s.codigo})`)
     .join(' | ');
-  const sucursalesFcDetalle = (SUCURSALES_FAMILIA_CENTER || [])
+  const sucursalesFcDetalle = getSafeSucursalesFamilia()
     .map(s => `${s.tag || s.codigo}: "${s.nombre}" (ID ${s.codigo})`)
     .join(' | ');
   const catalogoOficial158Str = formatCatalogoCodizulcaForPrompt();

@@ -6199,8 +6199,20 @@ async function startServer() {
   const isDevMode = process.env.npm_lifecycle_event === 'dev' || process.env.NODE_ENV === 'development';
 
   if (!isDevMode && distIndexExists) {
-    app.use(express.static(distPath));
+    app.use(
+      express.static(distPath, {
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('index.html')) {
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+          }
+        }
+      })
+    );
     app.get('*', (req, res) => {
+      if (req.path.startsWith('/assets/')) {
+        return res.status(404).end();
+      }
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   } else {
@@ -6215,6 +6227,10 @@ async function startServer() {
       if (distIndexExists) {
         app.use(express.static(distPath));
         app.get('*', (req, res) => {
+          if (req.path.startsWith('/assets/')) {
+            return res.status(404).end();
+          }
+          res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
           res.sendFile(path.join(distPath, 'index.html'));
         });
       }

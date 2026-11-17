@@ -4,6 +4,9 @@ var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __esm = (fn, res) => function __init() {
+  return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+};
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, { get: all[name], enumerable: true });
@@ -26,348 +29,54 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// server.ts
-var server_exports = {};
-__export(server_exports, {
-  authenticateToken: () => authenticateToken,
-  metasPeriodoActual: () => metasPeriodoActual,
-  rateLimiter: () => rateLimiter,
-  requireAdmin: () => requireAdmin
+// <define:import.meta.env>
+var init_define_import_meta_env = __esm({
+  "<define:import.meta.env>"() {
+  }
 });
-module.exports = __toCommonJS(server_exports);
-var import_express = __toESM(require("express"), 1);
-var import_path = __toESM(require("path"), 1);
-var import_fs = __toESM(require("fs"), 1);
-var import_https = __toESM(require("https"), 1);
-var import_zlib = __toESM(require("zlib"), 1);
-var import_vite = require("vite");
-var import_dotenv = __toESM(require("dotenv"), 1);
-
-// src/services/alkostoService.ts
-var import_firestore2 = require("firebase/firestore");
-
-// src/lib/firebase.ts
-var import_app = require("firebase/app");
-var import_auth = require("firebase/auth");
-var import_firestore = require("firebase/firestore");
 
 // firebase-applet-config.json
-var firebase_applet_config_default = {
-  projectId: "gen-lang-client-0359272213",
-  appId: "1:959955873018:web:26b1ca2f9fac2d4db32d43",
-  apiKey: "AIzaSyAoSSmvp7Wtsef5zlQQOArtUq3D4Xk3FkM",
-  authDomain: "gen-lang-client-0359272213.firebaseapp.com",
-  firestoreDatabaseId: "ai-studio-dashboardfdvplan-b71166f0-11d2-4bf0-8a16-d3a8accb0022",
-  storageBucket: "gen-lang-client-0359272213.firebasestorage.app",
-  messagingSenderId: "959955873018",
-  measurementId: "",
-  oAuthClientId: "959955873018-sdmf2r8vjhcsclcj1f9jsjuv1uqc0erj.apps.googleusercontent.com",
-  recaptchaSiteKey: ""
-};
+var firebase_applet_config_default;
+var init_firebase_applet_config = __esm({
+  "firebase-applet-config.json"() {
+    firebase_applet_config_default = {
+      projectId: "gen-lang-client-0359272213",
+      appId: "1:959955873018:web:26b1ca2f9fac2d4db32d43",
+      apiKey: "AIzaSyAoSSmvp7Wtsef5zlQQOArtUq3D4Xk3FkM",
+      authDomain: "gen-lang-client-0359272213.firebaseapp.com",
+      firestoreDatabaseId: "ai-studio-dashboardfdvplan-b71166f0-11d2-4bf0-8a16-d3a8accb0022",
+      storageBucket: "gen-lang-client-0359272213.firebasestorage.app",
+      messagingSenderId: "959955873018",
+      measurementId: "",
+      oAuthClientId: "959955873018-sdmf2r8vjhcsclcj1f9jsjuv1uqc0erj.apps.googleusercontent.com",
+      recaptchaSiteKey: ""
+    };
+  }
+});
 
 // src/lib/firebase.ts
-var app = !(0, import_app.getApps)().length ? (0, import_app.initializeApp)(firebase_applet_config_default) : (0, import_app.getApp)();
-var db = (0, import_firestore.getFirestore)(app, firebase_applet_config_default.firestoreDatabaseId);
-var auth = (0, import_auth.getAuth)(app);
+var import_app, import_auth, import_firestore, app, db, auth;
+var init_firebase = __esm({
+  "src/lib/firebase.ts"() {
+    init_define_import_meta_env();
+    import_app = require("firebase/app");
+    import_auth = require("firebase/auth");
+    import_firestore = require("firebase/firestore");
+    init_firebase_applet_config();
+    app = !(0, import_app.getApps)().length ? (0, import_app.initializeApp)(firebase_applet_config_default) : (0, import_app.getApp)();
+    db = (0, import_firestore.getFirestore)(app, firebase_applet_config_default.firestoreDatabaseId);
+    auth = (0, import_auth.getAuth)(app);
+  }
+});
+
+// src/services/authService.ts
+var init_authService = __esm({
+  "src/services/authService.ts"() {
+    init_define_import_meta_env();
+  }
+});
 
 // src/services/productosCodizulca.ts
-var PRODUCTOS_CODIZULCA = [
-  { codigo: "9", descripcion: "FILETE DE PECHUGA A GRANEL POR KG" },
-  { codigo: "21", descripcion: "MORTADELA ESP D/POLLO CORRAL 1X12UNI" },
-  { codigo: "28", descripcion: "HUEVOS DE CONSUMO TUNAL TIPO A 1X12UNI" },
-  { codigo: "46", descripcion: "NUGGETS INSTITUCIONAL CORRAL POR KG" },
-  { codigo: "73", descripcion: "GALLINA DESNUDA POR KG" },
-  { codigo: "75", descripcion: "PECHUGA CON HUESO POR KG" },
-  { codigo: "96", descripcion: "QUESO MOZZARELLA ESPECIAL EL LUCERO (E)" },
-  { codigo: "130", descripcion: "POLLO CORRAL POR KG" },
-  { codigo: "151", descripcion: "QUESO MOZARELLA EN BARRA DO\xD1A FLORA" },
-  { codigo: "170", descripcion: "TOCINETA AHUM S/CUERO ALIMEX X KG" },
-  { codigo: "171", descripcion: "JAMON COC. SUPERIOR ALIMEX 1X5.9KG" },
-  { codigo: "172", descripcion: "ESPALDA COCIDA ALIMEX 1X4.6KG" },
-  { codigo: "174", descripcion: "MORTADELA TAPARA ALIMEX DE 6X3.5KG" },
-  { codigo: "176", descripcion: "SALCHICHA VIENA ALIMEX 8 X 800 GRS" },
-  { codigo: "177", descripcion: "SALCHICHA VIENA ALIMEX 16 X 450 GRS" },
-  { codigo: "179", descripcion: "LECHE COMPLETA PURISIMA1X12LTRS" },
-  { codigo: "180", descripcion: "LECHE DESCREMADA PURISIMA1X12LTS" },
-  { codigo: "181", descripcion: "JUGO DE NARANJA EL TUNAL 1X12LTRS" },
-  { codigo: "182", descripcion: "NECTAR DE MANZANA EL TUNAL 1X12LTRS" },
-  { codigo: "183", descripcion: "NECTAR DE PERA EL TUNAL 1X12LTRS" },
-  { codigo: "184", descripcion: "NECTAR DE DURAZNO EL TUNAL 1X12LTRS" },
-  { codigo: "185", descripcion: "TE CON LIMON EL TUNAL 1X12LTRS" },
-  { codigo: "186", descripcion: "TE CON DURAZNO EL TUNAL 1X12LTRS" },
-  { codigo: "241", descripcion: "ESPAL. AHUM T/VISKING ALIMEX 6X3.2" },
-  { codigo: "242", descripcion: "LECHE DESLACTOSADA PURISIMA1X12LT" },
-  { codigo: "302", descripcion: "MANTEQUILLA CON SAL PURISIMA BARRA 18X200GR" },
-  { codigo: "306", descripcion: "ATUN NATURAL 24X170GRS" },
-  { codigo: "337", descripcion: "JAMON COCIDO ESTANDAR ITALICO X KG" },
-  { codigo: "340", descripcion: "CHULETA AHUMADA ALIMEX X KG" },
-  { codigo: "353", descripcion: "MAYONESA MAVESA 445 GRS X 12 UND" },
-  { codigo: "354", descripcion: "MARGARINA MAVESA 500 GRS X 12 UND" },
-  { codigo: "360", descripcion: "KETCHUP PAMPERO 397 GRS X 24 UND" },
-  { codigo: "364", descripcion: "MAVESA VINAGRE DE ALCOHOL 1LX12UND" },
-  { codigo: "388", descripcion: "MAVESA ADEREZO MAYONESA 3.6GX4UN" },
-  { codigo: "390", descripcion: "PAMPERO SALSA TOMATE 4.2KGX4UN" },
-  { codigo: "393", descripcion: "MOLLEJA (EMPACADA)" },
-  { codigo: "439", descripcion: "ESPAL AHUM.T/AREPERO ALIMEX 12X1,6KG" },
-  { codigo: "469", descripcion: "HUEVOS ESTUCH. PLAST. TUNAL 12 X 30" },
-  { codigo: "485", descripcion: "PAP. ALUM DOMESTICO 7M 1X30" },
-  { codigo: "518", descripcion: "PASTA PREMIUM TIPO VERMICELLI 12X1KG" },
-  { codigo: "629", descripcion: "MUSLO CUADRIL DESPRESADO POR KG" },
-  { codigo: "630", descripcion: "ALAS DESPRESADAS POR KG" },
-  { codigo: "631", descripcion: "FILET FRESCO DESPRESADO POR KG (E)" },
-  { codigo: "632", descripcion: "CARCASA DESPRESADA POR KG" },
-  { codigo: "642", descripcion: "QUESO PARMESANO X KG" },
-  { codigo: "681", descripcion: "FILET EN BOLSA CONG DESPRESADO POR KG" },
-  { codigo: "687", descripcion: "CUADRIL DESPRESADO POR KG" },
-  { codigo: "688", descripcion: "PIERNITAS DESPRESADA POR KG" },
-  { codigo: "690", descripcion: "MUSLO A GRANEL DESPRESADO" },
-  { codigo: "693", descripcion: "FILET DE MUSLO DESPRESADO POR KG" },
-  { codigo: "699", descripcion: "MUSLO DESPRESADO EN BANDEJA" },
-  { codigo: "700", descripcion: "ALAS DESPRESADAS EN BANDEJA" },
-  { codigo: "829", descripcion: "FILETE DE PECHUGA PROAGRO A GRANEL 5 KG" },
-  { codigo: "860", descripcion: "SALCHICHAS VIENA ALIMEX 32 X 225GRS" },
-  { codigo: "870", descripcion: "HIGADO (EMPACADO)" },
-  { codigo: "922", descripcion: "HUEVOS DE CONSUMO TUNAL TIPO B 1X12UNI" },
-  { codigo: "927", descripcion: "MORTADELA ESP. CARACAS 10X900GRS" },
-  { codigo: "934", descripcion: "PULPA DE CERDO DEPOSTADA" },
-  { codigo: "952", descripcion: "HUEVOS DE CONSUMO CLASE B 1X12 UND" },
-  { codigo: "973", descripcion: "HARINA DE MAIZ 1X20UNID" },
-  { codigo: "979", descripcion: "HUEVOS DE CONSUMO CLASE A 1X12UNID" },
-  { codigo: "993", descripcion: "HUEVOS CONSUMO EXTRA TUNAL 1X12UNI" },
-  { codigo: "995", descripcion: "ESPAL. AHUM T/VISKING ITALICO 6UNDX3.2KG" },
-  { codigo: "1051", descripcion: "MORTADELA ESP. CARACAS 10X500GRS" },
-  { codigo: "1057", descripcion: "QUESO AMARILLO ESPECIAL" },
-  { codigo: "1088", descripcion: "CHULETA FRESCA IBERICO POR KG" },
-  { codigo: "1089", descripcion: "CREMA DE LECHE PURISIMA 12X250GRS" },
-  { codigo: "1091", descripcion: "CREMA DE LECHE PURISIMA 6 X 500 GRS" },
-  { codigo: "1094", descripcion: "PASTA POR KG" },
-  { codigo: "1098", descripcion: "JUGO DE NARANJA EL TUNAL 27X200ML" },
-  { codigo: "1099", descripcion: "NECTAR DE MANZANA EL TUNAL 27X200ML" },
-  { codigo: "1100", descripcion: "NECTAR DE PERA EL TUNAL 27X200ML" },
-  { codigo: "1103", descripcion: "MANTEQUILLA SIN SAL PURISIMA 18X200GR" },
-  { codigo: "1181", descripcion: "NECTAR DE DURAZNO EL TUNAL 27X200ML" },
-  { codigo: "1206", descripcion: "ARROZ GLORIA CLASICO 24X1KG" },
-  { codigo: "1241", descripcion: "POLLO ENTERO JUAN POLLO POR KG" },
-  { codigo: "1242", descripcion: "MORT. CHORIZO ESPECIAL CDZ X KG" },
-  { codigo: "1250", descripcion: "NECTAR DE PERA EL TUNAL12 X 500ML" },
-  { codigo: "1251", descripcion: "NECTAR DE DURAZNO EL TUNAL 12 X 500ML" },
-  { codigo: "1259", descripcion: "MORTADELA T/ESPECIAL MAXI CARACAS 6UNDX3.3KG" },
-  { codigo: "1264", descripcion: "BANDEJA ECOTRAY NEGRA 1X100 UND" },
-  { codigo: "1268", descripcion: "LECHE BARISTA PURISIMA 1X12 LTRS" },
-  { codigo: "1276", descripcion: "FILET ESP. MILANESA SUPREMA POR KG" },
-  { codigo: "1277", descripcion: "MUSLO ESPECIAL SIN CADERA POR KG" },
-  { codigo: "1311", descripcion: "NECTAR DE MANZANA LIGHT EL TUNAL 1X12LTRS" },
-  { codigo: "1312", descripcion: "NECTAR DE PERA LIGHT EL TUNAL 1X12LTRS" },
-  { codigo: "1314", descripcion: "CREMA DE LECHE MONTE ADENTRO 32 X 250GR" },
-  { codigo: "1326", descripcion: "MOLLEJAS LOS LLANOS POR KG" },
-  { codigo: "1334", descripcion: "HIGADO (GRANEL) LOS LLANOS" },
-  { codigo: "1342", descripcion: "ARROZ GLORIA PREMIUM 24X900GR" },
-  { codigo: "1343", descripcion: "POLLO ESPECIAL DE 1RA LOS LLANOS (E)" },
-  { codigo: "1360", descripcion: "PATATAS FRESCAS MARQUISE 4X2.5KG" },
-  { codigo: "1381", descripcion: "HUEVOS ESTUCH PULPA EL TUNAL 15 X 20" },
-  { codigo: "1397", descripcion: "CARAOTAS POR KG" },
-  { codigo: "1409", descripcion: "FILET DE PECHUGA LOS LLANOS POR KG" },
-  { codigo: "1419", descripcion: "ACEITE DE SOYA DIANA 12X760ML" },
-  { codigo: "1428", descripcion: "FILET DE PECHUGA TIPO A CONGELADO POR KG" },
-  { codigo: "1441", descripcion: "PAN HPM BLANCO GLUTEN FREE 1KGX20UND" },
-  { codigo: "1445", descripcion: "TOCINO FRESCO ASTURIAS X KG" },
-  { codigo: "1446", descripcion: "CHULETA FRESCA ASTURIAS POR KG" },
-  { codigo: "1461", descripcion: "MORT ESTANDAR ASTURIAS X KG" },
-  { codigo: "1462", descripcion: "MORT. ESPECIAL COCIDA ASTURIAS X KG" },
-  { codigo: "1463", descripcion: "MORT. SUPERIOR ASTURIAS X KG" },
-  { codigo: "1464", descripcion: "MORT. NAVIDE\xD1A ASTURIAS XKG" },
-  { codigo: "1477", descripcion: "RECORTE DE CHARCUTERIA POR KG" },
-  { codigo: "1478", descripcion: "POLLO LLANERITO POR KG" },
-  { codigo: "1479", descripcion: "ACEITE DE SOYA DIANA 12X900ML" },
-  { codigo: "1489", descripcion: "AZUCAR REFINADA D CASTA 1KGX20UND" },
-  { codigo: "1493", descripcion: "GATORADE 500X12UND" },
-  { codigo: "1494", descripcion: "MORTADELA ESP D/POLLO LOS LLANOS 10UNDX900GR" },
-  { codigo: "1496", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR" },
-  { codigo: "1503", descripcion: "CHURRASCO DE MUSLO POR KG" },
-  { codigo: "1504", descripcion: "CHUPETICA DE POLLO POR KG" },
-  { codigo: "1507", descripcion: "AZUCAR BLANCA ESPERANZA 1X20ND" },
-  { codigo: "1511", descripcion: "MORT. PECHUGA DE POLLO ASTURIAS X KG" },
-  { codigo: "1512", descripcion: "MORT DE PAVO ASTURIAS X KG" },
-  { codigo: "1515", descripcion: "LECHE POLVO COMPLETA PURISIMA 24X200GRS" },
-  { codigo: "1516", descripcion: "LECHE POLVO COMPLETA PURISIMA 24X400GR" },
-  { codigo: "1517", descripcion: "LECHE POLVO COMPLETA PURISIMA 12X900GRS" },
-  { codigo: "1519", descripcion: "MORTADELA ESP D/POLLO SALPICAO 10UNDX900GR" },
-  { codigo: "1521", descripcion: "MORT. ECONOM COCIDA ASTURIAS X KG" },
-  { codigo: "1522", descripcion: "MORT. TIPO AREPERO ASTURIAS X KG" },
-  { codigo: "1524", descripcion: "POLLO BRASA POR KG" },
-  { codigo: "1526", descripcion: "MORTADELITA ASTURIAS X BOLSA" },
-  { codigo: "1536", descripcion: "LECHE EN POLVO VENCAMPO 10X1KG" },
-  { codigo: "1543", descripcion: "AZUCAR BLANCA VENCAMPO 1X20ND" },
-  { codigo: "1544", descripcion: "LECHE EN POLVO VENCAMPO 20X500GR" },
-  { codigo: "1549", descripcion: "ARROZ BLANCO VENCAMPO 24X900GR" },
-  { codigo: "1550", descripcion: "AZUCAR BLANCA VENCAMPO 1X24ND" },
-  { codigo: "1551", descripcion: "ACEITE VENCAMPO 12X900ML" },
-  { codigo: "1553", descripcion: "ACEITE DE SOYA A GRANEL" },
-  { codigo: "1555", descripcion: "LECHE EN POLVO VENCAMPO 20X400GR" },
-  { codigo: "1556", descripcion: "LECHE EN POLVO VENCAMPO 10X900GR" },
-  { codigo: "1561", descripcion: "MORT. PAVO TIPO SHOULDER ASTURIAS POR KG" },
-  { codigo: "1562", descripcion: "MORT. ESPECIAL COCIDA SALPICAO X KG" },
-  { codigo: "1563", descripcion: "MORT. ESTANDAR SALPICAO X KG" },
-  { codigo: "1564", descripcion: "MORTADELA EXTRA ASTURIAS X KG" },
-  { codigo: "1568", descripcion: "POLLO VENCAMPO POR KG" },
-  { codigo: "1569", descripcion: "PATATAS FRESCAS DOBLE COBERTURA 4X2.5KG" },
-  { codigo: "1571", descripcion: "AZUCAR VENCAMPO 1X20ND" },
-  { codigo: "1572", descripcion: "CAJAS DE PIZZA 1X100" },
-  { codigo: "1573", descripcion: "ARVEJAS POR KILO" },
-  { codigo: "1574", descripcion: "LECHE EN POLVO VENCAMPO 10X400GR" },
-  { codigo: "1575", descripcion: "QUESO MOZZARELLA CORLASA 3.5KG X 4 UND" },
-  { codigo: "1576", descripcion: "QUESO CREMA KRAFT 1.36 KG X 6 UND" },
-  { codigo: "1577", descripcion: "QUESO CREMA KRAFT 226 GR X 36 UND" },
-  { codigo: "1578", descripcion: "ARROZ BLANCO VENCAMPO 24X1KG" },
-  { codigo: "1579", descripcion: "LECHE EN POLVO VENCAMPO 10X500GR" },
-  { codigo: "1580", descripcion: "CARAOTAS NEG. VENCAMPO 40X500GR" },
-  { codigo: "1584", descripcion: "REFRESCO 355ML X 16UND" },
-  { codigo: "1585", descripcion: "AGUA MINERAL 300ML X 24UND" },
-  { codigo: "1586", descripcion: "PAN DE HAMBURGUESA POR PAQUETE" },
-  { codigo: "1587", descripcion: "JUGO PASTERIZADO 250ML X 24UND" },
-  { codigo: "1588", descripcion: "REFRESCO 400ML X 15 UND" },
-  { codigo: "1589", descripcion: "QUESO PECORINO DE MI FINCA X KG" },
-  { codigo: "1590", descripcion: "QUESO PECORINO CON PIMIENTA DE MI FINCA X KG" },
-  { codigo: "1591", descripcion: "QUESO AMARILLO TIPO EDAM BARRA DE MI FINCA X KG" },
-  { codigo: "1592", descripcion: "SALMON POR KILO" },
-  { codigo: "1593", descripcion: "NECTAR DE JUCOSA TB DURAZNO 12X1L" },
-  { codigo: "1594", descripcion: "NECTAR VARIADO 12X1L" },
-  { codigo: "1595", descripcion: "NECTAR JUCOSA TB PERA 12X1L" },
-  { codigo: "1596", descripcion: "HARINA POR KG" },
-  { codigo: "1597", descripcion: "PAN DE SANDWICH BLANCO E INTEGRAL POR PAQUETE" },
-  { codigo: "1598", descripcion: "PAN ARABE Y CASABE POR PAQUETE" },
-  { codigo: "1599", descripcion: "MORT. NAVIDE\xD1A SALPICAO X KG" },
-  { codigo: "1600", descripcion: "FS QUESO AMARILLO TIPO EDAM BARRA DE MI FINCA X KG" },
-  { codigo: "1601", descripcion: "BANDEJAS VARIAS REFERENCIAS CT1 / JT1" },
-  { codigo: "1602", descripcion: "QUESO MOZARELLA POR KG" },
-  { codigo: "1603", descripcion: "SALCHICHON POR KG" },
-  { codigo: "1604", descripcion: "SALAMI Y PEPERONI POR KG" },
-  { codigo: "1605", descripcion: "QUESO DE MANO POR KG" },
-  { codigo: "1606", descripcion: "QUESO GUAYANES - AMARILLO - PAISA POR KG" },
-  { codigo: "1607", descripcion: "PULPA DE CERDO POR KG" },
-  { codigo: "1608", descripcion: "QUESO BLANCO MOZZARELLA MI FINCA" },
-  { codigo: "1609", descripcion: "PESCADERIA (CAMARON,CALAMAR,MEJILLON,PULPO,PEPITONA,MERLUZA) POR KG" },
-  { codigo: "1610", descripcion: "CHAMPI\xD1ONES Y ACEITUNAS NEGRAS" },
-  { codigo: "1611", descripcion: "PALMITO Y PEPINILLOS" },
-  { codigo: "1612", descripcion: "RICOTA SIN SAL, QUESO PALMITA POR KG" },
-  { codigo: "1613", descripcion: "FILET DE PECHUGA INDUST. LIGHT POR KG" },
-  { codigo: "1614", descripcion: "FILET DE PECHUGA A GRANEL TROPICAL POR KG" },
-  { codigo: "1616", descripcion: "PAN DE PERRO CALIENTE POR PAQUETE" },
-  { codigo: "1617", descripcion: "PAPAS RALLADAS PARA PERRO CALIENTE POR PAQUETE" },
-  { codigo: "1618", descripcion: "SERVILLETAS, TOALLIN Y LANILLA" },
-  { codigo: "1619", descripcion: "TE DE MANZANILLA Y FRUTOS ROJOS" },
-  { codigo: "1620", descripcion: "VINAGRE POR GALON" },
-  { codigo: "1621", descripcion: "QUESO DURO POR KG" },
-  { codigo: "1622", descripcion: "LECHE EN POLVO VENCAMPO 24X125GR" },
-  { codigo: "1623", descripcion: "MINI TOCINO ASTURIAS X POR KG" },
-  { codigo: "1624", descripcion: "MORT. ESP D/POLLO ASTURIAS 20X500GR" },
-  { codigo: "1625", descripcion: "MORTADELA ESP D/POLLO SALPICAO 20UNDX500GR" },
-  { codigo: "1626", descripcion: "CHOCOLATE OSCURO - BLANCO BITTER" },
-  { codigo: "1627", descripcion: "LLUVIA DE CHOCOLATE - LLUVIA DE COLORES - GOTAS DE CHOCOLATE" },
-  { codigo: "1628", descripcion: "VINO BLANCO - VINO TINTO POR LITRO" },
-  { codigo: "1629", descripcion: "LEVADURA, POLVO DE HORNEAR Y BICABORNATO DE SODIO POR KG" },
-  { codigo: "1630", descripcion: "PAN JUMBO DELI BLANCO - DELI OREGANO POR PAQ" },
-  { codigo: "1631", descripcion: "PAN CAPILLA POR UND" },
-  { codigo: "1632", descripcion: "PAN RALLADO POR KG" },
-  { codigo: "1633", descripcion: "CACAO Y CHOCOLATE EN POLVO POR KG" },
-  { codigo: "1634", descripcion: "TOMATE ENTERO PELADO POR LATA" },
-  { codigo: "1635", descripcion: "MAIZINA POR KG" },
-  { codigo: "1636", descripcion: "ESENCIAS VARIAS" },
-  { codigo: "1637", descripcion: "QUESO PARMESANO RALLADO POR KG" },
-  { codigo: "1638", descripcion: "QUESO PAISA POR KG" },
-  { codigo: "1639", descripcion: "SIERRA EN RUEDA Y PARGO ENTERO POR KG" },
-  { codigo: "1640", descripcion: "UTENSILIOS DE LIMPIEZA (CEPILLO, ESPONJA,GUANTES,GORROS,PA\xD1OS)" },
-  { codigo: "1641", descripcion: "QUIMICOS (CLORO, DESENGRASANTE,DESINFECTANTE,JABON)" },
-  { codigo: "1642", descripcion: "ARVEJAS VENCAMPO 25 UND X 400GR" },
-  { codigo: "1643", descripcion: "LOMO DE CERDO AHUM. SALPICAO POR KG" },
-  { codigo: "1644", descripcion: "CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR" },
-  { codigo: "1646", descripcion: "ACEITE DE MAIZ POR LITRO" },
-  { codigo: "1647", descripcion: "TETERAS POR UND VARIAS REFERENCIAS" },
-  { codigo: "1648", descripcion: "MIEL POR LITRO" },
-  { codigo: "1649", descripcion: "LUMPIAS CONGELADAS POR UND" },
-  { codigo: "1650", descripcion: "CEREALES VARIOS POR UND" },
-  { codigo: "1651", descripcion: "SALSAS VARIAS REFERENCIAS POR UND" },
-  { codigo: "1654", descripcion: "PONCHE DE CREMA - RON A\xD1EJO - LECHE DE COCO" },
-  { codigo: "1655", descripcion: "AZUCAR VENPORT 1X20ND" },
-  { codigo: "1659", descripcion: "PUNTA TRASERA POR KG (UR)" },
-  { codigo: "1660", descripcion: "CARNE MOLIDA PICADO DE BOVINO XKG (UR)" },
-  { codigo: "1661", descripcion: "BIFE ANCHO RYBEYE (UR) POR KG" },
-  { codigo: "1662", descripcion: "CONFITERIA (TORONTO, BOLERO, TURRON, ETC)" }
-];
-var MAPA_PRODUCTOS_CODIZULCA = new Map(
-  PRODUCTOS_CODIZULCA.map((p) => [p.codigo, { ...p, matchExacto: true }])
-);
-var PRODUCTOS_HISTORICOS_COMPLEMENTARIOS = {
-  "1497": { codigo: "1497", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 20UNDX500GR", matchExacto: true },
-  "047": { codigo: "047", descripcion: "NUGGET CORRAL DE 460GM", matchExacto: true },
-  "47": { codigo: "047", descripcion: "NUGGET CORRAL DE 460GM", matchExacto: true },
-  "270": { codigo: "270", descripcion: "NUGGETS CORRAL 12X0.460GR", matchExacto: true },
-  "1599": { codigo: "1599", descripcion: "MORT. NAVIDE\xD1A SALPICAO X KG", matchExacto: true }
-};
-var HOMOLOGACION_EAN_PLU_ALKOSTO = {
-  "7590377000220": { codigo: "1543", descripcion: "AZUCAR BLANCA VENCAMPO 1X20ND", matchExacto: true },
-  "7590377000411": { codigo: "1642", descripcion: "ARVEJAS VENCAMPO 25 UND X 400GR", matchExacto: true },
-  "7590377000459": { codigo: "1644", descripcion: "CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR", matchExacto: true },
-  "7590377000503": { codigo: "1574", descripcion: "LECHE EN POLVO VENCAMPO 10X400GR", matchExacto: true },
-  "7590377000510": { codigo: "1556", descripcion: "LECHE EN POLVO VENCAMPO 10X900GR", matchExacto: true },
-  "7590377000077": { codigo: "1496", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR", matchExacto: true },
-  "7590377000589": { codigo: "1497", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 20UNDX500GR", matchExacto: true },
-  "7591289609129": { codigo: "21", descripcion: "MORTADELA ESP D/POLLO CORRAL 1X12UNI", matchExacto: true },
-  "7591289400023": { codigo: "047", descripcion: "NUGGET CORRAL DE 460GM", matchExacto: true },
-  "5412873178161": { codigo: "1360", descripcion: "PATATAS FRESCAS MARQUISE 4X2.5KG", matchExacto: true },
-  "7591210000513": { codigo: "1091", descripcion: "CREMA DE LECHE PURISIMA 6 X 500 GRS", matchExacto: true },
-  "7591210000544": { codigo: "1089", descripcion: "CREMA DE LECHE PURISIMA 12X250GRS", matchExacto: true },
-  "021000061778": { codigo: "1577", descripcion: "QUESO CREMA KRAFT 226 GR X 36 UND", matchExacto: true },
-  "21000061778": { codigo: "1577", descripcion: "QUESO CREMA KRAFT 226 GR X 36 UND", matchExacto: true },
-  "100881": { codigo: "1512", descripcion: "MORT DE PAVO ASTURIAS X KG", matchExacto: true },
-  "100882": { codigo: "1511", descripcion: "MORT. PECHUGA DE POLLO ASTURIAS X KG", matchExacto: true },
-  "100929": { codigo: "1463", descripcion: "MORT. SUPERIOR ASTURIAS X KG", matchExacto: true },
-  "100281": { codigo: "1575", descripcion: "QUESO MOZZARELLA CORLASA 3.5KG X 4 UND", matchExacto: true },
-  "100253": { codigo: "46", descripcion: "NUGGETS INSTITUCIONAL CORRAL POR KG", matchExacto: true }
-};
-var CODIGOS_ALFABETICOS_PROHIBIDOS = /* @__PURE__ */ new Set([
-  "LPV",
-  "UTH",
-  "UHT",
-  "QS",
-  "JUGOS",
-  "BEBIDAS",
-  "POLLO",
-  "FILET",
-  "MUSLO",
-  "ALAS",
-  "QUESO",
-  "ACEITE",
-  "AZUCAR",
-  "ARROZ",
-  "HUEVOS",
-  "PATATAS",
-  "S/C",
-  "SC",
-  "S/N",
-  "SN",
-  "N/A",
-  "NA",
-  "NULL",
-  "UNDEFINED",
-  "NONE",
-  "CJ",
-  "CJA",
-  "CAJA",
-  "CAJAS",
-  "BLT",
-  "BTO",
-  "BULTO",
-  "BULTOS",
-  "UND",
-  "UNID",
-  "UNIDAD",
-  "UNIDADES",
-  "KG",
-  "KGS",
-  "KILO",
-  "KILOS"
-]);
 function normalizeEncodingEspeciales(raw) {
   if (!raw) return "";
   return String(raw).replace(/Ã‘/g, "\xD1").replace(/Ã±/g, "\xF1").replace(/\uFFFD/g, "\xD1").replace(/DO\?A\s+FLORA/gi, "DO\xD1A FLORA").replace(/NAVIDE\?A/gi, "NAVIDE\xD1A");
@@ -450,60 +159,6 @@ function extractPresentationFeatures(descNorm) {
     isPerKg
   };
 }
-var BRAND_AND_GENERIC_TOKENS = /* @__PURE__ */ new Set([
-  "VENCAMPO",
-  "VENPORT",
-  "PURISIMA",
-  "ASTURIAS",
-  "ASTURIA",
-  "SALPICAO",
-  "CORRAL",
-  "MARQUISE",
-  "CORLASA",
-  "KRAFT",
-  "FINCA",
-  "JUCOSA",
-  "SIMON",
-  "SAN",
-  "MONTANA",
-  "TORONDOY",
-  "FRESCAMPO",
-  "AURORA",
-  "PRADERA",
-  "VALLE",
-  "HONDO",
-  "FLORA",
-  "DONA",
-  "DO\xD1A",
-  "TROPICAL",
-  "DELI",
-  "JUMBO",
-  "COMPLETA",
-  "ESPECIAL",
-  "ESP",
-  "SUPERIOR",
-  "EXTRA",
-  "ESTANDAR",
-  "ECONOM",
-  "ECONOMICA",
-  "INSTITUCIONAL",
-  "INDUSTRIAL",
-  "INDUST",
-  "BLANCO",
-  "BLANCA",
-  "BLANCAS",
-  "NEGRO",
-  "NEGRA",
-  "NEGRAS",
-  "NEG",
-  "VERDE",
-  "VERDES",
-  "ROJO",
-  "ROJA",
-  "ROJAS",
-  "AMARILLO",
-  "AMARILLA"
-]);
 function isBrandOrPresentationToken(token) {
   const clean = String(token || "").trim().toUpperCase().replace(/[().,/]/g, "");
   if (!clean) return true;
@@ -796,41 +451,365 @@ function matchProductoCodizulca(codigoLeido, descripcionLeida) {
 function formatCatalogoCodizulcaForPrompt() {
   return PRODUCTOS_CODIZULCA.map((p) => `${p.codigo} - ${p.descripcion}`).join("\n");
 }
+var PRODUCTOS_CODIZULCA, MAPA_PRODUCTOS_CODIZULCA, PRODUCTOS_HISTORICOS_COMPLEMENTARIOS, HOMOLOGACION_EAN_PLU_ALKOSTO, CODIGOS_ALFABETICOS_PROHIBIDOS, BRAND_AND_GENERIC_TOKENS;
+var init_productosCodizulca = __esm({
+  "src/services/productosCodizulca.ts"() {
+    init_define_import_meta_env();
+    PRODUCTOS_CODIZULCA = [
+      { codigo: "9", descripcion: "FILETE DE PECHUGA A GRANEL POR KG" },
+      { codigo: "21", descripcion: "MORTADELA ESP D/POLLO CORRAL 1X12UNI" },
+      { codigo: "28", descripcion: "HUEVOS DE CONSUMO TUNAL TIPO A 1X12UNI" },
+      { codigo: "46", descripcion: "NUGGETS INSTITUCIONAL CORRAL POR KG" },
+      { codigo: "73", descripcion: "GALLINA DESNUDA POR KG" },
+      { codigo: "75", descripcion: "PECHUGA CON HUESO POR KG" },
+      { codigo: "96", descripcion: "QUESO MOZZARELLA ESPECIAL EL LUCERO (E)" },
+      { codigo: "130", descripcion: "POLLO CORRAL POR KG" },
+      { codigo: "151", descripcion: "QUESO MOZARELLA EN BARRA DO\xD1A FLORA" },
+      { codigo: "170", descripcion: "TOCINETA AHUM S/CUERO ALIMEX X KG" },
+      { codigo: "171", descripcion: "JAMON COC. SUPERIOR ALIMEX 1X5.9KG" },
+      { codigo: "172", descripcion: "ESPALDA COCIDA ALIMEX 1X4.6KG" },
+      { codigo: "174", descripcion: "MORTADELA TAPARA ALIMEX DE 6X3.5KG" },
+      { codigo: "176", descripcion: "SALCHICHA VIENA ALIMEX 8 X 800 GRS" },
+      { codigo: "177", descripcion: "SALCHICHA VIENA ALIMEX 16 X 450 GRS" },
+      { codigo: "179", descripcion: "LECHE COMPLETA PURISIMA1X12LTRS" },
+      { codigo: "180", descripcion: "LECHE DESCREMADA PURISIMA1X12LTS" },
+      { codigo: "181", descripcion: "JUGO DE NARANJA EL TUNAL 1X12LTRS" },
+      { codigo: "182", descripcion: "NECTAR DE MANZANA EL TUNAL 1X12LTRS" },
+      { codigo: "183", descripcion: "NECTAR DE PERA EL TUNAL 1X12LTRS" },
+      { codigo: "184", descripcion: "NECTAR DE DURAZNO EL TUNAL 1X12LTRS" },
+      { codigo: "185", descripcion: "TE CON LIMON EL TUNAL 1X12LTRS" },
+      { codigo: "186", descripcion: "TE CON DURAZNO EL TUNAL 1X12LTRS" },
+      { codigo: "241", descripcion: "ESPAL. AHUM T/VISKING ALIMEX 6X3.2" },
+      { codigo: "242", descripcion: "LECHE DESLACTOSADA PURISIMA1X12LT" },
+      { codigo: "302", descripcion: "MANTEQUILLA CON SAL PURISIMA BARRA 18X200GR" },
+      { codigo: "306", descripcion: "ATUN NATURAL 24X170GRS" },
+      { codigo: "337", descripcion: "JAMON COCIDO ESTANDAR ITALICO X KG" },
+      { codigo: "340", descripcion: "CHULETA AHUMADA ALIMEX X KG" },
+      { codigo: "353", descripcion: "MAYONESA MAVESA 445 GRS X 12 UND" },
+      { codigo: "354", descripcion: "MARGARINA MAVESA 500 GRS X 12 UND" },
+      { codigo: "360", descripcion: "KETCHUP PAMPERO 397 GRS X 24 UND" },
+      { codigo: "364", descripcion: "MAVESA VINAGRE DE ALCOHOL 1LX12UND" },
+      { codigo: "388", descripcion: "MAVESA ADEREZO MAYONESA 3.6GX4UN" },
+      { codigo: "390", descripcion: "PAMPERO SALSA TOMATE 4.2KGX4UN" },
+      { codigo: "393", descripcion: "MOLLEJA (EMPACADA)" },
+      { codigo: "439", descripcion: "ESPAL AHUM.T/AREPERO ALIMEX 12X1,6KG" },
+      { codigo: "469", descripcion: "HUEVOS ESTUCH. PLAST. TUNAL 12 X 30" },
+      { codigo: "485", descripcion: "PAP. ALUM DOMESTICO 7M 1X30" },
+      { codigo: "518", descripcion: "PASTA PREMIUM TIPO VERMICELLI 12X1KG" },
+      { codigo: "629", descripcion: "MUSLO CUADRIL DESPRESADO POR KG" },
+      { codigo: "630", descripcion: "ALAS DESPRESADAS POR KG" },
+      { codigo: "631", descripcion: "FILET FRESCO DESPRESADO POR KG (E)" },
+      { codigo: "632", descripcion: "CARCASA DESPRESADA POR KG" },
+      { codigo: "642", descripcion: "QUESO PARMESANO X KG" },
+      { codigo: "681", descripcion: "FILET EN BOLSA CONG DESPRESADO POR KG" },
+      { codigo: "687", descripcion: "CUADRIL DESPRESADO POR KG" },
+      { codigo: "688", descripcion: "PIERNITAS DESPRESADA POR KG" },
+      { codigo: "690", descripcion: "MUSLO A GRANEL DESPRESADO" },
+      { codigo: "693", descripcion: "FILET DE MUSLO DESPRESADO POR KG" },
+      { codigo: "699", descripcion: "MUSLO DESPRESADO EN BANDEJA" },
+      { codigo: "700", descripcion: "ALAS DESPRESADAS EN BANDEJA" },
+      { codigo: "829", descripcion: "FILETE DE PECHUGA PROAGRO A GRANEL 5 KG" },
+      { codigo: "860", descripcion: "SALCHICHAS VIENA ALIMEX 32 X 225GRS" },
+      { codigo: "870", descripcion: "HIGADO (EMPACADO)" },
+      { codigo: "922", descripcion: "HUEVOS DE CONSUMO TUNAL TIPO B 1X12UNI" },
+      { codigo: "927", descripcion: "MORTADELA ESP. CARACAS 10X900GRS" },
+      { codigo: "934", descripcion: "PULPA DE CERDO DEPOSTADA" },
+      { codigo: "952", descripcion: "HUEVOS DE CONSUMO CLASE B 1X12 UND" },
+      { codigo: "973", descripcion: "HARINA DE MAIZ 1X20UNID" },
+      { codigo: "979", descripcion: "HUEVOS DE CONSUMO CLASE A 1X12UNID" },
+      { codigo: "993", descripcion: "HUEVOS CONSUMO EXTRA TUNAL 1X12UNI" },
+      { codigo: "995", descripcion: "ESPAL. AHUM T/VISKING ITALICO 6UNDX3.2KG" },
+      { codigo: "1051", descripcion: "MORTADELA ESP. CARACAS 10X500GRS" },
+      { codigo: "1057", descripcion: "QUESO AMARILLO ESPECIAL" },
+      { codigo: "1088", descripcion: "CHULETA FRESCA IBERICO POR KG" },
+      { codigo: "1089", descripcion: "CREMA DE LECHE PURISIMA 12X250GRS" },
+      { codigo: "1091", descripcion: "CREMA DE LECHE PURISIMA 6 X 500 GRS" },
+      { codigo: "1094", descripcion: "PASTA POR KG" },
+      { codigo: "1098", descripcion: "JUGO DE NARANJA EL TUNAL 27X200ML" },
+      { codigo: "1099", descripcion: "NECTAR DE MANZANA EL TUNAL 27X200ML" },
+      { codigo: "1100", descripcion: "NECTAR DE PERA EL TUNAL 27X200ML" },
+      { codigo: "1103", descripcion: "MANTEQUILLA SIN SAL PURISIMA 18X200GR" },
+      { codigo: "1181", descripcion: "NECTAR DE DURAZNO EL TUNAL 27X200ML" },
+      { codigo: "1206", descripcion: "ARROZ GLORIA CLASICO 24X1KG" },
+      { codigo: "1241", descripcion: "POLLO ENTERO JUAN POLLO POR KG" },
+      { codigo: "1242", descripcion: "MORT. CHORIZO ESPECIAL CDZ X KG" },
+      { codigo: "1250", descripcion: "NECTAR DE PERA EL TUNAL12 X 500ML" },
+      { codigo: "1251", descripcion: "NECTAR DE DURAZNO EL TUNAL 12 X 500ML" },
+      { codigo: "1259", descripcion: "MORTADELA T/ESPECIAL MAXI CARACAS 6UNDX3.3KG" },
+      { codigo: "1264", descripcion: "BANDEJA ECOTRAY NEGRA 1X100 UND" },
+      { codigo: "1268", descripcion: "LECHE BARISTA PURISIMA 1X12 LTRS" },
+      { codigo: "1276", descripcion: "FILET ESP. MILANESA SUPREMA POR KG" },
+      { codigo: "1277", descripcion: "MUSLO ESPECIAL SIN CADERA POR KG" },
+      { codigo: "1311", descripcion: "NECTAR DE MANZANA LIGHT EL TUNAL 1X12LTRS" },
+      { codigo: "1312", descripcion: "NECTAR DE PERA LIGHT EL TUNAL 1X12LTRS" },
+      { codigo: "1314", descripcion: "CREMA DE LECHE MONTE ADENTRO 32 X 250GR" },
+      { codigo: "1326", descripcion: "MOLLEJAS LOS LLANOS POR KG" },
+      { codigo: "1334", descripcion: "HIGADO (GRANEL) LOS LLANOS" },
+      { codigo: "1342", descripcion: "ARROZ GLORIA PREMIUM 24X900GR" },
+      { codigo: "1343", descripcion: "POLLO ESPECIAL DE 1RA LOS LLANOS (E)" },
+      { codigo: "1360", descripcion: "PATATAS FRESCAS MARQUISE 4X2.5KG" },
+      { codigo: "1381", descripcion: "HUEVOS ESTUCH PULPA EL TUNAL 15 X 20" },
+      { codigo: "1397", descripcion: "CARAOTAS POR KG" },
+      { codigo: "1409", descripcion: "FILET DE PECHUGA LOS LLANOS POR KG" },
+      { codigo: "1419", descripcion: "ACEITE DE SOYA DIANA 12X760ML" },
+      { codigo: "1428", descripcion: "FILET DE PECHUGA TIPO A CONGELADO POR KG" },
+      { codigo: "1441", descripcion: "PAN HPM BLANCO GLUTEN FREE 1KGX20UND" },
+      { codigo: "1445", descripcion: "TOCINO FRESCO ASTURIAS X KG" },
+      { codigo: "1446", descripcion: "CHULETA FRESCA ASTURIAS POR KG" },
+      { codigo: "1461", descripcion: "MORT ESTANDAR ASTURIAS X KG" },
+      { codigo: "1462", descripcion: "MORT. ESPECIAL COCIDA ASTURIAS X KG" },
+      { codigo: "1463", descripcion: "MORT. SUPERIOR ASTURIAS X KG" },
+      { codigo: "1464", descripcion: "MORT. NAVIDE\xD1A ASTURIAS XKG" },
+      { codigo: "1477", descripcion: "RECORTE DE CHARCUTERIA POR KG" },
+      { codigo: "1478", descripcion: "POLLO LLANERITO POR KG" },
+      { codigo: "1479", descripcion: "ACEITE DE SOYA DIANA 12X900ML" },
+      { codigo: "1489", descripcion: "AZUCAR REFINADA D CASTA 1KGX20UND" },
+      { codigo: "1493", descripcion: "GATORADE 500X12UND" },
+      { codigo: "1494", descripcion: "MORTADELA ESP D/POLLO LOS LLANOS 10UNDX900GR" },
+      { codigo: "1496", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR" },
+      { codigo: "1503", descripcion: "CHURRASCO DE MUSLO POR KG" },
+      { codigo: "1504", descripcion: "CHUPETICA DE POLLO POR KG" },
+      { codigo: "1507", descripcion: "AZUCAR BLANCA ESPERANZA 1X20ND" },
+      { codigo: "1511", descripcion: "MORT. PECHUGA DE POLLO ASTURIAS X KG" },
+      { codigo: "1512", descripcion: "MORT DE PAVO ASTURIAS X KG" },
+      { codigo: "1515", descripcion: "LECHE POLVO COMPLETA PURISIMA 24X200GRS" },
+      { codigo: "1516", descripcion: "LECHE POLVO COMPLETA PURISIMA 24X400GR" },
+      { codigo: "1517", descripcion: "LECHE POLVO COMPLETA PURISIMA 12X900GRS" },
+      { codigo: "1519", descripcion: "MORTADELA ESP D/POLLO SALPICAO 10UNDX900GR" },
+      { codigo: "1521", descripcion: "MORT. ECONOM COCIDA ASTURIAS X KG" },
+      { codigo: "1522", descripcion: "MORT. TIPO AREPERO ASTURIAS X KG" },
+      { codigo: "1524", descripcion: "POLLO BRASA POR KG" },
+      { codigo: "1526", descripcion: "MORTADELITA ASTURIAS X BOLSA" },
+      { codigo: "1536", descripcion: "LECHE EN POLVO VENCAMPO 10X1KG" },
+      { codigo: "1543", descripcion: "AZUCAR BLANCA VENCAMPO 1X20ND" },
+      { codigo: "1544", descripcion: "LECHE EN POLVO VENCAMPO 20X500GR" },
+      { codigo: "1549", descripcion: "ARROZ BLANCO VENCAMPO 24X900GR" },
+      { codigo: "1550", descripcion: "AZUCAR BLANCA VENCAMPO 1X24ND" },
+      { codigo: "1551", descripcion: "ACEITE VENCAMPO 12X900ML" },
+      { codigo: "1553", descripcion: "ACEITE DE SOYA A GRANEL" },
+      { codigo: "1555", descripcion: "LECHE EN POLVO VENCAMPO 20X400GR" },
+      { codigo: "1556", descripcion: "LECHE EN POLVO VENCAMPO 10X900GR" },
+      { codigo: "1561", descripcion: "MORT. PAVO TIPO SHOULDER ASTURIAS POR KG" },
+      { codigo: "1562", descripcion: "MORT. ESPECIAL COCIDA SALPICAO X KG" },
+      { codigo: "1563", descripcion: "MORT. ESTANDAR SALPICAO X KG" },
+      { codigo: "1564", descripcion: "MORTADELA EXTRA ASTURIAS X KG" },
+      { codigo: "1568", descripcion: "POLLO VENCAMPO POR KG" },
+      { codigo: "1569", descripcion: "PATATAS FRESCAS DOBLE COBERTURA 4X2.5KG" },
+      { codigo: "1571", descripcion: "AZUCAR VENCAMPO 1X20ND" },
+      { codigo: "1572", descripcion: "CAJAS DE PIZZA 1X100" },
+      { codigo: "1573", descripcion: "ARVEJAS POR KILO" },
+      { codigo: "1574", descripcion: "LECHE EN POLVO VENCAMPO 10X400GR" },
+      { codigo: "1575", descripcion: "QUESO MOZZARELLA CORLASA 3.5KG X 4 UND" },
+      { codigo: "1576", descripcion: "QUESO CREMA KRAFT 1.36 KG X 6 UND" },
+      { codigo: "1577", descripcion: "QUESO CREMA KRAFT 226 GR X 36 UND" },
+      { codigo: "1578", descripcion: "ARROZ BLANCO VENCAMPO 24X1KG" },
+      { codigo: "1579", descripcion: "LECHE EN POLVO VENCAMPO 10X500GR" },
+      { codigo: "1580", descripcion: "CARAOTAS NEG. VENCAMPO 40X500GR" },
+      { codigo: "1584", descripcion: "REFRESCO 355ML X 16UND" },
+      { codigo: "1585", descripcion: "AGUA MINERAL 300ML X 24UND" },
+      { codigo: "1586", descripcion: "PAN DE HAMBURGUESA POR PAQUETE" },
+      { codigo: "1587", descripcion: "JUGO PASTERIZADO 250ML X 24UND" },
+      { codigo: "1588", descripcion: "REFRESCO 400ML X 15 UND" },
+      { codigo: "1589", descripcion: "QUESO PECORINO DE MI FINCA X KG" },
+      { codigo: "1590", descripcion: "QUESO PECORINO CON PIMIENTA DE MI FINCA X KG" },
+      { codigo: "1591", descripcion: "QUESO AMARILLO TIPO EDAM BARRA DE MI FINCA X KG" },
+      { codigo: "1592", descripcion: "SALMON POR KILO" },
+      { codigo: "1593", descripcion: "NECTAR DE JUCOSA TB DURAZNO 12X1L" },
+      { codigo: "1594", descripcion: "NECTAR VARIADO 12X1L" },
+      { codigo: "1595", descripcion: "NECTAR JUCOSA TB PERA 12X1L" },
+      { codigo: "1596", descripcion: "HARINA POR KG" },
+      { codigo: "1597", descripcion: "PAN DE SANDWICH BLANCO E INTEGRAL POR PAQUETE" },
+      { codigo: "1598", descripcion: "PAN ARABE Y CASABE POR PAQUETE" },
+      { codigo: "1599", descripcion: "MORT. NAVIDE\xD1A SALPICAO X KG" },
+      { codigo: "1600", descripcion: "FS QUESO AMARILLO TIPO EDAM BARRA DE MI FINCA X KG" },
+      { codigo: "1601", descripcion: "BANDEJAS VARIAS REFERENCIAS CT1 / JT1" },
+      { codigo: "1602", descripcion: "QUESO MOZARELLA POR KG" },
+      { codigo: "1603", descripcion: "SALCHICHON POR KG" },
+      { codigo: "1604", descripcion: "SALAMI Y PEPERONI POR KG" },
+      { codigo: "1605", descripcion: "QUESO DE MANO POR KG" },
+      { codigo: "1606", descripcion: "QUESO GUAYANES - AMARILLO - PAISA POR KG" },
+      { codigo: "1607", descripcion: "PULPA DE CERDO POR KG" },
+      { codigo: "1608", descripcion: "QUESO BLANCO MOZZARELLA MI FINCA" },
+      { codigo: "1609", descripcion: "PESCADERIA (CAMARON,CALAMAR,MEJILLON,PULPO,PEPITONA,MERLUZA) POR KG" },
+      { codigo: "1610", descripcion: "CHAMPI\xD1ONES Y ACEITUNAS NEGRAS" },
+      { codigo: "1611", descripcion: "PALMITO Y PEPINILLOS" },
+      { codigo: "1612", descripcion: "RICOTA SIN SAL, QUESO PALMITA POR KG" },
+      { codigo: "1613", descripcion: "FILET DE PECHUGA INDUST. LIGHT POR KG" },
+      { codigo: "1614", descripcion: "FILET DE PECHUGA A GRANEL TROPICAL POR KG" },
+      { codigo: "1616", descripcion: "PAN DE PERRO CALIENTE POR PAQUETE" },
+      { codigo: "1617", descripcion: "PAPAS RALLADAS PARA PERRO CALIENTE POR PAQUETE" },
+      { codigo: "1618", descripcion: "SERVILLETAS, TOALLIN Y LANILLA" },
+      { codigo: "1619", descripcion: "TE DE MANZANILLA Y FRUTOS ROJOS" },
+      { codigo: "1620", descripcion: "VINAGRE POR GALON" },
+      { codigo: "1621", descripcion: "QUESO DURO POR KG" },
+      { codigo: "1622", descripcion: "LECHE EN POLVO VENCAMPO 24X125GR" },
+      { codigo: "1623", descripcion: "MINI TOCINO ASTURIAS X POR KG" },
+      { codigo: "1624", descripcion: "MORT. ESP D/POLLO ASTURIAS 20X500GR" },
+      { codigo: "1625", descripcion: "MORTADELA ESP D/POLLO SALPICAO 20UNDX500GR" },
+      { codigo: "1626", descripcion: "CHOCOLATE OSCURO - BLANCO BITTER" },
+      { codigo: "1627", descripcion: "LLUVIA DE CHOCOLATE - LLUVIA DE COLORES - GOTAS DE CHOCOLATE" },
+      { codigo: "1628", descripcion: "VINO BLANCO - VINO TINTO POR LITRO" },
+      { codigo: "1629", descripcion: "LEVADURA, POLVO DE HORNEAR Y BICABORNATO DE SODIO POR KG" },
+      { codigo: "1630", descripcion: "PAN JUMBO DELI BLANCO - DELI OREGANO POR PAQ" },
+      { codigo: "1631", descripcion: "PAN CAPILLA POR UND" },
+      { codigo: "1632", descripcion: "PAN RALLADO POR KG" },
+      { codigo: "1633", descripcion: "CACAO Y CHOCOLATE EN POLVO POR KG" },
+      { codigo: "1634", descripcion: "TOMATE ENTERO PELADO POR LATA" },
+      { codigo: "1635", descripcion: "MAIZINA POR KG" },
+      { codigo: "1636", descripcion: "ESENCIAS VARIAS" },
+      { codigo: "1637", descripcion: "QUESO PARMESANO RALLADO POR KG" },
+      { codigo: "1638", descripcion: "QUESO PAISA POR KG" },
+      { codigo: "1639", descripcion: "SIERRA EN RUEDA Y PARGO ENTERO POR KG" },
+      { codigo: "1640", descripcion: "UTENSILIOS DE LIMPIEZA (CEPILLO, ESPONJA,GUANTES,GORROS,PA\xD1OS)" },
+      { codigo: "1641", descripcion: "QUIMICOS (CLORO, DESENGRASANTE,DESINFECTANTE,JABON)" },
+      { codigo: "1642", descripcion: "ARVEJAS VENCAMPO 25 UND X 400GR" },
+      { codigo: "1643", descripcion: "LOMO DE CERDO AHUM. SALPICAO POR KG" },
+      { codigo: "1644", descripcion: "CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR" },
+      { codigo: "1646", descripcion: "ACEITE DE MAIZ POR LITRO" },
+      { codigo: "1647", descripcion: "TETERAS POR UND VARIAS REFERENCIAS" },
+      { codigo: "1648", descripcion: "MIEL POR LITRO" },
+      { codigo: "1649", descripcion: "LUMPIAS CONGELADAS POR UND" },
+      { codigo: "1650", descripcion: "CEREALES VARIOS POR UND" },
+      { codigo: "1651", descripcion: "SALSAS VARIAS REFERENCIAS POR UND" },
+      { codigo: "1654", descripcion: "PONCHE DE CREMA - RON A\xD1EJO - LECHE DE COCO" },
+      { codigo: "1655", descripcion: "AZUCAR VENPORT 1X20ND" },
+      { codigo: "1659", descripcion: "PUNTA TRASERA POR KG (UR)" },
+      { codigo: "1660", descripcion: "CARNE MOLIDA PICADO DE BOVINO XKG (UR)" },
+      { codigo: "1661", descripcion: "BIFE ANCHO RYBEYE (UR) POR KG" },
+      { codigo: "1662", descripcion: "CONFITERIA (TORONTO, BOLERO, TURRON, ETC)" }
+    ];
+    MAPA_PRODUCTOS_CODIZULCA = new Map(
+      PRODUCTOS_CODIZULCA.map((p) => [p.codigo, { ...p, matchExacto: true }])
+    );
+    PRODUCTOS_HISTORICOS_COMPLEMENTARIOS = {
+      "1497": { codigo: "1497", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 20UNDX500GR", matchExacto: true },
+      "047": { codigo: "047", descripcion: "NUGGET CORRAL DE 460GM", matchExacto: true },
+      "47": { codigo: "047", descripcion: "NUGGET CORRAL DE 460GM", matchExacto: true },
+      "270": { codigo: "270", descripcion: "NUGGETS CORRAL 12X0.460GR", matchExacto: true },
+      "1599": { codigo: "1599", descripcion: "MORT. NAVIDE\xD1A SALPICAO X KG", matchExacto: true }
+    };
+    HOMOLOGACION_EAN_PLU_ALKOSTO = {
+      "7590377000220": { codigo: "1543", descripcion: "AZUCAR BLANCA VENCAMPO 1X20ND", matchExacto: true },
+      "7590377000411": { codigo: "1642", descripcion: "ARVEJAS VENCAMPO 25 UND X 400GR", matchExacto: true },
+      "7590377000459": { codigo: "1644", descripcion: "CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR", matchExacto: true },
+      "7590377000503": { codigo: "1574", descripcion: "LECHE EN POLVO VENCAMPO 10X400GR", matchExacto: true },
+      "7590377000510": { codigo: "1556", descripcion: "LECHE EN POLVO VENCAMPO 10X900GR", matchExacto: true },
+      "7590377000077": { codigo: "1496", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR", matchExacto: true },
+      "7590377000589": { codigo: "1497", descripcion: "MORTADELA ESP D/POLLO ASTURIAS 20UNDX500GR", matchExacto: true },
+      "7591289609129": { codigo: "21", descripcion: "MORTADELA ESP D/POLLO CORRAL 1X12UNI", matchExacto: true },
+      "7591289400023": { codigo: "047", descripcion: "NUGGET CORRAL DE 460GM", matchExacto: true },
+      "5412873178161": { codigo: "1360", descripcion: "PATATAS FRESCAS MARQUISE 4X2.5KG", matchExacto: true },
+      "7591210000513": { codigo: "1091", descripcion: "CREMA DE LECHE PURISIMA 6 X 500 GRS", matchExacto: true },
+      "7591210000544": { codigo: "1089", descripcion: "CREMA DE LECHE PURISIMA 12X250GRS", matchExacto: true },
+      "021000061778": { codigo: "1577", descripcion: "QUESO CREMA KRAFT 226 GR X 36 UND", matchExacto: true },
+      "21000061778": { codigo: "1577", descripcion: "QUESO CREMA KRAFT 226 GR X 36 UND", matchExacto: true },
+      "100881": { codigo: "1512", descripcion: "MORT DE PAVO ASTURIAS X KG", matchExacto: true },
+      "100882": { codigo: "1511", descripcion: "MORT. PECHUGA DE POLLO ASTURIAS X KG", matchExacto: true },
+      "100929": { codigo: "1463", descripcion: "MORT. SUPERIOR ASTURIAS X KG", matchExacto: true },
+      "100281": { codigo: "1575", descripcion: "QUESO MOZZARELLA CORLASA 3.5KG X 4 UND", matchExacto: true },
+      "100253": { codigo: "46", descripcion: "NUGGETS INSTITUCIONAL CORRAL POR KG", matchExacto: true }
+    };
+    CODIGOS_ALFABETICOS_PROHIBIDOS = /* @__PURE__ */ new Set([
+      "LPV",
+      "UTH",
+      "UHT",
+      "QS",
+      "JUGOS",
+      "BEBIDAS",
+      "POLLO",
+      "FILET",
+      "MUSLO",
+      "ALAS",
+      "QUESO",
+      "ACEITE",
+      "AZUCAR",
+      "ARROZ",
+      "HUEVOS",
+      "PATATAS",
+      "S/C",
+      "SC",
+      "S/N",
+      "SN",
+      "N/A",
+      "NA",
+      "NULL",
+      "UNDEFINED",
+      "NONE",
+      "CJ",
+      "CJA",
+      "CAJA",
+      "CAJAS",
+      "BLT",
+      "BTO",
+      "BULTO",
+      "BULTOS",
+      "UND",
+      "UNID",
+      "UNIDAD",
+      "UNIDADES",
+      "KG",
+      "KGS",
+      "KILO",
+      "KILOS"
+    ]);
+    BRAND_AND_GENERIC_TOKENS = /* @__PURE__ */ new Set([
+      "VENCAMPO",
+      "VENPORT",
+      "PURISIMA",
+      "ASTURIAS",
+      "ASTURIA",
+      "SALPICAO",
+      "CORRAL",
+      "MARQUISE",
+      "CORLASA",
+      "KRAFT",
+      "FINCA",
+      "JUCOSA",
+      "SIMON",
+      "SAN",
+      "MONTANA",
+      "TORONDOY",
+      "FRESCAMPO",
+      "AURORA",
+      "PRADERA",
+      "VALLE",
+      "HONDO",
+      "FLORA",
+      "DONA",
+      "DO\xD1A",
+      "TROPICAL",
+      "DELI",
+      "JUMBO",
+      "COMPLETA",
+      "ESPECIAL",
+      "ESP",
+      "SUPERIOR",
+      "EXTRA",
+      "ESTANDAR",
+      "ECONOM",
+      "ECONOMICA",
+      "INSTITUCIONAL",
+      "INDUSTRIAL",
+      "INDUST",
+      "BLANCO",
+      "BLANCA",
+      "BLANCAS",
+      "NEGRO",
+      "NEGRA",
+      "NEGRAS",
+      "NEG",
+      "VERDE",
+      "VERDES",
+      "ROJO",
+      "ROJA",
+      "ROJAS",
+      "AMARILLO",
+      "AMARILLA"
+    ]);
+  }
+});
 
 // src/services/alkostoService.ts
-var SUCURSALES_ALKOSTO = [
-  { codigo: "7498", tag: "AK01", nombre: "Alkosto 1 san Felipe", zona: "san Felipe", direccion: "Direcci\xF3n de despacho; calle 98 CC san Felipe 1 nivel PB sector casco central." },
-  { codigo: "7499", tag: "AK02", nombre: "Alkosto 2 - Plaza baral", zona: "Plaza baral", direccion: "Plaza baral" },
-  { codigo: "7497", tag: "AK03", nombre: "Alkosto 3 - Delicias", zona: "Delicias", direccion: "Delicias" },
-  { codigo: "7500", tag: "AK04", nombre: "Alkosto 4 - Coromoto", zona: "Coromoto", direccion: "Coromoto" },
-  { codigo: "7502", tag: "AK05", nombre: "Alkosto 5 - Cabimas", zona: "Cabimas", direccion: "Cabimas" },
-  { codigo: "7503", tag: "AK06", nombre: "Alkosto 6 - Los cactu", zona: "Los cactu", direccion: "Los cactu" },
-  { codigo: "7680", tag: "AK07", nombre: "Alkosto 7 - Bella vista", zona: "Bella vista", direccion: "Bella vista" },
-  { codigo: "7905", tag: "AK08", nombre: "Alkosto 8 - Trujillo", zona: "Trujillo", direccion: "Trujillo" },
-  { codigo: "8160", tag: "AK09", nombre: "Alkosto 9 - Antiguo nasa Zona industrial", zona: "Antiguo nasa Zona industrial", direccion: "Antiguo nasa Zona industrial" },
-  { codigo: "8306", tag: "AK10", nombre: "Alkosto 10 - La limpia", zona: "La limpia", direccion: "La limpia" },
-  { codigo: "1560", tag: "AK11", nombre: "Alkosto 11", zona: "Maracaibo", direccion: "Maracaibo" },
-  { codigo: "1560", tag: "AKOP", nombre: "Alkosto Sede Principal / AKOP", zona: "Sector Paraiso Maracaibo", direccion: "CALLE 78 DR PORTILLO LOCAL 17-71 SECTOR PARAISO MARACAIBO" }
-];
-var SUCURSALES_FAMILIA_CENTER = [
-  { codigo: "7490", tag: "FC01", nombre: "Familia Center 1 - Plaza lago", zona: "Plaza lago", direccion: "Plaza lago" },
-  { codigo: "7492", tag: "FC02", nombre: "Familia Center 2", zona: "URB monte claro", direccion: "Calle43entre Av 150 416N\xB015-041 URB monte claro" },
-  { codigo: "7494", tag: "FC03", nombre: "Familia Center 3", zona: "Parroquia Coquivacoa", direccion: "CalleJ con Av 12 distinguido bajo el NJ-10 de nomenclatura municipal en jurisdicci\xF3n parroquia coquivacoa el municipio aut\xF3nomo Maracaibo estado Zulia." },
-  { codigo: "7491", tag: "FC04", nombre: "Familia 4 - Dr quintero", zona: "Dr quintero", direccion: "Dr quintero" },
-  { codigo: "7489", tag: "FC05", nombre: "Familia Center 5 - La lago", zona: "La lago", direccion: "La lago" },
-  { codigo: "7493", tag: "FC06", nombre: "Familia 6 - Los olivos", zona: "Los olivos", direccion: "Los olivos" },
-  { codigo: "8229", tag: "FC07", nombre: "Familia Center #7 - San Francisco", zona: "San Francisco", direccion: "San Francisco" },
-  { codigo: "8144", tag: "FC08", nombre: "Familia Center 8", zona: "Maracaibo", direccion: "Maracaibo" },
-  { codigo: "5373", tag: "FCOP", nombre: "Familia Center Sede Principal / FCOP", zona: "Casco Central", direccion: "AV LIBERTADOR CALLE 100 CC PLAZA LAGO NIVEL PB LOCAL 54 SECTOR CASCO CENTRAL" }
-];
-var CADENAS_ABREVIATURAS = {
-  ALKOSTO: ["AK01", "AK02", "AK03", "AK04", "AK05", "AK06", "AK07", "AK08", "AK09", "AK10", "AK11", "AKOP"],
-  FAMILIA_CENTER: ["FC01", "FC02", "FC03", "FC04", "FC05", "FC06", "FC07", "FC08", "FCOP"]
-};
-var TODAS_SUCURSALES_CUENTAS_CLAVE = [
-  ...SUCURSALES_ALKOSTO,
-  ...SUCURSALES_FAMILIA_CENTER
-];
 function getSucursalByTag(tag) {
   const norm = (tag || "").trim().toUpperCase();
   if (!norm) return void 0;
@@ -841,717 +820,6 @@ function getSucursalByTag(tag) {
     (s) => s.codigo === norm || cleanDigits && s.codigo.replace(/^0+/, "") === cleanDigits
   );
 }
-var CATALOGO_ALKOSTO = [
-  // --- MORTADELAS Y EMBUTIDOS ASTURIAS / SALPICAO / CORRAL ---
-  {
-    sku: "1496",
-    producto: "MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR",
-    categoria: "MORTADELAS",
-    presentacion: "Caja (10 und x 900g)",
-    kilosPorCaja: 9,
-    precioSugeridoUSD: 20,
-    codigoBarra: "7590377000077",
-    codigosCadena: ["1496", "7590377000077"],
-    sinonimos: ["MORTADELA ESPECIAL DE POLLO 900GR ASTURIAS", "MORTADELA 900GR ASTURIAS", "MORTADELA ASTURIAS 10X900", "1496"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "1497",
-    producto: "MORTADELA ESP D/POLLO ASTURIAS 20UNDX500GR",
-    categoria: "MORTADELAS",
-    presentacion: "Caja (20 und x 500g)",
-    kilosPorCaja: 10,
-    precioSugeridoUSD: 22,
-    codigoBarra: "7590377000589",
-    codigosCadena: ["1497", "7590377000589"],
-    sinonimos: ["MORTADELA ESPECIAL DE POLLO ASTURIA 500GR", "MORTADELA ESPECIAL DE POLLO ASTURIAS 500GR", "MORTADELA 500GR ASTURIAS", "1497", "7590377000589"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "1519",
-    producto: "MORTADELA ESP D/POLLO SALPICAO 10UNDX900GR",
-    categoria: "MORTADELAS",
-    presentacion: "Caja (10 und x 900g)",
-    kilosPorCaja: 9,
-    precioSugeridoUSD: 23,
-    codigosCadena: ["1462", "1519"],
-    sinonimos: ["MORTADELA ESPECIAL DE POLLO SALPICAO 10UNDX900GR", "SALPICAO 10X900", "1519", "1462"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "21",
-    producto: "MORTADELA ESP D/POLLO CORRAL 1X12UNI",
-    categoria: "MORTADELAS",
-    presentacion: "Caja (12 und x 1kg)",
-    kilosPorCaja: 12,
-    precioSugeridoUSD: 36,
-    codigoBarra: "7591289609129",
-    codigosCadena: ["21", "7591289609129"],
-    sinonimos: ["MORTADELA DE POLLO DEL CORRAL 1KG", "MORTADELA CORRAL 1X12", "MORTADELA CORRAL 12UNI", "21", "7591289609129"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "1464",
-    producto: "MORT. NAVIDE\xD1A ASTURIAS XKG",
-    categoria: "MORTADELAS",
-    presentacion: "Pieza por Kg (Caja ~12 kg)",
-    kilosPorCaja: 12,
-    precioSugeridoUSD: 36,
-    codigosCadena: ["1464"],
-    sinonimos: ["MORTADELA NAVIDE\xD1A ASTURIAS", "NAVIDE\xD1A ASTURIAS", "1464"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "1461",
-    producto: "MORT. ESTANDAR ASTURIAS X KG",
-    categoria: "MORTADELAS",
-    presentacion: "Pieza por Kg (Caja ~10 kg)",
-    kilosPorCaja: 10,
-    precioSugeridoUSD: 25,
-    codigosCadena: ["1461"],
-    sinonimos: ["MORTADELA ESTANDAR ASTURIAS", "ESTANDAR ASTURIAS", "1461"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "1462",
-    producto: "MORT. ESPECIAL COCIDA ASTURIAS X KG",
-    categoria: "MORTADELAS",
-    presentacion: "Pieza por Kg (Caja ~10 kg)",
-    kilosPorCaja: 10,
-    precioSugeridoUSD: 26,
-    codigosCadena: ["1462"],
-    sinonimos: ["MORTADELA ESPECIAL COCIDA ASTURIAS", "1462"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "1463",
-    producto: "MORT. SUPERIOR ASTURIAS X KG",
-    categoria: "MORTADELAS",
-    presentacion: "Pieza por Kg (Caja ~12 kg)",
-    kilosPorCaja: 12,
-    precioSugeridoUSD: 28,
-    codigosCadena: ["1463", "100929"],
-    sinonimos: ["MORTADELA SUPERIOR ASTURIAS", "1463"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "1512",
-    producto: "MORT. PECHUGA DE PAVO ASTURIAS X KG",
-    categoria: "MORTADELAS",
-    presentacion: "Pieza por Kg (Caja ~10 kg)",
-    kilosPorCaja: 10,
-    precioSugeridoUSD: 55,
-    codigosCadena: ["100881", "1512"],
-    sinonimos: ["PECHUGA DE PAVO ASTURIAS X KG", "PECHUGA PAVO ASTURIAS", "100881", "1512"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "1511",
-    producto: "MORT. PECHUGA DE POLLO ASTURIAS X KG",
-    categoria: "MORTADELAS",
-    presentacion: "Pieza por Kg (Caja ~10 kg)",
-    kilosPorCaja: 10,
-    precioSugeridoUSD: 53.5,
-    codigosCadena: ["100882", "1511"],
-    sinonimos: ["PECHUGA DE POLLO ASTURIAS X KG", "PECHUGA POLLO ASTURIAS", "100882", "1511"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "1561",
-    producto: "MORT. PAVO TIPO SHOULDER ASTURIAS POR KG",
-    categoria: "MORTADELAS",
-    presentacion: "Pieza por Kg (Caja ~12 kg)",
-    kilosPorCaja: 12,
-    precioSugeridoUSD: 48,
-    codigosCadena: ["1561"],
-    sinonimos: ["SHOULDER ASTURIAS", "1561"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "1521",
-    producto: "MORT. ECONOM COCIDA ASTURIAS X KG",
-    categoria: "MORTADELAS",
-    presentacion: "Pieza por Kg (Caja ~10 kg)",
-    kilosPorCaja: 10,
-    precioSugeridoUSD: 22,
-    codigosCadena: ["1521"],
-    sinonimos: ["ECONOMICA ASTURIAS", "1521"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "1522",
-    producto: "MORT. TIPO AREPERO ASTURIAS X KG",
-    categoria: "MORTADELAS",
-    presentacion: "Pieza por Kg (Caja ~10 kg)",
-    kilosPorCaja: 10,
-    precioSugeridoUSD: 23.5,
-    codigosCadena: ["1522"],
-    sinonimos: ["AREPERO ASTURIAS", "1522"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "1564",
-    producto: "MORTADELA EXTRA ASTURIAS X KG",
-    categoria: "MORTADELAS",
-    presentacion: "Pieza por Kg (Caja ~10 kg)",
-    kilosPorCaja: 10,
-    precioSugeridoUSD: 25.5,
-    codigosCadena: ["1564"],
-    sinonimos: ["EXTRA ASTURIAS", "1564"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "1563",
-    producto: "MORT. ESTANDAR SALPICAO X KG",
-    categoria: "MORTADELAS",
-    presentacion: "Pieza por Kg (Caja ~10 kg)",
-    kilosPorCaja: 10,
-    precioSugeridoUSD: 24,
-    codigosCadena: ["1563"],
-    sinonimos: ["ESTANDAR SALPICAO", "1563"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "1562",
-    producto: "MORT. ESPECIAL COCIDA SALPICAO X KG",
-    categoria: "MORTADELAS",
-    presentacion: "Pieza por Kg (Caja ~10 kg)",
-    kilosPorCaja: 10,
-    precioSugeridoUSD: 25,
-    codigosCadena: ["1562"],
-    sinonimos: ["ESPECIAL SALPICAO", "1562"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "1599",
-    producto: "MORT. NAVIDE\xD1A SALPICAO X KG",
-    categoria: "MORTADELAS",
-    presentacion: "Pieza por Kg (Caja ~12 kg)",
-    kilosPorCaja: 12,
-    precioSugeridoUSD: 34,
-    codigosCadena: ["1599"],
-    sinonimos: ["NAVIDE\xD1A SALPICAO", "1599"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "927",
-    producto: "MORTADELA ESP. CARACAS 10X900GRS",
-    categoria: "MORTADELAS",
-    presentacion: "Caja (10 und x 900g)",
-    kilosPorCaja: 9,
-    precioSugeridoUSD: 23,
-    codigosCadena: ["927"],
-    sinonimos: ["CARACAS 900", "927"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "1051",
-    producto: "MORTADELA ESP. CARACAS 10X500GRS",
-    categoria: "MORTADELAS",
-    presentacion: "Caja (10 und x 500g)",
-    kilosPorCaja: 5,
-    precioSugeridoUSD: 14,
-    codigosCadena: ["1051"],
-    sinonimos: ["CARACAS 500", "1051"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "1242",
-    producto: "MORT. CHORIZO ESPECIAL CDZ X KG",
-    categoria: "MORTADELAS",
-    presentacion: "Pieza por Kg (Caja ~10 kg)",
-    kilosPorCaja: 10,
-    precioSugeridoUSD: 28,
-    codigosCadena: ["1242"],
-    sinonimos: ["CHORIZO ESPECIAL", "1242"],
-    unidadSugerida: "KG"
-  },
-  // --- CARNES, CHULETAS Y TOCINO ---
-  {
-    sku: "1446",
-    producto: "CHULETA FRESCA ASTURIAS POR KG",
-    categoria: "CARNES / CHULETA",
-    presentacion: "Caja ~15 kg al vac\xEDo",
-    kilosPorCaja: 15,
-    precioSugeridoUSD: 72,
-    codigosCadena: ["1446"],
-    sinonimos: ["CHULETA FRESCA ASTURIAS", "CHULETA ASTURIAS", "1446"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "1088",
-    producto: "CHULETA FRESCA IBERICO POR KG",
-    categoria: "CARNES / CHULETA",
-    presentacion: "Caja ~15 kg al vac\xEDo",
-    kilosPorCaja: 15,
-    precioSugeridoUSD: 69,
-    codigosCadena: ["1088"],
-    sinonimos: ["CHULETA IBERICO", "1088"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "1445",
-    producto: "TOCINO FRESCO ASTURIAS X KG",
-    categoria: "CARNES / CHULETA",
-    presentacion: "Caja ~15 kg",
-    kilosPorCaja: 15,
-    precioSugeridoUSD: 45,
-    codigosCadena: ["1445"],
-    sinonimos: ["TOCINO FRESCO ASTURIAS", "1445"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "340",
-    producto: "CHULETA AHUMADA ALIMEX X KG",
-    categoria: "CARNES / CHULETA",
-    presentacion: "Caja ~12 kg",
-    kilosPorCaja: 12,
-    precioSugeridoUSD: 65,
-    codigosCadena: ["340"],
-    sinonimos: ["CHULETA AHUMADA ALIMEX", "340"],
-    unidadSugerida: "KG"
-  },
-  // --- JAMONES, ESPALDAS Y SALCHICHAS ALIMEX / ITALICO ---
-  {
-    sku: "171",
-    producto: "JAMON COC. SUPERIOR ALIMEX 1X5.9KG",
-    categoria: "JAMONES",
-    presentacion: "Pieza (Barra ~5.9 kg)",
-    kilosPorCaja: 11.8,
-    precioSugeridoUSD: 68,
-    codigosCadena: ["171", "100929"],
-    sinonimos: ["JAMON COCIDO SUPERIOR ASTURIAS / ALIMEX", "JAMON COCIDO DE PAVO AHUMADO SUPERIOR ASTURIAS", "JAMON SUPERIOR ALIMEX", "171"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "172",
-    producto: "ESPALDA COCIDA ALIMEX 1X4.6KG",
-    categoria: "JAMONES",
-    presentacion: "Pieza (Barra ~4.6 kg)",
-    kilosPorCaja: 9.2,
-    precioSugeridoUSD: 54,
-    codigosCadena: ["172"],
-    sinonimos: ["ESPALDA COCIDA ALIMEX", "ESPALDA ALIMEX", "172"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "241",
-    producto: "ESPAL. AHUM T/VISKING ALIMEX 6X3.2",
-    categoria: "JAMONES",
-    presentacion: "Caja (6 und x 3.2 kg)",
-    kilosPorCaja: 19.2,
-    precioSugeridoUSD: 98,
-    codigosCadena: ["241"],
-    sinonimos: ["VISKING ALIMEX", "ESPALDA VISKING", "241"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "439",
-    producto: "ESPAL AHUM.T/AREPERO ALIMEX 12X1,6KG",
-    categoria: "JAMONES",
-    presentacion: "Caja (12 und x 1.6 kg)",
-    kilosPorCaja: 19.2,
-    precioSugeridoUSD: 95,
-    codigosCadena: ["439"],
-    sinonimos: ["AREPERO ALIMEX", "439"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "995",
-    producto: "ESPAL. AHUM T/VISKING ITALICO 6UNDX3.2KG",
-    categoria: "JAMONES",
-    presentacion: "Caja (6 und x 3.2 kg)",
-    kilosPorCaja: 19.2,
-    precioSugeridoUSD: 92,
-    codigosCadena: ["995"],
-    sinonimos: ["VISKING ITALICO", "995"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "337",
-    producto: "JAMON COCIDO ESTANDAR ITALICO X KG",
-    categoria: "JAMONES",
-    presentacion: "Pieza por Kg (Caja ~12 kg)",
-    kilosPorCaja: 12,
-    precioSugeridoUSD: 52,
-    codigosCadena: ["337"],
-    sinonimos: ["JAMON ITALICO", "337"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "170",
-    producto: "TOCINETA AHUM S/CUERO ALIMEX X KG",
-    categoria: "JAMONES",
-    presentacion: "Caja ~10 kg",
-    kilosPorCaja: 10,
-    precioSugeridoUSD: 58,
-    codigosCadena: ["170"],
-    sinonimos: ["TOCINETA ALIMEX", "170"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "177",
-    producto: "SALCHICHA VIENA ALIMEX 16 X 450 GRS",
-    categoria: "JAMONES",
-    presentacion: "Caja (16 paq x 450g)",
-    kilosPorCaja: 7.2,
-    precioSugeridoUSD: 28,
-    codigosCadena: ["177"],
-    sinonimos: ["SALCHICHA VIENA 450", "177"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "176",
-    producto: "SALCHICHA VIENA ALIMEX 8 X 800 GRS",
-    categoria: "JAMONES",
-    presentacion: "Caja (8 paq x 800g)",
-    kilosPorCaja: 6.4,
-    precioSugeridoUSD: 25,
-    codigosCadena: ["176"],
-    sinonimos: ["SALCHICHA VIENA 800", "176"],
-    unidadSugerida: "CJ"
-  },
-  // --- BENEFICIO DE POLLO Y DESPRESADO ---
-  {
-    sku: "101",
-    producto: "POLLO BENEFICIADO ENTERO",
-    categoria: "POLLO",
-    presentacion: "Cesta / Caja ~20 kg",
-    kilosPorCaja: 20,
-    precioSugeridoUSD: 56,
-    codigosCadena: ["101", "POLLO"],
-    sinonimos: ["POLLO ENTERO", "POLLO TODAS LAS MARCAS", "POLLO"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "103",
-    producto: "FILET VARIAS PRESENTACIONES",
-    categoria: "POLLO",
-    presentacion: "Caja 15 kg congelado",
-    kilosPorCaja: 15,
-    precioSugeridoUSD: 65,
-    codigosCadena: ["103", "FILET"],
-    sinonimos: ["FILET DE POLLO", "FILET PECHUGA", "FILET"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "629",
-    producto: "MUSLO CUADRIL DESPRESADO POR KG",
-    categoria: "POLLO",
-    presentacion: "Caja 15 kg congelado",
-    kilosPorCaja: 15,
-    precioSugeridoUSD: 39,
-    codigosCadena: ["629", "102", "MUSLO"],
-    sinonimos: ["MUSLO CUADRIL", "MUSLO POLLO", "MUSLO", "629"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "630",
-    producto: "ALAS DESPRESADAS POR KG",
-    categoria: "POLLO",
-    presentacion: "Caja 15 kg congelado",
-    kilosPorCaja: 15,
-    precioSugeridoUSD: 42,
-    codigosCadena: ["630", "ALAS"],
-    sinonimos: ["ALAS DE POLLO", "ALAS", "630"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "870",
-    producto: "HIGADO (EMPACADO)",
-    categoria: "POLLO",
-    presentacion: "Caja 15 kg congelado",
-    kilosPorCaja: 15,
-    precioSugeridoUSD: 25,
-    codigosCadena: ["870"],
-    sinonimos: ["HIGADO DE POLLO", "HIGADO", "870"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "393",
-    producto: "MOLLEJA (EMPACADA)",
-    categoria: "POLLO",
-    presentacion: "Caja 15 kg congelado",
-    kilosPorCaja: 15,
-    precioSugeridoUSD: 28,
-    codigosCadena: ["393"],
-    sinonimos: ["MOLLEJAS", "393"],
-    unidadSugerida: "KG"
-  },
-  // --- VÍVERES, BÁSICOS Y LÁCTEOS ---
-  {
-    sku: "301",
-    producto: "ACEITE VEGETAL COMESTIBLE 12X1LT",
-    categoria: "BASICOS",
-    presentacion: "Caja (12 botellas x 1L)",
-    kilosPorCaja: 11,
-    precioSugeridoUSD: 26.5,
-    codigosCadena: ["301", "ACEITE"],
-    sinonimos: ["ACEITE VEGETAL", "ACEITE", "301"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "302",
-    producto: "AZUCAR REFINADA BLANCA 50KG",
-    categoria: "BASICOS",
-    presentacion: "Saco 50 kg",
-    kilosPorCaja: 50,
-    precioSugeridoUSD: 48,
-    codigosCadena: ["302", "AZUCAR"],
-    sinonimos: ["AZUCAR 50KG", "AZUCAR", "302"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "303",
-    producto: "ARROZ BLANCO ESPECIAL 24X1KG",
-    categoria: "BASICOS",
-    presentacion: "Bulto (24 paquetes x 1kg)",
-    kilosPorCaja: 24,
-    precioSugeridoUSD: 28.8,
-    codigosCadena: ["303", "ARROZ"],
-    sinonimos: ["ARROZ 900GR", "ARROZ 24X1KG", "ARROZ", "303"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "401",
-    producto: "HUEVOS BLANCOS SELECCIONADOS",
-    categoria: "BASICOS",
-    presentacion: "Caja (12 cartones / 360 und)",
-    kilosPorCaja: 22,
-    precioSugeridoUSD: 45,
-    codigosCadena: ["401", "HUEVOS"],
-    sinonimos: ["HUEVOS BLANCOS", "HUEVOS", "401"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "1360",
-    producto: "PATATAS FRESCAS MARQUISE 4X2.5KG",
-    categoria: "CONGELADOS",
-    presentacion: "Caja (4 bolsas x 2.5kg)",
-    kilosPorCaja: 10,
-    precioSugeridoUSD: 22.8,
-    codigoBarra: "5412873178161",
-    codigosCadena: ["1360", "5412873178161", "PATATAS"],
-    sinonimos: ["PAPAS FRITAS CONGELADAS MARQUISE 2,5KG", "PAPAS MARQUISE", "PATATAS FRESCAS", "1360", "5412873178161"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "047",
-    producto: "NUGGET CORRAL DE 460GM",
-    categoria: "CONGELADOS",
-    presentacion: "Paquete 460g",
-    kilosPorCaja: 0.46,
-    precioSugeridoUSD: 3.88,
-    codigoBarra: "7591289400023",
-    codigosCadena: ["047", "7591289400023"],
-    sinonimos: ["NUGGETS DE POLLO DEL CORRAL 460GR", "NUGGETS DE POLLO DEL CORRAL 462GR", "NUGGET CORRAL DE 460GM", "047", "7591289400023"],
-    unidadSugerida: "UND"
-  },
-  {
-    sku: "046",
-    producto: "NUGGETS DE POLLO (COD. 046)",
-    categoria: "CONGELADOS",
-    presentacion: "Bolsa Institucional por Kg",
-    kilosPorCaja: 1,
-    precioSugeridoUSD: 8.71,
-    codigosCadena: ["046", "100253"],
-    sinonimos: ["NUGGETS EL CORRAL POR KG", "NUGGET CORRAL INSTITUCIONAL", "NUGGETS DE POLLO (COD. 046)", "046", "100253"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "7591210000513",
-    producto: "CREMA DE LECHE PURISIMA 500GR",
-    categoria: "LACTEOS",
-    presentacion: "Caja (6 und x 500g)",
-    kilosPorCaja: 3,
-    precioSugeridoUSD: 25.63,
-    codigoBarra: "7591210000513",
-    codigosCadena: ["7591210000513"],
-    sinonimos: ["CREMA DE LECHE PURISIMA 500GR", "CREMA DE LECHE PURISIMA 6 X 500 GRS", "7591210000513"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "7591210000544",
-    producto: "CREMA DE LECHE PURISIMA 250GR",
-    categoria: "LACTEOS",
-    presentacion: "Caja (12 und x 250g)",
-    kilosPorCaja: 3,
-    precioSugeridoUSD: 30.6,
-    codigoBarra: "7591210000544",
-    codigosCadena: ["7591210000544"],
-    sinonimos: ["CREMA DE LECHE PURISIMA 250GR", "CREMA DE LECHE PURISIMA 12 X 250 GRS", "7591210000544"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "021000061778",
-    producto: "QUESO CREMA KRAFT 226 GR X 36 UND",
-    categoria: "LACTEOS",
-    presentacion: "Unidad 226g (Caja x 36 und)",
-    kilosPorCaja: 0.226,
-    precioSugeridoUSD: 3,
-    codigoBarra: "021000061778",
-    codigosCadena: ["021000061778"],
-    sinonimos: ["QUESO CREMA MARCA KRAFT 226GR", "QUESO CREMA KRAFT 226 GR X 36 UND", "021000061778"],
-    unidadSugerida: "UND"
-  },
-  {
-    sku: "100281",
-    producto: "QUESO MOZZARELLA CORLASA 3.5KG X 4 UND",
-    categoria: "LACTEOS",
-    presentacion: "Pieza por Kg",
-    kilosPorCaja: 14,
-    precioSugeridoUSD: 10,
-    codigosCadena: ["100281"],
-    sinonimos: ["QUESO MOZZARELLA CORLASA X KG", "QUESO MOZZARELLA CORLASA 3.5KG X 4 UND", "100281"],
-    unidadSugerida: "KG"
-  },
-  {
-    sku: "1569",
-    producto: "PATATAS FRESCAS DOBLE COBERTURA 4X2.5KG",
-    categoria: "CONGELADOS",
-    presentacion: "Caja (4 bolsas x 2.5kg)",
-    kilosPorCaja: 10,
-    precioSugeridoUSD: 23.5,
-    codigosCadena: ["1569"],
-    sinonimos: ["PAPAS DOBLE COBERTURA", "1569"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "1536",
-    producto: "LECHE EN POLVO VENCAMPO 10X1KG",
-    categoria: "LACTEOS",
-    presentacion: "Bulto (10 und x 1kg)",
-    kilosPorCaja: 10,
-    precioSugeridoUSD: 0,
-    codigosCadena: ["1536"],
-    sinonimos: ["LECHE EN POLVO VENCAMPO 10X1KG", "LECHE EN POLVO COMPLETA VENCAMPO 1KG", "LECHE VENCAMPO 1KG", "1536"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "1556",
-    producto: "LECHE EN POLVO VENCAMPO 10X900GR",
-    categoria: "LACTEOS",
-    presentacion: "Bulto (10 und x 900g)",
-    kilosPorCaja: 9,
-    precioSugeridoUSD: 0,
-    codigosCadena: ["1556"],
-    sinonimos: ["LECHE EN POLVO VENCAMPO 10X900GR", "LECHE EN POLVO COMPLETA VENCAMPO 900GR", "LECHE VENCAMPO 900GR", "1556"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "1574",
-    producto: "LECHE EN POLVO VENCAMPO 10X400GR",
-    categoria: "LACTEOS",
-    presentacion: "Bulto (10 und x 400g)",
-    kilosPorCaja: 4,
-    precioSugeridoUSD: 0,
-    codigosCadena: ["1574"],
-    sinonimos: ["LECHE EN POLVO VENCAMPO 10X400GR", "LECHE EN POLVO COMPLETA VENCAMPO 400GR", "LECHE VENCAMPO 400GR", "1574"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "1579",
-    producto: "LECHE EN POLVO VENCAMPO 10X500GR",
-    categoria: "LACTEOS",
-    presentacion: "Bulto (10 und x 500g)",
-    kilosPorCaja: 5,
-    precioSugeridoUSD: 0,
-    codigosCadena: ["1579"],
-    sinonimos: ["LECHE EN POLVO VENCAMPO 10X500GR", "LECHE EN POLVO COMPLETA VENCAMPO 500GR", "LECHE VENCAMPO 500GR", "1579"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "7590377000503",
-    producto: "LECHE EN POLVO COMPLETA VENCAMPO 400GR",
-    categoria: "LACTEOS",
-    presentacion: "Bulto (10 und x 400g)",
-    kilosPorCaja: 4,
-    precioSugeridoUSD: 40,
-    codigoBarra: "7590377000503",
-    codigosCadena: ["7590377000503"],
-    sinonimos: ["LECHE EN POLVO COMPLETA VENCAMPO 400GR", "LECHE VENCAMPO 400GR", "7590377000503"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "7590377000510",
-    producto: "LECHE EN POLVO COMPLETA VENCAMPO 900GR",
-    categoria: "LACTEOS",
-    presentacion: "Bulto (10 und x 900g)",
-    kilosPorCaja: 9,
-    precioSugeridoUSD: 90,
-    codigoBarra: "7590377000510",
-    codigosCadena: ["7590377000510"],
-    sinonimos: ["LECHE EN POLVO COMPLETA VENCAMPO 900GR", "LECHE VENCAMPO 900GR", "7590377000510"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "1543",
-    producto: "AZUCAR BLANCA VENCAMPO 1X20ND",
-    categoria: "GRANOS / BASICOS",
-    presentacion: "Bulto (20 und x 1kg)",
-    kilosPorCaja: 20,
-    precioSugeridoUSD: 21.8,
-    codigoBarra: "7590377000220",
-    codigosCadena: ["1543", "001543", "7590377000220"],
-    sinonimos: ["AZUCAR BLANCA REFINADA VENCAMPO 1KG", "AZUCAR BLANCA VENCAMPO 1X20ND", "AZUCAR VENCAMPO 1KG", "1543", "7590377000220"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "1642",
-    producto: "ARVEJAS VENCAMPO 25 UND X 400GR",
-    categoria: "GRANOS / BASICOS",
-    presentacion: "Bulto (25 und x 400g)",
-    kilosPorCaja: 10,
-    precioSugeridoUSD: 20,
-    codigoBarra: "7590377000411",
-    codigosCadena: ["1642", "001642", "7590377000411"],
-    sinonimos: ["ARVEJAS VERDES VENCAMPO 400GR", "ARVEJAS VENCAMPO 25 UND X 400GR", "ARVEJAS VENCAMPO 400GR", "1642", "7590377000411"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "1644",
-    producto: "CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR",
-    categoria: "GRANOS / BASICOS",
-    presentacion: "Bulto (25 und x 400g)",
-    kilosPorCaja: 10,
-    precioSugeridoUSD: 20,
-    codigoBarra: "7590377000459",
-    codigosCadena: ["1644", "001644", "7590377000459"],
-    sinonimos: ["CARAOTAS NEGRAS VENCAMPO 400GR", "CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR", "CARAOTAS VENCAMPO 400GR", "1644", "7590377000459"],
-    unidadSugerida: "CJ"
-  },
-  {
-    sku: "1572",
-    producto: "CAJAS DE PIZZA 1X100",
-    categoria: "EMPAQUES",
-    presentacion: "Bulto (100 unidades)",
-    kilosPorCaja: 10,
-    precioSugeridoUSD: 25,
-    codigosCadena: ["1572"],
-    sinonimos: ["CAJA PIZZA", "1572"],
-    unidadSugerida: "BLT"
-  }
-];
-(() => {
-  const existingSkus = new Set(CATALOGO_ALKOSTO.map((c) => String(c.sku).trim()));
-  for (const prod of PRODUCTOS_CODIZULCA) {
-    if (!existingSkus.has(prod.codigo)) {
-      const isKg = /\b(X\s*KG|POR\s*KG|A\s+GRANEL)\b/i.test(prod.descripcion);
-      CATALOGO_ALKOSTO.push({
-        sku: prod.codigo,
-        producto: prod.descripcion,
-        categoria: "CATALOGO CODIZULCA",
-        presentacion: isKg ? "KG" : "CJ",
-        kilosPorCaja: isKg ? 1 : 10,
-        precioSugeridoUSD: 0,
-        codigosCadena: [prod.codigo],
-        sinonimos: [prod.descripcion, prod.codigo],
-        unidadSugerida: isKg ? "KG" : "CJ"
-      });
-      existingSkus.add(prod.codigo);
-    }
-  }
-})();
 function normalizarCodigoProducto(codigo) {
   if (!codigo) return "";
   return String(codigo).trim().replace(/[\s\-_.]/g, "");
@@ -1608,29 +876,797 @@ function resolverProductoPorCodigoODescripcion(codigoInput, descripcionInput) {
   }
   return void 0;
 }
+var import_firestore2, SUCURSALES_ALKOSTO, SUCURSALES_FAMILIA_CENTER, CADENAS_ABREVIATURAS, TODAS_SUCURSALES_CUENTAS_CLAVE, CATALOGO_ALKOSTO;
+var init_alkostoService = __esm({
+  "src/services/alkostoService.ts"() {
+    init_define_import_meta_env();
+    import_firestore2 = require("firebase/firestore");
+    init_firebase();
+    init_authService();
+    init_productosCodizulca();
+    SUCURSALES_ALKOSTO = [
+      { codigo: "7498", tag: "AK01", nombre: "Alkosto 1 san Felipe", zona: "san Felipe", direccion: "Direcci\xF3n de despacho; calle 98 CC san Felipe 1 nivel PB sector casco central." },
+      { codigo: "7499", tag: "AK02", nombre: "Alkosto 2 - Plaza baral", zona: "Plaza baral", direccion: "Plaza baral" },
+      { codigo: "7497", tag: "AK03", nombre: "Alkosto 3 - Delicias", zona: "Delicias", direccion: "Delicias" },
+      { codigo: "7500", tag: "AK04", nombre: "Alkosto 4 - Coromoto", zona: "Coromoto", direccion: "Coromoto" },
+      { codigo: "7502", tag: "AK05", nombre: "Alkosto 5 - Cabimas", zona: "Cabimas", direccion: "Cabimas" },
+      { codigo: "7503", tag: "AK06", nombre: "Alkosto 6 - Los cactu", zona: "Los cactu", direccion: "Los cactu" },
+      { codigo: "7680", tag: "AK07", nombre: "Alkosto 7 - Bella vista", zona: "Bella vista", direccion: "Bella vista" },
+      { codigo: "7905", tag: "AK08", nombre: "Alkosto 8 - Trujillo", zona: "Trujillo", direccion: "Trujillo" },
+      { codigo: "8160", tag: "AK09", nombre: "Alkosto 9 - Antiguo nasa Zona industrial", zona: "Antiguo nasa Zona industrial", direccion: "Antiguo nasa Zona industrial" },
+      { codigo: "8306", tag: "AK10", nombre: "Alkosto 10 - La limpia", zona: "La limpia", direccion: "La limpia" },
+      { codigo: "1560", tag: "AK11", nombre: "Alkosto 11", zona: "Maracaibo", direccion: "Maracaibo" },
+      { codigo: "1560", tag: "AKOP", nombre: "Alkosto Sede Principal / AKOP", zona: "Sector Paraiso Maracaibo", direccion: "CALLE 78 DR PORTILLO LOCAL 17-71 SECTOR PARAISO MARACAIBO" }
+    ];
+    SUCURSALES_FAMILIA_CENTER = [
+      { codigo: "7490", tag: "FC01", nombre: "Familia Center 1 - Plaza lago", zona: "Plaza lago", direccion: "Plaza lago" },
+      { codigo: "7492", tag: "FC02", nombre: "Familia Center 2", zona: "URB monte claro", direccion: "Calle43entre Av 150 416N\xB015-041 URB monte claro" },
+      { codigo: "7494", tag: "FC03", nombre: "Familia Center 3", zona: "Parroquia Coquivacoa", direccion: "CalleJ con Av 12 distinguido bajo el NJ-10 de nomenclatura municipal en jurisdicci\xF3n parroquia coquivacoa el municipio aut\xF3nomo Maracaibo estado Zulia." },
+      { codigo: "7491", tag: "FC04", nombre: "Familia 4 - Dr quintero", zona: "Dr quintero", direccion: "Dr quintero" },
+      { codigo: "7489", tag: "FC05", nombre: "Familia Center 5 - La lago", zona: "La lago", direccion: "La lago" },
+      { codigo: "7493", tag: "FC06", nombre: "Familia 6 - Los olivos", zona: "Los olivos", direccion: "Los olivos" },
+      { codigo: "8229", tag: "FC07", nombre: "Familia Center #7 - San Francisco", zona: "San Francisco", direccion: "San Francisco" },
+      { codigo: "8144", tag: "FC08", nombre: "Familia Center 8", zona: "Maracaibo", direccion: "Maracaibo" },
+      { codigo: "5373", tag: "FCOP", nombre: "Familia Center Sede Principal / FCOP", zona: "Casco Central", direccion: "AV LIBERTADOR CALLE 100 CC PLAZA LAGO NIVEL PB LOCAL 54 SECTOR CASCO CENTRAL" }
+    ];
+    CADENAS_ABREVIATURAS = {
+      ALKOSTO: ["AK01", "AK02", "AK03", "AK04", "AK05", "AK06", "AK07", "AK08", "AK09", "AK10", "AK11", "AKOP"],
+      FAMILIA_CENTER: ["FC01", "FC02", "FC03", "FC04", "FC05", "FC06", "FC07", "FC08", "FCOP"]
+    };
+    TODAS_SUCURSALES_CUENTAS_CLAVE = [
+      ...SUCURSALES_ALKOSTO,
+      ...SUCURSALES_FAMILIA_CENTER
+    ];
+    CATALOGO_ALKOSTO = [
+      // --- MORTADELAS Y EMBUTIDOS ASTURIAS / SALPICAO / CORRAL ---
+      {
+        sku: "1496",
+        producto: "MORTADELA ESP D/POLLO ASTURIAS 10UNDX900GR",
+        categoria: "MORTADELAS",
+        presentacion: "Caja (10 und x 900g)",
+        kilosPorCaja: 9,
+        precioSugeridoUSD: 20,
+        codigoBarra: "7590377000077",
+        codigosCadena: ["1496", "7590377000077"],
+        sinonimos: ["MORTADELA ESPECIAL DE POLLO 900GR ASTURIAS", "MORTADELA 900GR ASTURIAS", "MORTADELA ASTURIAS 10X900", "1496"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "1497",
+        producto: "MORTADELA ESP D/POLLO ASTURIAS 20UNDX500GR",
+        categoria: "MORTADELAS",
+        presentacion: "Caja (20 und x 500g)",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 22,
+        codigoBarra: "7590377000589",
+        codigosCadena: ["1497", "7590377000589"],
+        sinonimos: ["MORTADELA ESPECIAL DE POLLO ASTURIA 500GR", "MORTADELA ESPECIAL DE POLLO ASTURIAS 500GR", "MORTADELA 500GR ASTURIAS", "1497", "7590377000589"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "1519",
+        producto: "MORTADELA ESP D/POLLO SALPICAO 10UNDX900GR",
+        categoria: "MORTADELAS",
+        presentacion: "Caja (10 und x 900g)",
+        kilosPorCaja: 9,
+        precioSugeridoUSD: 23,
+        codigosCadena: ["1462", "1519"],
+        sinonimos: ["MORTADELA ESPECIAL DE POLLO SALPICAO 10UNDX900GR", "SALPICAO 10X900", "1519", "1462"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "21",
+        producto: "MORTADELA ESP D/POLLO CORRAL 1X12UNI",
+        categoria: "MORTADELAS",
+        presentacion: "Caja (12 und x 1kg)",
+        kilosPorCaja: 12,
+        precioSugeridoUSD: 36,
+        codigoBarra: "7591289609129",
+        codigosCadena: ["21", "7591289609129"],
+        sinonimos: ["MORTADELA DE POLLO DEL CORRAL 1KG", "MORTADELA CORRAL 1X12", "MORTADELA CORRAL 12UNI", "21", "7591289609129"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "1464",
+        producto: "MORT. NAVIDE\xD1A ASTURIAS XKG",
+        categoria: "MORTADELAS",
+        presentacion: "Pieza por Kg (Caja ~12 kg)",
+        kilosPorCaja: 12,
+        precioSugeridoUSD: 36,
+        codigosCadena: ["1464"],
+        sinonimos: ["MORTADELA NAVIDE\xD1A ASTURIAS", "NAVIDE\xD1A ASTURIAS", "1464"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "1461",
+        producto: "MORT. ESTANDAR ASTURIAS X KG",
+        categoria: "MORTADELAS",
+        presentacion: "Pieza por Kg (Caja ~10 kg)",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 25,
+        codigosCadena: ["1461"],
+        sinonimos: ["MORTADELA ESTANDAR ASTURIAS", "ESTANDAR ASTURIAS", "1461"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "1462",
+        producto: "MORT. ESPECIAL COCIDA ASTURIAS X KG",
+        categoria: "MORTADELAS",
+        presentacion: "Pieza por Kg (Caja ~10 kg)",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 26,
+        codigosCadena: ["1462"],
+        sinonimos: ["MORTADELA ESPECIAL COCIDA ASTURIAS", "1462"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "1463",
+        producto: "MORT. SUPERIOR ASTURIAS X KG",
+        categoria: "MORTADELAS",
+        presentacion: "Pieza por Kg (Caja ~12 kg)",
+        kilosPorCaja: 12,
+        precioSugeridoUSD: 28,
+        codigosCadena: ["1463", "100929"],
+        sinonimos: ["MORTADELA SUPERIOR ASTURIAS", "1463"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "1512",
+        producto: "MORT. PECHUGA DE PAVO ASTURIAS X KG",
+        categoria: "MORTADELAS",
+        presentacion: "Pieza por Kg (Caja ~10 kg)",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 55,
+        codigosCadena: ["100881", "1512"],
+        sinonimos: ["PECHUGA DE PAVO ASTURIAS X KG", "PECHUGA PAVO ASTURIAS", "100881", "1512"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "1511",
+        producto: "MORT. PECHUGA DE POLLO ASTURIAS X KG",
+        categoria: "MORTADELAS",
+        presentacion: "Pieza por Kg (Caja ~10 kg)",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 53.5,
+        codigosCadena: ["100882", "1511"],
+        sinonimos: ["PECHUGA DE POLLO ASTURIAS X KG", "PECHUGA POLLO ASTURIAS", "100882", "1511"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "1561",
+        producto: "MORT. PAVO TIPO SHOULDER ASTURIAS POR KG",
+        categoria: "MORTADELAS",
+        presentacion: "Pieza por Kg (Caja ~12 kg)",
+        kilosPorCaja: 12,
+        precioSugeridoUSD: 48,
+        codigosCadena: ["1561"],
+        sinonimos: ["SHOULDER ASTURIAS", "1561"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "1521",
+        producto: "MORT. ECONOM COCIDA ASTURIAS X KG",
+        categoria: "MORTADELAS",
+        presentacion: "Pieza por Kg (Caja ~10 kg)",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 22,
+        codigosCadena: ["1521"],
+        sinonimos: ["ECONOMICA ASTURIAS", "1521"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "1522",
+        producto: "MORT. TIPO AREPERO ASTURIAS X KG",
+        categoria: "MORTADELAS",
+        presentacion: "Pieza por Kg (Caja ~10 kg)",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 23.5,
+        codigosCadena: ["1522"],
+        sinonimos: ["AREPERO ASTURIAS", "1522"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "1564",
+        producto: "MORTADELA EXTRA ASTURIAS X KG",
+        categoria: "MORTADELAS",
+        presentacion: "Pieza por Kg (Caja ~10 kg)",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 25.5,
+        codigosCadena: ["1564"],
+        sinonimos: ["EXTRA ASTURIAS", "1564"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "1563",
+        producto: "MORT. ESTANDAR SALPICAO X KG",
+        categoria: "MORTADELAS",
+        presentacion: "Pieza por Kg (Caja ~10 kg)",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 24,
+        codigosCadena: ["1563"],
+        sinonimos: ["ESTANDAR SALPICAO", "1563"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "1562",
+        producto: "MORT. ESPECIAL COCIDA SALPICAO X KG",
+        categoria: "MORTADELAS",
+        presentacion: "Pieza por Kg (Caja ~10 kg)",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 25,
+        codigosCadena: ["1562"],
+        sinonimos: ["ESPECIAL SALPICAO", "1562"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "1599",
+        producto: "MORT. NAVIDE\xD1A SALPICAO X KG",
+        categoria: "MORTADELAS",
+        presentacion: "Pieza por Kg (Caja ~12 kg)",
+        kilosPorCaja: 12,
+        precioSugeridoUSD: 34,
+        codigosCadena: ["1599"],
+        sinonimos: ["NAVIDE\xD1A SALPICAO", "1599"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "927",
+        producto: "MORTADELA ESP. CARACAS 10X900GRS",
+        categoria: "MORTADELAS",
+        presentacion: "Caja (10 und x 900g)",
+        kilosPorCaja: 9,
+        precioSugeridoUSD: 23,
+        codigosCadena: ["927"],
+        sinonimos: ["CARACAS 900", "927"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "1051",
+        producto: "MORTADELA ESP. CARACAS 10X500GRS",
+        categoria: "MORTADELAS",
+        presentacion: "Caja (10 und x 500g)",
+        kilosPorCaja: 5,
+        precioSugeridoUSD: 14,
+        codigosCadena: ["1051"],
+        sinonimos: ["CARACAS 500", "1051"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "1242",
+        producto: "MORT. CHORIZO ESPECIAL CDZ X KG",
+        categoria: "MORTADELAS",
+        presentacion: "Pieza por Kg (Caja ~10 kg)",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 28,
+        codigosCadena: ["1242"],
+        sinonimos: ["CHORIZO ESPECIAL", "1242"],
+        unidadSugerida: "KG"
+      },
+      // --- CARNES, CHULETAS Y TOCINO ---
+      {
+        sku: "1446",
+        producto: "CHULETA FRESCA ASTURIAS POR KG",
+        categoria: "CARNES / CHULETA",
+        presentacion: "Caja ~15 kg al vac\xEDo",
+        kilosPorCaja: 15,
+        precioSugeridoUSD: 72,
+        codigosCadena: ["1446"],
+        sinonimos: ["CHULETA FRESCA ASTURIAS", "CHULETA ASTURIAS", "1446"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "1088",
+        producto: "CHULETA FRESCA IBERICO POR KG",
+        categoria: "CARNES / CHULETA",
+        presentacion: "Caja ~15 kg al vac\xEDo",
+        kilosPorCaja: 15,
+        precioSugeridoUSD: 69,
+        codigosCadena: ["1088"],
+        sinonimos: ["CHULETA IBERICO", "1088"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "1445",
+        producto: "TOCINO FRESCO ASTURIAS X KG",
+        categoria: "CARNES / CHULETA",
+        presentacion: "Caja ~15 kg",
+        kilosPorCaja: 15,
+        precioSugeridoUSD: 45,
+        codigosCadena: ["1445"],
+        sinonimos: ["TOCINO FRESCO ASTURIAS", "1445"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "340",
+        producto: "CHULETA AHUMADA ALIMEX X KG",
+        categoria: "CARNES / CHULETA",
+        presentacion: "Caja ~12 kg",
+        kilosPorCaja: 12,
+        precioSugeridoUSD: 65,
+        codigosCadena: ["340"],
+        sinonimos: ["CHULETA AHUMADA ALIMEX", "340"],
+        unidadSugerida: "KG"
+      },
+      // --- JAMONES, ESPALDAS Y SALCHICHAS ALIMEX / ITALICO ---
+      {
+        sku: "171",
+        producto: "JAMON COC. SUPERIOR ALIMEX 1X5.9KG",
+        categoria: "JAMONES",
+        presentacion: "Pieza (Barra ~5.9 kg)",
+        kilosPorCaja: 11.8,
+        precioSugeridoUSD: 68,
+        codigosCadena: ["171", "100929"],
+        sinonimos: ["JAMON COCIDO SUPERIOR ASTURIAS / ALIMEX", "JAMON COCIDO DE PAVO AHUMADO SUPERIOR ASTURIAS", "JAMON SUPERIOR ALIMEX", "171"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "172",
+        producto: "ESPALDA COCIDA ALIMEX 1X4.6KG",
+        categoria: "JAMONES",
+        presentacion: "Pieza (Barra ~4.6 kg)",
+        kilosPorCaja: 9.2,
+        precioSugeridoUSD: 54,
+        codigosCadena: ["172"],
+        sinonimos: ["ESPALDA COCIDA ALIMEX", "ESPALDA ALIMEX", "172"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "241",
+        producto: "ESPAL. AHUM T/VISKING ALIMEX 6X3.2",
+        categoria: "JAMONES",
+        presentacion: "Caja (6 und x 3.2 kg)",
+        kilosPorCaja: 19.2,
+        precioSugeridoUSD: 98,
+        codigosCadena: ["241"],
+        sinonimos: ["VISKING ALIMEX", "ESPALDA VISKING", "241"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "439",
+        producto: "ESPAL AHUM.T/AREPERO ALIMEX 12X1,6KG",
+        categoria: "JAMONES",
+        presentacion: "Caja (12 und x 1.6 kg)",
+        kilosPorCaja: 19.2,
+        precioSugeridoUSD: 95,
+        codigosCadena: ["439"],
+        sinonimos: ["AREPERO ALIMEX", "439"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "995",
+        producto: "ESPAL. AHUM T/VISKING ITALICO 6UNDX3.2KG",
+        categoria: "JAMONES",
+        presentacion: "Caja (6 und x 3.2 kg)",
+        kilosPorCaja: 19.2,
+        precioSugeridoUSD: 92,
+        codigosCadena: ["995"],
+        sinonimos: ["VISKING ITALICO", "995"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "337",
+        producto: "JAMON COCIDO ESTANDAR ITALICO X KG",
+        categoria: "JAMONES",
+        presentacion: "Pieza por Kg (Caja ~12 kg)",
+        kilosPorCaja: 12,
+        precioSugeridoUSD: 52,
+        codigosCadena: ["337"],
+        sinonimos: ["JAMON ITALICO", "337"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "170",
+        producto: "TOCINETA AHUM S/CUERO ALIMEX X KG",
+        categoria: "JAMONES",
+        presentacion: "Caja ~10 kg",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 58,
+        codigosCadena: ["170"],
+        sinonimos: ["TOCINETA ALIMEX", "170"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "177",
+        producto: "SALCHICHA VIENA ALIMEX 16 X 450 GRS",
+        categoria: "JAMONES",
+        presentacion: "Caja (16 paq x 450g)",
+        kilosPorCaja: 7.2,
+        precioSugeridoUSD: 28,
+        codigosCadena: ["177"],
+        sinonimos: ["SALCHICHA VIENA 450", "177"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "176",
+        producto: "SALCHICHA VIENA ALIMEX 8 X 800 GRS",
+        categoria: "JAMONES",
+        presentacion: "Caja (8 paq x 800g)",
+        kilosPorCaja: 6.4,
+        precioSugeridoUSD: 25,
+        codigosCadena: ["176"],
+        sinonimos: ["SALCHICHA VIENA 800", "176"],
+        unidadSugerida: "CJ"
+      },
+      // --- BENEFICIO DE POLLO Y DESPRESADO ---
+      {
+        sku: "101",
+        producto: "POLLO BENEFICIADO ENTERO",
+        categoria: "POLLO",
+        presentacion: "Cesta / Caja ~20 kg",
+        kilosPorCaja: 20,
+        precioSugeridoUSD: 56,
+        codigosCadena: ["101", "POLLO"],
+        sinonimos: ["POLLO ENTERO", "POLLO TODAS LAS MARCAS", "POLLO"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "103",
+        producto: "FILET VARIAS PRESENTACIONES",
+        categoria: "POLLO",
+        presentacion: "Caja 15 kg congelado",
+        kilosPorCaja: 15,
+        precioSugeridoUSD: 65,
+        codigosCadena: ["103", "FILET"],
+        sinonimos: ["FILET DE POLLO", "FILET PECHUGA", "FILET"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "629",
+        producto: "MUSLO CUADRIL DESPRESADO POR KG",
+        categoria: "POLLO",
+        presentacion: "Caja 15 kg congelado",
+        kilosPorCaja: 15,
+        precioSugeridoUSD: 39,
+        codigosCadena: ["629", "102", "MUSLO"],
+        sinonimos: ["MUSLO CUADRIL", "MUSLO POLLO", "MUSLO", "629"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "630",
+        producto: "ALAS DESPRESADAS POR KG",
+        categoria: "POLLO",
+        presentacion: "Caja 15 kg congelado",
+        kilosPorCaja: 15,
+        precioSugeridoUSD: 42,
+        codigosCadena: ["630", "ALAS"],
+        sinonimos: ["ALAS DE POLLO", "ALAS", "630"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "870",
+        producto: "HIGADO (EMPACADO)",
+        categoria: "POLLO",
+        presentacion: "Caja 15 kg congelado",
+        kilosPorCaja: 15,
+        precioSugeridoUSD: 25,
+        codigosCadena: ["870"],
+        sinonimos: ["HIGADO DE POLLO", "HIGADO", "870"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "393",
+        producto: "MOLLEJA (EMPACADA)",
+        categoria: "POLLO",
+        presentacion: "Caja 15 kg congelado",
+        kilosPorCaja: 15,
+        precioSugeridoUSD: 28,
+        codigosCadena: ["393"],
+        sinonimos: ["MOLLEJAS", "393"],
+        unidadSugerida: "KG"
+      },
+      // --- VÍVERES, BÁSICOS Y LÁCTEOS ---
+      {
+        sku: "301",
+        producto: "ACEITE VEGETAL COMESTIBLE 12X1LT",
+        categoria: "BASICOS",
+        presentacion: "Caja (12 botellas x 1L)",
+        kilosPorCaja: 11,
+        precioSugeridoUSD: 26.5,
+        codigosCadena: ["301", "ACEITE"],
+        sinonimos: ["ACEITE VEGETAL", "ACEITE", "301"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "302",
+        producto: "AZUCAR REFINADA BLANCA 50KG",
+        categoria: "BASICOS",
+        presentacion: "Saco 50 kg",
+        kilosPorCaja: 50,
+        precioSugeridoUSD: 48,
+        codigosCadena: ["302", "AZUCAR"],
+        sinonimos: ["AZUCAR 50KG", "AZUCAR", "302"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "303",
+        producto: "ARROZ BLANCO ESPECIAL 24X1KG",
+        categoria: "BASICOS",
+        presentacion: "Bulto (24 paquetes x 1kg)",
+        kilosPorCaja: 24,
+        precioSugeridoUSD: 28.8,
+        codigosCadena: ["303", "ARROZ"],
+        sinonimos: ["ARROZ 900GR", "ARROZ 24X1KG", "ARROZ", "303"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "401",
+        producto: "HUEVOS BLANCOS SELECCIONADOS",
+        categoria: "BASICOS",
+        presentacion: "Caja (12 cartones / 360 und)",
+        kilosPorCaja: 22,
+        precioSugeridoUSD: 45,
+        codigosCadena: ["401", "HUEVOS"],
+        sinonimos: ["HUEVOS BLANCOS", "HUEVOS", "401"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "1360",
+        producto: "PATATAS FRESCAS MARQUISE 4X2.5KG",
+        categoria: "CONGELADOS",
+        presentacion: "Caja (4 bolsas x 2.5kg)",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 22.8,
+        codigoBarra: "5412873178161",
+        codigosCadena: ["1360", "5412873178161", "PATATAS"],
+        sinonimos: ["PAPAS FRITAS CONGELADAS MARQUISE 2,5KG", "PAPAS MARQUISE", "PATATAS FRESCAS", "1360", "5412873178161"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "047",
+        producto: "NUGGET CORRAL DE 460GM",
+        categoria: "CONGELADOS",
+        presentacion: "Paquete 460g",
+        kilosPorCaja: 0.46,
+        precioSugeridoUSD: 3.88,
+        codigoBarra: "7591289400023",
+        codigosCadena: ["047", "7591289400023"],
+        sinonimos: ["NUGGETS DE POLLO DEL CORRAL 460GR", "NUGGETS DE POLLO DEL CORRAL 462GR", "NUGGET CORRAL DE 460GM", "047", "7591289400023"],
+        unidadSugerida: "UND"
+      },
+      {
+        sku: "046",
+        producto: "NUGGETS DE POLLO (COD. 046)",
+        categoria: "CONGELADOS",
+        presentacion: "Bolsa Institucional por Kg",
+        kilosPorCaja: 1,
+        precioSugeridoUSD: 8.71,
+        codigosCadena: ["046", "100253"],
+        sinonimos: ["NUGGETS EL CORRAL POR KG", "NUGGET CORRAL INSTITUCIONAL", "NUGGETS DE POLLO (COD. 046)", "046", "100253"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "7591210000513",
+        producto: "CREMA DE LECHE PURISIMA 500GR",
+        categoria: "LACTEOS",
+        presentacion: "Caja (6 und x 500g)",
+        kilosPorCaja: 3,
+        precioSugeridoUSD: 25.63,
+        codigoBarra: "7591210000513",
+        codigosCadena: ["7591210000513"],
+        sinonimos: ["CREMA DE LECHE PURISIMA 500GR", "CREMA DE LECHE PURISIMA 6 X 500 GRS", "7591210000513"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "7591210000544",
+        producto: "CREMA DE LECHE PURISIMA 250GR",
+        categoria: "LACTEOS",
+        presentacion: "Caja (12 und x 250g)",
+        kilosPorCaja: 3,
+        precioSugeridoUSD: 30.6,
+        codigoBarra: "7591210000544",
+        codigosCadena: ["7591210000544"],
+        sinonimos: ["CREMA DE LECHE PURISIMA 250GR", "CREMA DE LECHE PURISIMA 12 X 250 GRS", "7591210000544"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "021000061778",
+        producto: "QUESO CREMA KRAFT 226 GR X 36 UND",
+        categoria: "LACTEOS",
+        presentacion: "Unidad 226g (Caja x 36 und)",
+        kilosPorCaja: 0.226,
+        precioSugeridoUSD: 3,
+        codigoBarra: "021000061778",
+        codigosCadena: ["021000061778"],
+        sinonimos: ["QUESO CREMA MARCA KRAFT 226GR", "QUESO CREMA KRAFT 226 GR X 36 UND", "021000061778"],
+        unidadSugerida: "UND"
+      },
+      {
+        sku: "100281",
+        producto: "QUESO MOZZARELLA CORLASA 3.5KG X 4 UND",
+        categoria: "LACTEOS",
+        presentacion: "Pieza por Kg",
+        kilosPorCaja: 14,
+        precioSugeridoUSD: 10,
+        codigosCadena: ["100281"],
+        sinonimos: ["QUESO MOZZARELLA CORLASA X KG", "QUESO MOZZARELLA CORLASA 3.5KG X 4 UND", "100281"],
+        unidadSugerida: "KG"
+      },
+      {
+        sku: "1569",
+        producto: "PATATAS FRESCAS DOBLE COBERTURA 4X2.5KG",
+        categoria: "CONGELADOS",
+        presentacion: "Caja (4 bolsas x 2.5kg)",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 23.5,
+        codigosCadena: ["1569"],
+        sinonimos: ["PAPAS DOBLE COBERTURA", "1569"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "1536",
+        producto: "LECHE EN POLVO VENCAMPO 10X1KG",
+        categoria: "LACTEOS",
+        presentacion: "Bulto (10 und x 1kg)",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 0,
+        codigosCadena: ["1536"],
+        sinonimos: ["LECHE EN POLVO VENCAMPO 10X1KG", "LECHE EN POLVO COMPLETA VENCAMPO 1KG", "LECHE VENCAMPO 1KG", "1536"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "1556",
+        producto: "LECHE EN POLVO VENCAMPO 10X900GR",
+        categoria: "LACTEOS",
+        presentacion: "Bulto (10 und x 900g)",
+        kilosPorCaja: 9,
+        precioSugeridoUSD: 0,
+        codigosCadena: ["1556"],
+        sinonimos: ["LECHE EN POLVO VENCAMPO 10X900GR", "LECHE EN POLVO COMPLETA VENCAMPO 900GR", "LECHE VENCAMPO 900GR", "1556"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "1574",
+        producto: "LECHE EN POLVO VENCAMPO 10X400GR",
+        categoria: "LACTEOS",
+        presentacion: "Bulto (10 und x 400g)",
+        kilosPorCaja: 4,
+        precioSugeridoUSD: 0,
+        codigosCadena: ["1574"],
+        sinonimos: ["LECHE EN POLVO VENCAMPO 10X400GR", "LECHE EN POLVO COMPLETA VENCAMPO 400GR", "LECHE VENCAMPO 400GR", "1574"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "1579",
+        producto: "LECHE EN POLVO VENCAMPO 10X500GR",
+        categoria: "LACTEOS",
+        presentacion: "Bulto (10 und x 500g)",
+        kilosPorCaja: 5,
+        precioSugeridoUSD: 0,
+        codigosCadena: ["1579"],
+        sinonimos: ["LECHE EN POLVO VENCAMPO 10X500GR", "LECHE EN POLVO COMPLETA VENCAMPO 500GR", "LECHE VENCAMPO 500GR", "1579"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "7590377000503",
+        producto: "LECHE EN POLVO COMPLETA VENCAMPO 400GR",
+        categoria: "LACTEOS",
+        presentacion: "Bulto (10 und x 400g)",
+        kilosPorCaja: 4,
+        precioSugeridoUSD: 40,
+        codigoBarra: "7590377000503",
+        codigosCadena: ["7590377000503"],
+        sinonimos: ["LECHE EN POLVO COMPLETA VENCAMPO 400GR", "LECHE VENCAMPO 400GR", "7590377000503"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "7590377000510",
+        producto: "LECHE EN POLVO COMPLETA VENCAMPO 900GR",
+        categoria: "LACTEOS",
+        presentacion: "Bulto (10 und x 900g)",
+        kilosPorCaja: 9,
+        precioSugeridoUSD: 90,
+        codigoBarra: "7590377000510",
+        codigosCadena: ["7590377000510"],
+        sinonimos: ["LECHE EN POLVO COMPLETA VENCAMPO 900GR", "LECHE VENCAMPO 900GR", "7590377000510"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "1543",
+        producto: "AZUCAR BLANCA VENCAMPO 1X20ND",
+        categoria: "GRANOS / BASICOS",
+        presentacion: "Bulto (20 und x 1kg)",
+        kilosPorCaja: 20,
+        precioSugeridoUSD: 21.8,
+        codigoBarra: "7590377000220",
+        codigosCadena: ["1543", "001543", "7590377000220"],
+        sinonimos: ["AZUCAR BLANCA REFINADA VENCAMPO 1KG", "AZUCAR BLANCA VENCAMPO 1X20ND", "AZUCAR VENCAMPO 1KG", "1543", "7590377000220"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "1642",
+        producto: "ARVEJAS VENCAMPO 25 UND X 400GR",
+        categoria: "GRANOS / BASICOS",
+        presentacion: "Bulto (25 und x 400g)",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 20,
+        codigoBarra: "7590377000411",
+        codigosCadena: ["1642", "001642", "7590377000411"],
+        sinonimos: ["ARVEJAS VERDES VENCAMPO 400GR", "ARVEJAS VENCAMPO 25 UND X 400GR", "ARVEJAS VENCAMPO 400GR", "1642", "7590377000411"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "1644",
+        producto: "CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR",
+        categoria: "GRANOS / BASICOS",
+        presentacion: "Bulto (25 und x 400g)",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 20,
+        codigoBarra: "7590377000459",
+        codigosCadena: ["1644", "001644", "7590377000459"],
+        sinonimos: ["CARAOTAS NEGRAS VENCAMPO 400GR", "CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR", "CARAOTAS VENCAMPO 400GR", "1644", "7590377000459"],
+        unidadSugerida: "CJ"
+      },
+      {
+        sku: "1572",
+        producto: "CAJAS DE PIZZA 1X100",
+        categoria: "EMPAQUES",
+        presentacion: "Bulto (100 unidades)",
+        kilosPorCaja: 10,
+        precioSugeridoUSD: 25,
+        codigosCadena: ["1572"],
+        sinonimos: ["CAJA PIZZA", "1572"],
+        unidadSugerida: "BLT"
+      }
+    ];
+    (() => {
+      const existingSkus = new Set(CATALOGO_ALKOSTO.map((c) => String(c.sku).trim()));
+      for (const prod of PRODUCTOS_CODIZULCA) {
+        if (!existingSkus.has(prod.codigo)) {
+          const isKg = /\b(X\s*KG|POR\s*KG|A\s+GRANEL)\b/i.test(prod.descripcion);
+          CATALOGO_ALKOSTO.push({
+            sku: prod.codigo,
+            producto: prod.descripcion,
+            categoria: "CATALOGO CODIZULCA",
+            presentacion: isKg ? "KG" : "CJ",
+            kilosPorCaja: isKg ? 1 : 10,
+            precioSugeridoUSD: 0,
+            codigosCadena: [prod.codigo],
+            sinonimos: [prod.descripcion, prod.codigo],
+            unidadSugerida: isKg ? "KG" : "CJ"
+          });
+          existingSkus.add(prod.codigo);
+        }
+      }
+    })();
+  }
+});
 
 // src/services/alkostoOcParser.ts
-var ALKOSTO_OCR_MODEL_CASCADE = [
-  "gemini-2.5-flash",
-  "gemini-2.5-pro",
-  "gemini-2.0-flash"
-];
-var AlkostoOcrStageError = class extends Error {
-  constructor(stage, message, options) {
-    const cleanMsg = String(message || "Error desconocido").replace(/^Error en Etapa \[[^\]]+\]:\s*/i, "");
-    super(`Error en Etapa [${stage}]: ${cleanMsg}`);
-    this.name = "AlkostoOcrStageError";
-    this.stage = stage;
-    this.statusCode = options?.statusCode;
-    this.code = options?.code;
-    this.details = options?.details;
+function getSafeAbrevAlkosto() {
+  try {
+    return CADENAS_ABREVIATURAS?.ALKOSTO || FALLBACK_ABREV_ALKOSTO;
+  } catch {
+    return FALLBACK_ABREV_ALKOSTO;
   }
-};
-function buildAlkostoOcSystemPrompt(abrevAlkosto = CADENAS_ABREVIATURAS?.ALKOSTO || ["AK01", "AK02", "AK03", "AK04", "AK05", "AK06", "AK07", "AK08", "AK09", "AK10"], abrevFamilia = CADENAS_ABREVIATURAS?.FAMILIA_CENTER || ["FC01", "FC02", "FC03", "FC04", "FC05", "FC06", "FC07"]) {
-  const akTagsStr = (abrevAlkosto || []).join(", ");
-  const fcTagsStr = (abrevFamilia || []).join(", ");
-  const sucursalesAkDetalle = (SUCURSALES_ALKOSTO || []).map((s) => `${s.tag || s.codigo}: "${s.nombre}" (ID ${s.codigo})`).join(" | ");
-  const sucursalesFcDetalle = (SUCURSALES_FAMILIA_CENTER || []).map((s) => `${s.tag || s.codigo}: "${s.nombre}" (ID ${s.codigo})`).join(" | ");
+}
+function getSafeAbrevFamilia() {
+  try {
+    return CADENAS_ABREVIATURAS?.FAMILIA_CENTER || FALLBACK_ABREV_FAMILIA;
+  } catch {
+    return FALLBACK_ABREV_FAMILIA;
+  }
+}
+function getSafeSucursalesAlkosto() {
+  try {
+    return SUCURSALES_ALKOSTO || [];
+  } catch {
+    return [];
+  }
+}
+function getSafeSucursalesFamilia() {
+  try {
+    return SUCURSALES_FAMILIA_CENTER || [];
+  } catch {
+    return [];
+  }
+}
+function buildAlkostoOcSystemPrompt(abrevAlkosto, abrevFamilia) {
+  const resolvedAk = abrevAlkosto || getSafeAbrevAlkosto();
+  const resolvedFc = abrevFamilia || getSafeAbrevFamilia();
+  const akTagsStr = (resolvedAk || []).join(", ");
+  const fcTagsStr = (resolvedFc || []).join(", ");
+  const sucursalesAkDetalle = getSafeSucursalesAlkosto().map((s) => `${s.tag || s.codigo}: "${s.nombre}" (ID ${s.codigo})`).join(" | ");
+  const sucursalesFcDetalle = getSafeSucursalesFamilia().map((s) => `${s.tag || s.codigo}: "${s.nombre}" (ID ${s.codigo})`).join(" | ");
   const catalogoOficial158Str = formatCatalogoCodizulcaForPrompt();
   return `ROL Y OBJETIVO:
 Eres un motor experto en extracci\xF3n de datos contables y comerciales (OCR + Comprensi\xF3n Documental) especializado en procesar \xD3rdenes de Compra emitidas por ALKOSTO y FAMILIA CENTER para ser integradas autom\xE1ticamente en la Nota de Pedido de Codizulca.
@@ -1764,162 +1800,6 @@ ESQUEMA JSON DE SALIDA REQUERIDO:
   }
 }`;
 }
-var ALKOSTO_OC_EXTRACTION_SYSTEM_PROMPT = buildAlkostoOcSystemPrompt();
-var ALKOSTO_OC_RESPONSE_SCHEMA = {
-  type: "OBJECT",
-  properties: {
-    numeroOrden: {
-      type: "STRING",
-      description: 'N\xFAmero de la Orden de Compra emitida por Alkosto / Familia Center (ej. "0000054457").'
-    },
-    fechaOrden: {
-      type: "STRING",
-      description: "Fecha de emisi\xF3n de la orden de compra (YYYY-MM-DD o DD/MM/YYYY)."
-    },
-    fechaEntrega: {
-      type: "STRING",
-      nullable: true,
-      description: "Fecha estimada de entrega de la orden (YYYY-MM-DD o DD/MM/YYYY)."
-    },
-    diasCredito: {
-      type: "NUMBER",
-      nullable: true,
-      description: "D\xEDas de cr\xE9dito de la condici\xF3n de pago (ej. 10, 15, 30)."
-    },
-    tasaCambio: {
-      type: "NUMBER",
-      nullable: true,
-      description: "Tasa de cambio BCV impresa en la cabecera (ej. 872.3927)."
-    },
-    observaciones: {
-      type: "STRING",
-      nullable: true,
-      description: "Observaciones generales impresas en la cabecera de la orden."
-    },
-    tiendasDetectadas: {
-      type: "ARRAY",
-      description: "Lista de c\xF3digos de las sucursales de Alkosto (AK01..AK10) y Familia Center (FC01..FC07) presentes en la orden, excluyendo AKOP y CI.",
-      items: {
-        type: "STRING"
-      }
-    },
-    renglones: {
-      type: "ARRAY",
-      description: "Totalidad de los renglones de productos de la Orden de Compra unificando todas sus p\xE1ginas.",
-      items: {
-        type: "OBJECT",
-        properties: {
-          codigo: {
-            type: "STRING",
-            description: 'C\xF3digo num\xE9rico oficial de Codizulca del 9 al 1662 cuando hay coincidencia exacta de EAN o sustantivo principal (ej. "1642" para EAN 7590377000411 ARVEJAS VENCAMPO, "1644" para EAN 7590377000459 CARAOTAS NEGRAS VENCAMPO, "1574" para EAN 7590377000503 LECHE VENCAMPO 10X400GR), o "PENDIENTE" si el producto no tiene coincidencia exacta de sustantivo principal en el cat\xE1logo. PROHIBIDO inventar siglas como LPV o asignar 1555 por coincidencia parcial de marca/gramaje.'
-          },
-          codigoProducto: {
-            type: "STRING",
-            nullable: true,
-            description: 'C\xF3digo principal o SKU del producto homologado a Codizulca (o "PENDIENTE" si requiere asignaci\xF3n manual).'
-          },
-          ean: {
-            type: "STRING",
-            nullable: true,
-            description: 'C\xF3digo de barras EAN-13 impreso en la OC si est\xE1 presente (ej. "7590377000411", "7590377000459").'
-          },
-          codigoInternoAlkosto: {
-            type: "STRING",
-            nullable: true,
-            description: 'C\xF3digo interno PLU de Alkosto si est\xE1 presente (ej. "100881").'
-          },
-          descripcion: {
-            type: "STRING",
-            description: 'Descripci\xF3n del producto: si tiene coincidencia exacta de EAN o sustantivo principal en el cat\xE1logo de Codizulca, usa su descripci\xF3n oficial (ej. "ARVEJAS VENCAMPO 25 UND X 400GR", "CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR"); si NO tiene coincidencia exacta en el cat\xE1logo, conserva intacta la descripci\xF3n original del PDF (ej. "ARVEJAS VERDES VENCAMPO 400GR/1.00").'
-          },
-          unidad: {
-            type: "STRING",
-            description: 'Unidad de empaque solicitada: "BULTO", "CAJA", "CJ", "KG" o "UND".'
-          },
-          unidadMedida: {
-            type: "STRING",
-            nullable: true,
-            description: 'Unidad de medida normalizada: "CJ", "KG", "UND" o "BLT".'
-          },
-          unidadesPorEmpaque: {
-            type: "NUMBER",
-            nullable: true,
-            description: "Unidades por empaque (columna EMP)."
-          },
-          cantidad: {
-            type: "NUMBER",
-            description: "Cantidad num\xE9rica solicitada del producto."
-          },
-          cantidadTotal: {
-            type: "NUMBER",
-            nullable: true,
-            description: "Cantidad total solicitada del producto sumando las sucursales v\xE1lidas."
-          },
-          desglosePorTienda: {
-            type: "ARRAY",
-            description: "Desglose de cantidades pedidas por cada tienda v\xE1lida (AK01..AK10, FC01..FC07), ignorando AKOP y CI.",
-            items: {
-              type: "OBJECT",
-              properties: {
-                tienda: {
-                  type: "STRING",
-                  description: 'C\xF3digo de tienda (ej. "AK01", "FC01").'
-                },
-                cantidad: {
-                  type: "NUMBER",
-                  description: "Cantidad num\xE9rica asignada a esa tienda."
-                }
-              },
-              required: ["tienda", "cantidad"]
-            }
-          },
-          valorUnitarioOC: {
-            type: "NUMBER",
-            description: "Valor unitario exacto le\xEDdo de la Orden de Compra por cada unidad de empaque solicitada (sin confundirlo con subtotal ni impuestos)."
-          },
-          precioUnitario: {
-            type: "NUMBER",
-            nullable: true,
-            description: "Costo o valor unitario neto en USD le\xEDdo de la Orden de Compra."
-          },
-          porcentajeDescuento: {
-            type: "NUMBER",
-            nullable: true,
-            description: "Porcentaje de descuento o bonificaci\xF3n comercial si aplica."
-          },
-          subtotal: {
-            type: "NUMBER",
-            description: "Subtotal exacto del rengl\xF3n en USD (cantidad * valorUnitarioOC)."
-          }
-        },
-        required: [
-          "codigo",
-          "descripcion",
-          "unidad",
-          "cantidad",
-          "desglosePorTienda",
-          "valorUnitarioOC",
-          "subtotal"
-        ]
-      }
-    },
-    subtotalAlkosto: {
-      type: "NUMBER",
-      nullable: true,
-      description: "Subtotal de la p\xE1gina de Alkosto en USD."
-    },
-    subtotalFamiliaCenter: {
-      type: "NUMBER",
-      nullable: true,
-      description: "Subtotal de la p\xE1gina de Familia Center en USD."
-    },
-    montoTotal: {
-      type: "NUMBER",
-      description: "Monto total general de la Orden de Compra en USD."
-    }
-  },
-  required: ["numeroOrden", "fechaOrden", "tiendasDetectadas", "renglones", "montoTotal"]
-};
 function sanitizeBase64Payload(rawBase64) {
   if (!rawBase64 || typeof rawBase64 !== "string") return "";
   const readerResult = rawBase64.trim().replace(/^data:(image\/[\w.+-]+|application\/pdf);base64,/i, "").replace(/^data:[^;]+;base64,/i, "");
@@ -2159,50 +2039,6 @@ function construirDistribucionTiendasCanonico(tiendas, customStoreItems, fallbac
   }
   return [];
 }
-var AlkostoParseValidationError = class extends Error {
-  constructor(message, issues = [], code = "ALKOSTO_OC_VALIDATION_ERROR") {
-    super(message);
-    this.name = "AlkostoParseValidationError";
-    this.code = code;
-    this.issues = issues;
-  }
-};
-var ALKOSTO_STORE_TAGS = [
-  "AK01",
-  "AK02",
-  "AK03",
-  "AK04",
-  "AK05",
-  "AK06",
-  "AK07",
-  "AK08",
-  "AK09",
-  "AK10",
-  "AK11",
-  "AKOP",
-  "CI"
-];
-var FAMILIA_CENTER_STORE_TAGS = [
-  "FC01",
-  "FC02",
-  "FC03",
-  "FC04",
-  "FC05",
-  "FC06",
-  "FC07",
-  "FC08",
-  "FCOP"
-];
-var VECINO_CENTER_STORE_TAGS = [
-  "VC01",
-  "VC02",
-  "VC03"
-];
-var ALL_VALID_STORE_TAGS = /* @__PURE__ */ new Set([
-  ...ALKOSTO_STORE_TAGS,
-  ...FAMILIA_CENTER_STORE_TAGS,
-  ...VECINO_CENTER_STORE_TAGS
-]);
 function parseNumeroEstricto(val, defaultVal = 0) {
   if (typeof val === "number") {
     return Number.isFinite(val) ? val : defaultVal;
@@ -4247,11 +4083,256 @@ function calcularResumenCuadreOC(data, ordenNroOverride) {
     textoResumen
   };
 }
+var ALKOSTO_OCR_MODEL_CASCADE, AlkostoOcrStageError, FALLBACK_ABREV_ALKOSTO, FALLBACK_ABREV_FAMILIA, ALKOSTO_OC_EXTRACTION_SYSTEM_PROMPT, ALKOSTO_OC_RESPONSE_SCHEMA, AlkostoParseValidationError, ALKOSTO_STORE_TAGS, FAMILIA_CENTER_STORE_TAGS, VECINO_CENTER_STORE_TAGS, ALL_VALID_STORE_TAGS;
+var init_alkostoOcParser = __esm({
+  "src/services/alkostoOcParser.ts"() {
+    init_define_import_meta_env();
+    init_alkostoService();
+    init_productosCodizulca();
+    ALKOSTO_OCR_MODEL_CASCADE = [
+      "gemini-2.5-flash",
+      "gemini-2.5-pro",
+      "gemini-2.0-flash"
+    ];
+    AlkostoOcrStageError = class extends Error {
+      constructor(stage, message, options) {
+        const cleanMsg = String(message || "Error desconocido").replace(/^Error en Etapa \[[^\]]+\]:\s*/i, "");
+        super(`Error en Etapa [${stage}]: ${cleanMsg}`);
+        this.name = "AlkostoOcrStageError";
+        this.stage = stage;
+        this.statusCode = options?.statusCode;
+        this.code = options?.code;
+        this.details = options?.details;
+      }
+    };
+    FALLBACK_ABREV_ALKOSTO = ["AK01", "AK02", "AK03", "AK04", "AK05", "AK06", "AK07", "AK08", "AK09", "AK10", "AK11", "AKOP"];
+    FALLBACK_ABREV_FAMILIA = ["FC01", "FC02", "FC03", "FC04", "FC05", "FC06", "FC07", "FC08", "FCOP"];
+    ALKOSTO_OC_EXTRACTION_SYSTEM_PROMPT = buildAlkostoOcSystemPrompt();
+    ALKOSTO_OC_RESPONSE_SCHEMA = {
+      type: "OBJECT",
+      properties: {
+        numeroOrden: {
+          type: "STRING",
+          description: 'N\xFAmero de la Orden de Compra emitida por Alkosto / Familia Center (ej. "0000054457").'
+        },
+        fechaOrden: {
+          type: "STRING",
+          description: "Fecha de emisi\xF3n de la orden de compra (YYYY-MM-DD o DD/MM/YYYY)."
+        },
+        fechaEntrega: {
+          type: "STRING",
+          nullable: true,
+          description: "Fecha estimada de entrega de la orden (YYYY-MM-DD o DD/MM/YYYY)."
+        },
+        diasCredito: {
+          type: "NUMBER",
+          nullable: true,
+          description: "D\xEDas de cr\xE9dito de la condici\xF3n de pago (ej. 10, 15, 30)."
+        },
+        tasaCambio: {
+          type: "NUMBER",
+          nullable: true,
+          description: "Tasa de cambio BCV impresa en la cabecera (ej. 872.3927)."
+        },
+        observaciones: {
+          type: "STRING",
+          nullable: true,
+          description: "Observaciones generales impresas en la cabecera de la orden."
+        },
+        tiendasDetectadas: {
+          type: "ARRAY",
+          description: "Lista de c\xF3digos de las sucursales de Alkosto (AK01..AK10) y Familia Center (FC01..FC07) presentes en la orden, excluyendo AKOP y CI.",
+          items: {
+            type: "STRING"
+          }
+        },
+        renglones: {
+          type: "ARRAY",
+          description: "Totalidad de los renglones de productos de la Orden de Compra unificando todas sus p\xE1ginas.",
+          items: {
+            type: "OBJECT",
+            properties: {
+              codigo: {
+                type: "STRING",
+                description: 'C\xF3digo num\xE9rico oficial de Codizulca del 9 al 1662 cuando hay coincidencia exacta de EAN o sustantivo principal (ej. "1642" para EAN 7590377000411 ARVEJAS VENCAMPO, "1644" para EAN 7590377000459 CARAOTAS NEGRAS VENCAMPO, "1574" para EAN 7590377000503 LECHE VENCAMPO 10X400GR), o "PENDIENTE" si el producto no tiene coincidencia exacta de sustantivo principal en el cat\xE1logo. PROHIBIDO inventar siglas como LPV o asignar 1555 por coincidencia parcial de marca/gramaje.'
+              },
+              codigoProducto: {
+                type: "STRING",
+                nullable: true,
+                description: 'C\xF3digo principal o SKU del producto homologado a Codizulca (o "PENDIENTE" si requiere asignaci\xF3n manual).'
+              },
+              ean: {
+                type: "STRING",
+                nullable: true,
+                description: 'C\xF3digo de barras EAN-13 impreso en la OC si est\xE1 presente (ej. "7590377000411", "7590377000459").'
+              },
+              codigoInternoAlkosto: {
+                type: "STRING",
+                nullable: true,
+                description: 'C\xF3digo interno PLU de Alkosto si est\xE1 presente (ej. "100881").'
+              },
+              descripcion: {
+                type: "STRING",
+                description: 'Descripci\xF3n del producto: si tiene coincidencia exacta de EAN o sustantivo principal en el cat\xE1logo de Codizulca, usa su descripci\xF3n oficial (ej. "ARVEJAS VENCAMPO 25 UND X 400GR", "CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR"); si NO tiene coincidencia exacta en el cat\xE1logo, conserva intacta la descripci\xF3n original del PDF (ej. "ARVEJAS VERDES VENCAMPO 400GR/1.00").'
+              },
+              unidad: {
+                type: "STRING",
+                description: 'Unidad de empaque solicitada: "BULTO", "CAJA", "CJ", "KG" o "UND".'
+              },
+              unidadMedida: {
+                type: "STRING",
+                nullable: true,
+                description: 'Unidad de medida normalizada: "CJ", "KG", "UND" o "BLT".'
+              },
+              unidadesPorEmpaque: {
+                type: "NUMBER",
+                nullable: true,
+                description: "Unidades por empaque (columna EMP)."
+              },
+              cantidad: {
+                type: "NUMBER",
+                description: "Cantidad num\xE9rica solicitada del producto."
+              },
+              cantidadTotal: {
+                type: "NUMBER",
+                nullable: true,
+                description: "Cantidad total solicitada del producto sumando las sucursales v\xE1lidas."
+              },
+              desglosePorTienda: {
+                type: "ARRAY",
+                description: "Desglose de cantidades pedidas por cada tienda v\xE1lida (AK01..AK10, FC01..FC07), ignorando AKOP y CI.",
+                items: {
+                  type: "OBJECT",
+                  properties: {
+                    tienda: {
+                      type: "STRING",
+                      description: 'C\xF3digo de tienda (ej. "AK01", "FC01").'
+                    },
+                    cantidad: {
+                      type: "NUMBER",
+                      description: "Cantidad num\xE9rica asignada a esa tienda."
+                    }
+                  },
+                  required: ["tienda", "cantidad"]
+                }
+              },
+              valorUnitarioOC: {
+                type: "NUMBER",
+                description: "Valor unitario exacto le\xEDdo de la Orden de Compra por cada unidad de empaque solicitada (sin confundirlo con subtotal ni impuestos)."
+              },
+              precioUnitario: {
+                type: "NUMBER",
+                nullable: true,
+                description: "Costo o valor unitario neto en USD le\xEDdo de la Orden de Compra."
+              },
+              porcentajeDescuento: {
+                type: "NUMBER",
+                nullable: true,
+                description: "Porcentaje de descuento o bonificaci\xF3n comercial si aplica."
+              },
+              subtotal: {
+                type: "NUMBER",
+                description: "Subtotal exacto del rengl\xF3n en USD (cantidad * valorUnitarioOC)."
+              }
+            },
+            required: [
+              "codigo",
+              "descripcion",
+              "unidad",
+              "cantidad",
+              "desglosePorTienda",
+              "valorUnitarioOC",
+              "subtotal"
+            ]
+          }
+        },
+        subtotalAlkosto: {
+          type: "NUMBER",
+          nullable: true,
+          description: "Subtotal de la p\xE1gina de Alkosto en USD."
+        },
+        subtotalFamiliaCenter: {
+          type: "NUMBER",
+          nullable: true,
+          description: "Subtotal de la p\xE1gina de Familia Center en USD."
+        },
+        montoTotal: {
+          type: "NUMBER",
+          description: "Monto total general de la Orden de Compra en USD."
+        }
+      },
+      required: ["numeroOrden", "fechaOrden", "tiendasDetectadas", "renglones", "montoTotal"]
+    };
+    AlkostoParseValidationError = class extends Error {
+      constructor(message, issues = [], code = "ALKOSTO_OC_VALIDATION_ERROR") {
+        super(message);
+        this.name = "AlkostoParseValidationError";
+        this.code = code;
+        this.issues = issues;
+      }
+    };
+    ALKOSTO_STORE_TAGS = [
+      "AK01",
+      "AK02",
+      "AK03",
+      "AK04",
+      "AK05",
+      "AK06",
+      "AK07",
+      "AK08",
+      "AK09",
+      "AK10",
+      "AK11",
+      "AKOP",
+      "CI"
+    ];
+    FAMILIA_CENTER_STORE_TAGS = [
+      "FC01",
+      "FC02",
+      "FC03",
+      "FC04",
+      "FC05",
+      "FC06",
+      "FC07",
+      "FC08",
+      "FCOP"
+    ];
+    VECINO_CENTER_STORE_TAGS = [
+      "VC01",
+      "VC02",
+      "VC03"
+    ];
+    ALL_VALID_STORE_TAGS = /* @__PURE__ */ new Set([
+      ...ALKOSTO_STORE_TAGS,
+      ...FAMILIA_CENTER_STORE_TAGS,
+      ...VECINO_CENTER_STORE_TAGS
+    ]);
+  }
+});
 
 // server.ts
+var server_exports = {};
+__export(server_exports, {
+  authenticateToken: () => authenticateToken,
+  metasPeriodoActual: () => metasPeriodoActual,
+  rateLimiter: () => rateLimiter,
+  requireAdmin: () => requireAdmin
+});
+module.exports = __toCommonJS(server_exports);
+init_define_import_meta_env();
+var import_express = __toESM(require("express"), 1);
+var import_path = __toESM(require("path"), 1);
+var import_fs = __toESM(require("fs"), 1);
+var import_https = __toESM(require("https"), 1);
+var import_zlib = __toESM(require("zlib"), 1);
+var import_vite = require("vite");
+var import_dotenv = __toESM(require("dotenv"), 1);
+init_alkostoOcParser();
+init_productosCodizulca();
 var import_crypto = __toESM(require("crypto"), 1);
 
 // src/lib/rubros.ts
+init_define_import_meta_env();
 var RUBROS_CONFIG = [
   {
     codigo: "AZUCAR",
@@ -4360,6 +4441,7 @@ function clasificarRubroServerLabel(sku, nombre) {
 }
 
 // src/utils/maestraParser.ts
+init_define_import_meta_env();
 var MaestraParseError = class extends Error {
   constructor(message) {
     super(message);
@@ -4624,6 +4706,7 @@ function parseMaestraBytes(bytes) {
 }
 
 // src/utils/maestraSync.ts
+init_define_import_meta_env();
 var MAESTRA_CHUNK_SIZE = 500;
 var MAESTRA_UMBRAL_BAJAS = 0.1;
 var MaestraEsquemaError = class extends Error {
@@ -4926,6 +5009,7 @@ async function leerCarteraActivaMaestra(supabase2, idActivacionPorCodigo = /* @_
 }
 
 // src/services/venezuelanReceiptAuditor.ts
+init_define_import_meta_env();
 var import_genai = require("@google/genai");
 var MAX_COHERENT_MONTO_BS = 5e9;
 var VENEZUELAN_RECEIPT_RESPONSE_SCHEMA = {
@@ -6208,6 +6292,7 @@ async function extractSupportWithGemini(options) {
 }
 
 // src/services/bcvRateService.ts
+init_define_import_meta_env();
 var XLSX = __toESM(require("xlsx"), 1);
 var BCV_INDICE_INVERSION_URL = "https://www.bcv.org.ve/estadisticas/indice-de-inversion";
 var BCV_SMC_URL = "https://www.bcv.org.ve/estadisticas/tipo-cambio-de-referencia-smc";
@@ -6421,7 +6506,11 @@ function resolveBcvRateWithBusinessDayFallback(ratesMap, fechaInput, maxLookback
   return null;
 }
 
+// server.ts
+init_firebase();
+
 // src/utils/vendorRoutes.ts
+init_define_import_meta_env();
 var SUPERVISOR_SUMMARY_COLUMNS = /* @__PURE__ */ new Set([
   "ALI PEREZ",
   "NELSON FINOL",
@@ -6869,6 +6958,7 @@ function getVendorProfile(username) {
 }
 
 // src/utils/maestraCatalogSanitizer.ts
+init_define_import_meta_env();
 function sanitizeCatalogText(val) {
   if (val === null || val === void 0) return "";
   return String(val).replace(/^\uFEFF/, "").replace(/[\u200B-\u200D\uFEFF]/g, "").replace(/Ã‘|Ã±/g, "\xD1").replace(/\s+/g, " ").trim();
@@ -7545,6 +7635,7 @@ function getRuntimeSellerCatalog() {
 }
 
 // src/services/googleSheetsParser.ts
+init_define_import_meta_env();
 var DEFAULT_GOOGLE_SHEET_ID = "1PLzYEe9GG1vHb_wjd7HA93U6UQNtyP-uk8sxVfiN4sg";
 function sanitizeGoogleSheetId(raw) {
   if (!raw) return DEFAULT_GOOGLE_SHEET_ID;
@@ -13808,8 +13899,20 @@ async function startServer() {
   const distIndexExists = import_fs.default.existsSync(import_path.default.join(distPath, "index.html"));
   const isDevMode = process.env.npm_lifecycle_event === "dev" || process.env.NODE_ENV === "development";
   if (!isDevMode && distIndexExists) {
-    app2.use(import_express.default.static(distPath));
+    app2.use(
+      import_express.default.static(distPath, {
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith("index.html")) {
+            res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+          }
+        }
+      })
+    );
     app2.get("*", (req, res) => {
+      if (req.path.startsWith("/assets/")) {
+        return res.status(404).end();
+      }
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
       res.sendFile(import_path.default.join(distPath, "index.html"));
     });
   } else {
@@ -13824,6 +13927,10 @@ async function startServer() {
       if (distIndexExists) {
         app2.use(import_express.default.static(distPath));
         app2.get("*", (req, res) => {
+          if (req.path.startsWith("/assets/")) {
+            return res.status(404).end();
+          }
+          res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
           res.sendFile(import_path.default.join(distPath, "index.html"));
         });
       }
