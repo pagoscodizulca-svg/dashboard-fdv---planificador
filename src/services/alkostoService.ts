@@ -11,6 +11,7 @@ import { db } from '../lib/firebase';
 import { AlkostoOrder, EstadoPedidoAlkosto, AlkostoOrderItem, ParsedOrdenCompraAlkosto } from '../types';
 import { getAuthHeaders } from './authService';
 import { PRODUCTOS_CODIZULCA, matchProductoCodizulca, toSafeNumber, hasPrimaryNounConflict, isBrandOrPresentationToken } from './productosCodizulca';
+import * as parserMod from './alkostoOcParser';
 
 export const ALKOSTO_COLLECTION = 'alkosto_orders';
 const STORAGE_KEY = 'dashboard_fdv_alkosto_orders_cache';
@@ -1811,7 +1812,6 @@ export async function parseAlkostoOrderImage(
   mimeType: string = 'image/jpeg',
   fileName?: string
 ): Promise<ParsedOrdenCompraAlkosto> {
-  const parserMod = await import('./alkostoOcParser');
   const readerResult = String(imageBase64 || '').trim();
   const base64Data = (readerResult.includes(',') ? readerResult.split(',')[1] : readerResult)
     .replace(/^data:[^;]+;base64,/i, '')
@@ -1999,7 +1999,7 @@ export async function parseAlkostoOrderImage(
         CADENAS_ABREVIATURAS.ALKOSTO,
         CADENAS_ABREVIATURAS.FAMILIA_CENTER
       );
-      const prompt = `Analiza minuciosamente la imagen, captura o documento PDF adjunto correspondiente a una Orden de Compra de ALKOSTO y FAMILIA CENTER en todas sus páginas. Devuelve ÚNICAMENTE el objeto JSON válido consolidando las cantidades por tienda en las 17 tiendas válidas (${CADENAS_ABREVIATURAS.ALKOSTO.join(', ')} y ${CADENAS_ABREVIATURAS.FAMILIA_CENTER.join(', ')}, ignorando AKOP y CI) y normalizando los montos numéricos sin comas de miles.`;
+      const prompt = `Analiza minuciosamente la imagen, captura o documento PDF adjunto correspondiente a una Orden de Compra de ALKOSTO y FAMILIA CENTER en todas sus páginas. Devuelve ÚNICAMENTE el objeto JSON válido consolidando las cantidades por tienda (${CADENAS_ABREVIATURAS.ALKOSTO.join(', ')} y ${CADENAS_ABREVIATURAS.FAMILIA_CENTER.join(', ')}, incluyendo AKOP/FCOP si tienen cantidad > 0 e ignorando CI) y normalizando los montos numéricos sin comas de miles.`;
 
       const geminiOut = await parserMod.callGeminiWithFallback({
         base64Data,
