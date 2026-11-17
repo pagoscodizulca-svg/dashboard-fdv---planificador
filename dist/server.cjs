@@ -6761,11 +6761,15 @@ var VENDOR_PROFILES = {
       { id: "MARYERY GARCIA", label: "Ruta Maryery Garc\xEDa", aliases: ["MARYERY GARCIA"] }
     ]
   },
-  "LUIS GUANIPA": {
-    canonicalUsername: "LUIS GUANIPA",
-    displayName: "Luis Guanipa",
+  "VICTORIA VARGAS": {
+    canonicalUsername: "VICTORIA VARGAS",
+    displayName: "Victoria Vargas",
     routes: [
-      { id: "LUIS GUANIPA", label: "Ruta Luis Guanipa", aliases: ["LUIS GUANIPA"] }
+      {
+        id: "VICTORIA VARGAS",
+        label: "Ruta Victoria Vargas",
+        aliases: ["VICTORIA VARGAS", "LUIS GUANIPA", "RUTA VICTORIA VARGAS", "RUTA LUIS GUANIPA"]
+      }
     ]
   },
   "PEDRO ABREU": {
@@ -6813,6 +6817,7 @@ VENDOR_PROFILES["OSCAR ORTIZ- LA COSTA"] = VENDOR_PROFILES["OSCAR ORTIZ"];
 VENDOR_PROFILES["OSCAR ORTIZ - LA COSTA"] = VENDOR_PROFILES["OSCAR ORTIZ"];
 VENDOR_PROFILES["OSCAR ORTIZ- CORO"] = VENDOR_PROFILES["OSCAR ORTIZ"];
 VENDOR_PROFILES["OSCAR ORTIZ - CORO"] = VENDOR_PROFILES["OSCAR ORTIZ"];
+VENDOR_PROFILES["LUIS GUANIPA"] = VENDOR_PROFILES["VICTORIA VARGAS"];
 var SUPERVISOR_PROFILES = {
   "ALI PEREZ": {
     canonicalUsername: "ALI PEREZ",
@@ -6823,7 +6828,7 @@ var SUPERVISOR_PROFILES = {
       "VICTOR CAMPOS",
       "ELISA SOLER",
       "LEONARDO RIOS",
-      "LUIS GUANIPA",
+      "VICTORIA VARGAS",
       "OSCAR ORTIZ"
     ]
   },
@@ -7178,10 +7183,10 @@ var OFFICIAL_MASTER_VENDEDORES_SEED = [
   {
     vendedor_id: "40",
     codigo_erp: "40",
-    nombre_canonico: "LUIS GUANIPA",
-    display_name: "Luis Guanipa",
-    ruta_oficial: "LUIS GUANIPA",
-    aliases: ["LUIS GUANIPA"],
+    nombre_canonico: "VICTORIA VARGAS",
+    display_name: "Victoria Vargas",
+    ruta_oficial: "VICTORIA VARGAS",
+    aliases: ["VICTORIA VARGAS", "LUIS GUANIPA"],
     supervisor: "ALI PEREZ",
     zona: "Coro / Falc\xF3n",
     region: "Supervisi\xF3n Ali Perez",
@@ -7905,6 +7910,9 @@ function normalizeCuentasClavesVendor(vendorName) {
   if (u === "SAIRU VALLES" || u === "SAIR\xDA VALLES" || u === "CUENTAS CLAVE 2" || u === "CUENTAS CLAVES 2" || u === "CUENTAS CLAVE 2 - SV" || u === "CUENTAS CLAVES 2 - SV") {
     return { id: "CUENTAS CLAVES 2 - SV", display: "Cuentas claves 2 - SV" };
   }
+  if (u === "LUIS GUANIPA" || u === "VICTORIA VARGAS" || u === "RUTA LUIS GUANIPA" || u === "RUTA VICTORIA VARGAS") {
+    return { id: "VICTORIA VARGAS", display: "VICTORIA VARGAS" };
+  }
   return null;
 }
 function formatVolumenVendorDisplay(vendorName) {
@@ -8521,7 +8529,8 @@ function parseWorkbookFull(XLSX2, workbook, options) {
           continue;
         }
         const rawVendor = row[resolvedVendorCol];
-        const vName = rawVendor !== null && rawVendor !== void 0 ? String(rawVendor).replace(/\s+/g, " ").trim() : "";
+        const rawVName = rawVendor !== null && rawVendor !== void 0 ? String(rawVendor).replace(/\s+/g, " ").trim() : "";
+        const vName = rawVName.toUpperCase() === "LUIS GUANIPA" ? "VICTORIA VARGAS" : rawVName;
         if (!vName) {
           tabMetric.summaryRowsSkipped++;
           continue;
@@ -8991,7 +9000,7 @@ async function startServer() {
     "JOHNATAN SOTO VILLA DEL ROS": { password: "18395226", role: "VENDEDOR", vendorId: "37" },
     "LEONARDO RIOS": { password: "17925198", role: "VENDEDOR", vendorId: "38" },
     "MARYERY GARCIA": { password: "12712534", role: "VENDEDOR", vendorId: "39" },
-    "LUIS GUANIPA": { password: "18700742", role: "VENDEDOR", vendorId: "40" },
+    "VICTORIA VARGAS": { password: process.env.VICTORIA_VARGAS_PASSWORD_HASH || "$2b$10$QzlUMUB08xzDe2HdhH7tQu9f0Pfiw9hI8bsPPGgg3ffqHV4VrVwTi", role: "VENDEDOR", vendorId: "40" },
     "PEDRO ABREU": { password: "12456937", role: "VENDEDOR", vendorId: "45" },
     "OSCAR ORTIZ": { password: "16347637", role: "VENDEDOR", vendorId: "46" }
   };
@@ -9024,6 +9033,9 @@ async function startServer() {
         try {
           const { data: supaUser, error: supaErr } = await supabase.from("usuarios").select("*").in("username", [usuarioUpper, matchedCanonicalKey]).maybeSingle();
           if (!supaErr && supaUser) {
+            if (supaUser.activo === false) {
+              return res.status(401).json({ success: false, error: "Usuario inactivo o deshabilitado" });
+            }
             const isBcrypt = supaUser.password_hash && supaUser.password_hash.startsWith("$2");
             let isValid = false;
             if (isBcrypt) {
@@ -9031,7 +9043,7 @@ async function startServer() {
             } else {
               isValid = pwd === supaUser.password_hash || pwdClean === supaUser.password_hash || creds && (pwd === creds.password || pwdClean === creds.password) || matchedCanonicalKey === "ANGEL NAVARRO" && pwdClean === "25468939" || isNewFalconVendor && (pwdClean === "19117934" || pwd === "123" || pwdClean === String(supaUser.vendor_id || ""));
             }
-            if (!isValid && creds && (pwd === creds.password || pwdClean === creds.password)) {
+            if (!isValid && creds && !creds.password.startsWith("$2") && (pwd === creds.password || pwdClean === creds.password)) {
               isValid = true;
             }
             if (isValid) {
@@ -9067,7 +9079,8 @@ async function startServer() {
         return res.status(401).json({ success: false, error: "Usuario no autorizado o no encontrado en la base de datos" });
       }
       const isMikel = matchedCanonicalKey.includes("MIKELANGELO") || matchedCanonicalKey.includes("SOTO") || matchedCanonicalKey.includes("JOHNATAN");
-      const isValidPwd = pwd === creds.password || pwdClean === creds.password || matchedCanonicalKey === "ANGEL NAVARRO" && pwdClean === "25468939" || isMikel && (pwdClean === "20863632" || pwdClean === "18395226") || isNewFalconVendor && (pwdClean === "19117934" || pwd === "123" || pwdClean === creds.vendorId);
+      const isCredsBcrypt = creds.password && creds.password.startsWith("$2");
+      const isValidPwd = isCredsBcrypt ? await import_bcryptjs.default.compare(pwd, creds.password) || await import_bcryptjs.default.compare(pwdClean, creds.password) : pwd === creds.password || pwdClean === creds.password || matchedCanonicalKey === "ANGEL NAVARRO" && pwdClean === "25468939" || isMikel && (pwdClean === "20863632" || pwdClean === "18395226") || isNewFalconVendor && (pwdClean === "19117934" || pwd === "123" || pwdClean === creds.vendorId);
       if (!isValidPwd) {
         return res.status(401).json({ success: false, error: "Contrase\xF1a incorrecta" });
       }
