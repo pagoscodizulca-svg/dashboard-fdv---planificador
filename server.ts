@@ -397,7 +397,7 @@ async function startServer() {
     'JOHNATAN SOTO VILLA DEL ROS': { password: '18395226', role: 'VENDEDOR', vendorId: '37' },
     'LEONARDO RIOS': { password: '17925198', role: 'VENDEDOR', vendorId: '38' },
     'MARYERY GARCIA': { password: '12712534', role: 'VENDEDOR', vendorId: '39' },
-    'LUIS GUANIPA': { password: '18700742', role: 'VENDEDOR', vendorId: '40' },
+    'VICTORIA VARGAS': { password: process.env.VICTORIA_VARGAS_PASSWORD_HASH || '$2b$10$QzlUMUB08xzDe2HdhH7tQu9f0Pfiw9hI8bsPPGgg3ffqHV4VrVwTi', role: 'VENDEDOR', vendorId: '40' },
     'PEDRO ABREU': { password: '12456937', role: 'VENDEDOR', vendorId: '45' },
     'OSCAR ORTIZ': { password: '16347637', role: 'VENDEDOR', vendorId: '46' },
   };
@@ -447,6 +447,9 @@ async function startServer() {
             .maybeSingle();
 
           if (!supaErr && supaUser) {
+            if (supaUser.activo === false) {
+              return res.status(401).json({ success: false, error: 'Usuario inactivo o deshabilitado' });
+            }
             const isBcrypt = supaUser.password_hash && supaUser.password_hash.startsWith('$2');
             let isValid = false;
             if (isBcrypt) {
@@ -459,7 +462,7 @@ async function startServer() {
                 (matchedCanonicalKey === 'ANGEL NAVARRO' && pwdClean === '25468939') ||
                 (isNewFalconVendor && (pwdClean === '19117934' || pwd === '123' || pwdClean === String(supaUser.vendor_id || '')));
             }
-            if (!isValid && creds && (pwd === creds.password || pwdClean === creds.password)) {
+            if (!isValid && creds && !creds.password.startsWith('$2') && (pwd === creds.password || pwdClean === creds.password)) {
               isValid = true;
             }
 
@@ -500,12 +503,16 @@ async function startServer() {
       }
 
       const isMikel = matchedCanonicalKey.includes('MIKELANGELO') || matchedCanonicalKey.includes('SOTO') || matchedCanonicalKey.includes('JOHNATAN');
-      const isValidPwd =
-        pwd === creds.password ||
-        pwdClean === creds.password ||
-        (matchedCanonicalKey === 'ANGEL NAVARRO' && pwdClean === '25468939') ||
-        (isMikel && (pwdClean === '20863632' || pwdClean === '18395226')) ||
-        (isNewFalconVendor && (pwdClean === '19117934' || pwd === '123' || pwdClean === creds.vendorId));
+      const isCredsBcrypt = creds.password && creds.password.startsWith('$2');
+      const isValidPwd = isCredsBcrypt
+        ? (await bcrypt.compare(pwd, creds.password) || await bcrypt.compare(pwdClean, creds.password))
+        : (
+            pwd === creds.password ||
+            pwdClean === creds.password ||
+            (matchedCanonicalKey === 'ANGEL NAVARRO' && pwdClean === '25468939') ||
+            (isMikel && (pwdClean === '20863632' || pwdClean === '18395226')) ||
+            (isNewFalconVendor && (pwdClean === '19117934' || pwd === '123' || pwdClean === creds.vendorId))
+          );
 
       if (!isValidPwd) {
         return res.status(401).json({ success: false, error: 'Contraseña incorrecta' });

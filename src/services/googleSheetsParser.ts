@@ -497,6 +497,14 @@ function normalizeCuentasClavesVendor(vendorName: string): { id: string; display
   ) {
     return { id: 'CUENTAS CLAVES 2 - SV', display: 'Cuentas claves 2 - SV' };
   }
+  if (
+    u === 'LUIS GUANIPA' ||
+    u === 'VICTORIA VARGAS' ||
+    u === 'RUTA LUIS GUANIPA' ||
+    u === 'RUTA VICTORIA VARGAS'
+  ) {
+    return { id: 'VICTORIA VARGAS', display: 'VICTORIA VARGAS' };
+  }
   return null;
 }
 
@@ -1294,7 +1302,8 @@ export function parseWorkbookFull(
         }
 
         const rawVendor = row[resolvedVendorCol];
-        const vName = rawVendor !== null && rawVendor !== undefined ? String(rawVendor).replace(/\s+/g, ' ').trim() : '';
+        const rawVName = rawVendor !== null && rawVendor !== undefined ? String(rawVendor).replace(/\s+/g, ' ').trim() : '';
+        const vName = rawVName.toUpperCase() === 'LUIS GUANIPA' ? 'VICTORIA VARGAS' : rawVName;
 
         if (!vName) {
           // Fila de totales al final del Grid (ej. fila 28 con totales globales por rubro)

@@ -285,11 +285,15 @@ export const VENDOR_PROFILES: Record<string, VendorProfile> = {
       { id: 'MARYERY GARCIA', label: 'Ruta Maryery García', aliases: ['MARYERY GARCIA'] }
     ]
   },
-  'LUIS GUANIPA': {
-    canonicalUsername: 'LUIS GUANIPA',
-    displayName: 'Luis Guanipa',
+  'VICTORIA VARGAS': {
+    canonicalUsername: 'VICTORIA VARGAS',
+    displayName: 'Victoria Vargas',
     routes: [
-      { id: 'LUIS GUANIPA', label: 'Ruta Luis Guanipa', aliases: ['LUIS GUANIPA'] }
+      {
+        id: 'VICTORIA VARGAS',
+        label: 'Ruta Victoria Vargas',
+        aliases: ['VICTORIA VARGAS', 'LUIS GUANIPA', 'RUTA VICTORIA VARGAS', 'RUTA LUIS GUANIPA']
+      }
     ]
   },
   'PEDRO ABREU': {
@@ -339,6 +343,7 @@ VENDOR_PROFILES['OSCAR ORTIZ- LA COSTA'] = VENDOR_PROFILES['OSCAR ORTIZ'];
 VENDOR_PROFILES['OSCAR ORTIZ - LA COSTA'] = VENDOR_PROFILES['OSCAR ORTIZ'];
 VENDOR_PROFILES['OSCAR ORTIZ- CORO'] = VENDOR_PROFILES['OSCAR ORTIZ'];
 VENDOR_PROFILES['OSCAR ORTIZ - CORO'] = VENDOR_PROFILES['OSCAR ORTIZ'];
+VENDOR_PROFILES['LUIS GUANIPA'] = VENDOR_PROFILES['VICTORIA VARGAS'];
 
 // Perfiles de los 3 Supervisores Comerciales Oficiales (Noviembre 2026)
 export const SUPERVISOR_PROFILES: Record<string, SupervisorProfile> = {
@@ -351,7 +356,7 @@ export const SUPERVISOR_PROFILES: Record<string, SupervisorProfile> = {
       'VICTOR CAMPOS',
       'ELISA SOLER',
       'LEONARDO RIOS',
-      'LUIS GUANIPA',
+      'VICTORIA VARGAS',
       'OSCAR ORTIZ'
     ]
   },
