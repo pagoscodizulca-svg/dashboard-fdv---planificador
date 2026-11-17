@@ -35,7 +35,9 @@ export const SUCURSALES_ALKOSTO: AlkostoSucursal[] = [
   { codigo: '7680', tag: 'AK07', nombre: 'Alkosto 7 - Bella vista', zona: 'Bella vista', direccion: 'Bella vista' },
   { codigo: '7905', tag: 'AK08', nombre: 'Alkosto 8 - Trujillo', zona: 'Trujillo', direccion: 'Trujillo' },
   { codigo: '8160', tag: 'AK09', nombre: 'Alkosto 9 - Antiguo nasa Zona industrial', zona: 'Antiguo nasa Zona industrial', direccion: 'Antiguo nasa Zona industrial' },
-  { codigo: '8306', tag: 'AK10', nombre: 'Alkosto 10 - La limpia', zona: 'La limpia', direccion: 'La limpia' }
+  { codigo: '8306', tag: 'AK10', nombre: 'Alkosto 10 - La limpia', zona: 'La limpia', direccion: 'La limpia' },
+  { codigo: '1560', tag: 'AK11', nombre: 'Alkosto 11', zona: 'Maracaibo', direccion: 'Maracaibo' },
+  { codigo: '1560', tag: 'AKOP', nombre: 'Alkosto Sede Principal / AKOP', zona: 'Sector Paraiso Maracaibo', direccion: 'CALLE 78 DR PORTILLO LOCAL 17-71 SECTOR PARAISO MARACAIBO' }
 ];
 
 export const SUCURSALES_FAMILIA_CENTER: AlkostoSucursal[] = [
@@ -45,12 +47,14 @@ export const SUCURSALES_FAMILIA_CENTER: AlkostoSucursal[] = [
   { codigo: '7491', tag: 'FC04', nombre: 'Familia 4 - Dr quintero', zona: 'Dr quintero', direccion: 'Dr quintero' },
   { codigo: '7489', tag: 'FC05', nombre: 'Familia Center 5 - La lago', zona: 'La lago', direccion: 'La lago' },
   { codigo: '7493', tag: 'FC06', nombre: 'Familia 6 - Los olivos', zona: 'Los olivos', direccion: 'Los olivos' },
-  { codigo: '8229', tag: 'FC07', nombre: 'Familia Center #7 - San Francisco', zona: 'San Francisco', direccion: 'San Francisco' }
+  { codigo: '8229', tag: 'FC07', nombre: 'Familia Center #7 - San Francisco', zona: 'San Francisco', direccion: 'San Francisco' },
+  { codigo: '8144', tag: 'FC08', nombre: 'Familia Center 8', zona: 'Maracaibo', direccion: 'Maracaibo' },
+  { codigo: '5373', tag: 'FCOP', nombre: 'Familia Center Sede Principal / FCOP', zona: 'Casco Central', direccion: 'AV LIBERTADOR CALLE 100 CC PLAZA LAGO NIVEL PB LOCAL 54 SECTOR CASCO CENTRAL' }
 ];
 
 export const CADENAS_ABREVIATURAS = {
-  ALKOSTO: ['AK01', 'AK02', 'AK03', 'AK04', 'AK05', 'AK06', 'AK07', 'AK08', 'AK09', 'AK10'],
-  FAMILIA_CENTER: ['FC01', 'FC02', 'FC03', 'FC04', 'FC05', 'FC06', 'FC07']
+  ALKOSTO: ['AK01', 'AK02', 'AK03', 'AK04', 'AK05', 'AK06', 'AK07', 'AK08', 'AK09', 'AK10', 'AK11', 'AKOP'],
+  FAMILIA_CENTER: ['FC01', 'FC02', 'FC03', 'FC04', 'FC05', 'FC06', 'FC07', 'FC08', 'FCOP']
 };
 
 export const TODAS_SUCURSALES_CUENTAS_CLAVE: AlkostoSucursal[] = [
@@ -61,9 +65,11 @@ export const TODAS_SUCURSALES_CUENTAS_CLAVE: AlkostoSucursal[] = [
 export function getSucursalByTag(tag: string): AlkostoSucursal | undefined {
   const norm = (tag || '').trim().toUpperCase();
   if (!norm) return undefined;
+  const byTag = TODAS_SUCURSALES_CUENTAS_CLAVE.find(s => s.tag === norm);
+  if (byTag) return byTag;
   const cleanDigits = norm.replace(/^0+/, '');
   return TODAS_SUCURSALES_CUENTAS_CLAVE.find(
-    s => s.tag === norm || s.codigo === norm || (cleanDigits && s.codigo.replace(/^0+/, '') === cleanDigits)
+    s => s.codigo === norm || (cleanDigits && s.codigo.replace(/^0+/, '') === cleanDigits)
   );
 }
 
@@ -747,6 +753,18 @@ export const CATALOGO_ALKOSTO: CatalogoAlkostoItem[] = [
     codigoBarra: '7590377000510',
     codigosCadena: ['7590377000510'],
     sinonimos: ['LECHE EN POLVO COMPLETA VENCAMPO 900GR', 'LECHE VENCAMPO 900GR', '7590377000510'],
+    unidadSugerida: 'CJ'
+  },
+  {
+    sku: '1543',
+    producto: 'AZUCAR BLANCA VENCAMPO 1X20ND',
+    categoria: 'GRANOS / BASICOS',
+    presentacion: 'Bulto (20 und x 1kg)',
+    kilosPorCaja: 20.0,
+    precioSugeridoUSD: 21.80,
+    codigoBarra: '7590377000220',
+    codigosCadena: ['1543', '001543', '7590377000220'],
+    sinonimos: ['AZUCAR BLANCA REFINADA VENCAMPO 1KG', 'AZUCAR BLANCA VENCAMPO 1X20ND', 'AZUCAR VENCAMPO 1KG', '1543', '7590377000220'],
     unidadSugerida: 'CJ'
   },
   {

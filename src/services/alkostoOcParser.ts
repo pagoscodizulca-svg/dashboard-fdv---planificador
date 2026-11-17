@@ -154,21 +154,22 @@ REGLA OBLIGATORIA DE CATÁLOGO OFICIAL DE CODIZULCA Y PROHIBICIÓN DE ALUCINACI�
 CATÁLOGO OFICIAL DE CODIZULCA (codigo - descripcion):
 ${catalogoOficial158Str}
 
-17 TIENDAS VÁLIDAS SINCRONIZADAS EN BASE DE DATOS (ÚNICAS PERMITIDAS):
+TIENDAS Y SEDES VÁLIDAS SINCRONIZADAS EN BASE DE DATOS:
 - Alkosto (${akTagsStr}): ${sucursalesAkDetalle}
 - Familia Center (${fcTagsStr}): ${sucursalesFcDetalle}
-- PROHIBIDO extraer las columnas administrativas "AKOP", "FCOP" o "CI": ignóralas por completo.
+- IMPORTANTE SOBRE AKOP Y CI: Si un producto tiene pedido asignado en la columna de Galpón/Sede Principal "AKOP" (ej. 1,600.00 bultos en AKOP cuando la suma de tiendas requiere AKOP para cuadrar con Total Cantidad), extrae "AKOP" con su cantidad exacta. PROHIBIDO extraer la columna de control de inventario "CI" y PROHIBIDO sumar "EMP" o "IVA" como tiendas.
 
 REGLAS ESTRICTAS DE EXTRACCIÓN Y NORMALIZACIÓN:
 1. LECTURA MULTIPÁGINA Y UNIFICACIÓN (ALKOSTO + FAMILIA CENTER):
-   - Lee todas las páginas del documento (unificando la sección de Página 1 "ALKOSTO DONDE COMPRAR ES GANAR, C.A." y la de Página 2 "FAMILIA CENTER, C.A.").
+   - Lee todas las páginas del documento (unificando la sección de Página 1 "ALKOSTO DONDE COMPRAR ES GANAR, C.A." RIF J-413243580 y la de Página 2 "FAMILIA CENTER, C.A." RIF J-501398836).
    - Nunca utilices comentarios como "// resto de los ítems".
-2. EXCLUSIÓN DE COLUMNAS EXTRA (AKOP / CI) Y EXTRACCIÓN DE LAS 17 TIENDAS:
-   - Extrae únicamente las 17 tiendas válidas sincronizadas en base de datos (${akTagsStr} y ${fcTagsStr}).
-   - Ignora por completo las columnas "AKOP", "FCOP" y "CI" que aparecen en las tablas del PDF.
+2. EXTRACCIÓN DE TIENDAS Y EXCLUSIÓN DE CI / EMP / IVA:
+   - Extrae las tiendas y sedes válidas con cantidad > 0 (${akTagsStr} y ${fcTagsStr}).
+   - Ignora siempre la columna "CI" y nunca incluyas los valores de "EMP" (empaque: 20, 10, etc.) ni "IVA" dentro de las tiendas.
 3. CONSOLIDACIÓN POR CÓDIGO DE PRODUCTO SIN DUPLICADOS Y HOMOLOGACIÓN:
-   - Si el mismo código de producto aparece en la página de ALKOSTO (AK01..AK10) y en la página de FAMILIA CENTER (FC01..FC07), consolida sus cantidades por tienda en un único renglón por producto dentro de \`tiendas\` y en \`distribucion_tiendas\` / \`desglosePorTienda\`, evitando claves o filas duplicadas.
+   - Si el mismo código de producto aparece en la página de ALKOSTO (AK01..AK11, AKOP) y en la página de FAMILIA CENTER (FC01..FC08), consolida sus cantidades por tienda en un único renglón por producto dentro de \`tiendas\` y en \`distribucion_tiendas\` / \`desglosePorTienda\`, evitando claves o filas duplicadas.
    - Homologación directa de EAN/PLU frecuentes en Órdenes de Compra de Alkosto hacia el Catálogo Oficial de Codizulca:
+     * 7590377000220 (AZUCAR BLANCA REFINADA VENCAMPO 1KG) -> codigo: "1543", descripcion: "AZUCAR BLANCA VENCAMPO 1X20ND", unidad: "BULTO"
      * 7590377000411 (ARVEJAS VERDES VENCAMPO 400GR) -> codigo: "1642", descripcion: "ARVEJAS VENCAMPO 25 UND X 400GR", unidad: "BULTO"
      * 7590377000459 (CARAOTAS NEGRAS VENCAMPO 400GR) -> codigo: "1644", descripcion: "CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR", unidad: "BULTO"
      * 7590377000503 (LECHE EN POLVO COMPLETA VENCAMPO 400GR) -> codigo: "1574", descripcion: "LECHE EN POLVO VENCAMPO 10X400GR", unidad: "BULTO"
@@ -668,6 +669,7 @@ export async function callGeminiWithFallback(params: {
       for (let retryAttempt = 1; retryAttempt <= 2; retryAttempt++) {
         try {
           lastStage = '2-Conexión Gemini-Render';
+          const isThinkingOrGen4Model = /gemini-[34]|thinking|carbon/i.test(modelName);
           const response = await ai.models.generateContent({
             model: modelName,
             contents: [
@@ -683,7 +685,9 @@ export async function callGeminiWithFallback(params: {
               systemInstruction,
               responseMimeType: 'application/json',
               ...(useSchemaForModel && activeSchema ? { responseSchema: activeSchema } : {}),
-              temperature: 0.1
+              ...(isThinkingOrGen4Model
+                ? { thinkingConfig: { thinkingLevel: 'HIGH' as any } }
+                : { temperature: 0.1 })
             }
           });
 
@@ -761,7 +765,7 @@ export function construirDistribucionPorTienda(
   for (const [rawTag, rawQty] of Object.entries(tiendas)) {
     const tag = rawTag.trim().toUpperCase();
     const cantidad = parseNumeroEstricto(rawQty, 0);
-    if (cantidad <= 0 || tag === 'CI' || tag === 'AKOP' || tag === 'FCOP') continue;
+    if (cantidad <= 0 || tag === 'CI') continue;
     const sucursalInfo = getSucursalByTag(tag);
     list.push({
       codigoTienda: tag,
@@ -840,11 +844,11 @@ export class AlkostoParseValidationError extends Error {
 }
 
 export const ALKOSTO_STORE_TAGS = [
-  'AK01', 'AK02', 'AK03', 'AK04', 'AK05', 'AK06', 'AK07', 'AK08', 'AK09', 'AK10', 'AKOP', 'CI'
+  'AK01', 'AK02', 'AK03', 'AK04', 'AK05', 'AK06', 'AK07', 'AK08', 'AK09', 'AK10', 'AK11', 'AKOP', 'CI'
 ] as const;
 
 export const FAMILIA_CENTER_STORE_TAGS = [
-  'FC01', 'FC02', 'FC03', 'FC04', 'FC05', 'FC06', 'FC07', 'FCOP'
+  'FC01', 'FC02', 'FC03', 'FC04', 'FC05', 'FC06', 'FC07', 'FC08', 'FCOP'
 ] as const;
 
 export const VECINO_CENTER_STORE_TAGS = [
@@ -1169,7 +1173,7 @@ export function mapNumericCellsToRow(
 
     let storeValues: number[];
     if (idx5IsInt && !idx1IsInt) {
-      // Orden Stream PDF de Alkosto:
+      // Orden Stream PDF de Alkosto (12 columnas):
       // [0:IVA, 1:AK01, 2:AK02, 3:AK03, 4:AK04, 5:EMP, 6:AK08, 7:AK09, 8:AK05, 9:AK06, 10:AK07, 11:AK10, 12:AKOP, 13:CI]
       emp = prefixNums[5];
       storeValues = [
@@ -1187,10 +1191,63 @@ export function mapNumericCellsToRow(
         prefixNums[13]  // CI
       ];
     } else {
-      // Orden Visual por coordenada X:
+      // Orden Visual por coordenada X (12 columnas):
       // [0:IVA, 1:EMP, 2:AK01, 3:AK02, 4:AK03, 5:AK04, 6:AK05, 7:AK06, 8:AK07, 9:AK08, 10:AK09, 11:AK10, 12:AKOP, 13:CI]
       emp = prefixNums[1];
       storeValues = prefixNums.slice(2, 14);
+    }
+
+    const ak12Tags = ['AK01', 'AK02', 'AK03', 'AK04', 'AK05', 'AK06', 'AK07', 'AK08', 'AK09', 'AK10', 'AKOP', 'CI'];
+    ak12Tags.forEach((tag, i) => {
+      const val = storeValues[i] || 0;
+      if (val > 0 && tag !== 'CI') {
+        tiendas[tag] = val;
+      }
+    });
+  } else if (pageChain === 'ALKOSTO' && prefixNums.length === 15) {
+    // 15 valores antes de TotalCantidad: 1 IVA + 1 EMP + 13 columnas de tiendas (AK01..AK11, AKOP, CI)
+    const idx1IsInt = isPlainInteger(prefixTokens[1]);
+    const idx5IsInt = isPlainInteger(prefixTokens[5]);
+
+    let storeValues: number[];
+    if (idx5IsInt && !idx1IsInt) {
+      // Orden Stream PDF de Alkosto (13 columnas):
+      // [0:IVA, 1:AK01, 2:AK02, 3:AK11, 4:AK03, 5:EMP, 6:AK07, 7:AK08, 8:AK04, 9:AK05, 10:AK06, 11:AK09, 12:AK10, 13:AKOP, 14:CI]
+      emp = prefixNums[5];
+      storeValues = [
+        prefixNums[1],  // AK01
+        prefixNums[2],  // AK02
+        prefixNums[4],  // AK03
+        prefixNums[8],  // AK04
+        prefixNums[9],  // AK05
+        prefixNums[10], // AK06
+        prefixNums[6],  // AK07
+        prefixNums[7],  // AK08
+        prefixNums[11], // AK09
+        prefixNums[12], // AK10
+        prefixNums[3],  // AK11
+        prefixNums[13], // AKOP
+        prefixNums[14]  // CI
+      ];
+    } else {
+      // Orden Visual por coordenada X en formato de 13 columnas (donde el bloque 1 inserta la celda extra antes de AK03..AK10):
+      // [0:IVA, 1:EMP, 2:AK01, 3:AK02, 4:AK11, 5:AK03, 6:AK04, 7:AK05, 8:AK06, 9:AK07, 10:AK08, 11:AK09, 12:AK10, 13:AKOP, 14:CI]
+      emp = prefixNums[1];
+      storeValues = [
+        prefixNums[2],  // AK01
+        prefixNums[3],  // AK02
+        prefixNums[5],  // AK03
+        prefixNums[6],  // AK04
+        prefixNums[7],  // AK05
+        prefixNums[8],  // AK06
+        prefixNums[9],  // AK07
+        prefixNums[10], // AK08
+        prefixNums[11], // AK09
+        prefixNums[12], // AK10
+        prefixNums[4],  // AK11
+        prefixNums[13], // AKOP
+        prefixNums[14]  // CI
+      ];
     }
 
     ALKOSTO_STORE_TAGS.forEach((tag, i) => {
@@ -1199,15 +1256,15 @@ export function mapNumericCellsToRow(
         tiendas[tag] = val;
       }
     });
-  } else if (pageChain === 'FAMILIA_CENTER' && prefixNums.length === 9) {
-    // 9 valores antes de TotalCantidad: 1 IVA + 1 EMP + 7 columnas (FC01..FC07)
+  } else if (pageChain === 'FAMILIA_CENTER' && (prefixNums.length === 9 || prefixNums.length === 10)) {
+    // 9 o 10 valores antes de TotalCantidad: 1 IVA + 1 EMP + 7 u 8 columnas (FC01..FC07 / FC08)
     const idx1IsInt = isPlainInteger(prefixTokens[1]);
     const idx3IsInt = isPlainInteger(prefixTokens[3]);
 
     let storeValues: number[];
     if (idx3IsInt && !idx1IsInt) {
       // Orden Stream PDF de Familia Center:
-      // [0:IVA, 1:FC01, 2:FC02, 3:EMP, 4:FC03, 5:FC04, 6:FC05, 7:FC06, 8:FC07]
+      // [0:IVA, 1:FC01, 2:FC02, 3:EMP, 4:FC03, 5:FC04, 6:FC05, 7:FC06, 8:FC07, (9:FC08)]
       emp = prefixNums[3];
       storeValues = [
         prefixNums[1], // FC01
@@ -1216,17 +1273,18 @@ export function mapNumericCellsToRow(
         prefixNums[5], // FC04
         prefixNums[6], // FC05
         prefixNums[7], // FC06
-        prefixNums[8]  // FC07
+        prefixNums[8], // FC07
+        ...(prefixNums.length === 10 ? [prefixNums[9]] : []) // FC08
       ];
     } else {
       // Orden Visual por coordenada X:
-      // [0:IVA, 1:EMP, 2:FC01, 3:FC02, 4:FC03, 5:FC04, 6:FC05, 7:FC06, 8:FC07]
+      // [0:IVA, 1:EMP, 2:FC01, 3:FC02, 4:FC03, 5:FC04, 6:FC05, 7:FC06, 8:FC07, (9:FC08)]
       emp = prefixNums[1];
-      storeValues = prefixNums.slice(2, 9);
+      storeValues = prefixNums.slice(2, prefixNums.length);
     }
 
-    const fcTags = ['FC01', 'FC02', 'FC03', 'FC04', 'FC05', 'FC06', 'FC07'];
-    fcTags.forEach((tag, i) => {
+    const fcTags = ['FC01', 'FC02', 'FC03', 'FC04', 'FC05', 'FC06', 'FC07', 'FC08'];
+    fcTags.slice(0, storeValues.length).forEach((tag, i) => {
       const val = storeValues[i] || 0;
       if (val > 0) {
         tiendas[tag] = val;
@@ -1459,7 +1517,9 @@ export function parseAlkostoRawText(rawText: string): ParsedOrdenCompraAlkosto {
         numTokens = inlineNumericTail[2].match(/-?\d+(?:,\d{3})*(?:\.\d+)?/g) || [];
       }
 
-      const expectedMinCols = pageChain === 'ALKOSTO' ? 21 : 16;
+      const has13AkCols = pageChain === 'ALKOSTO' && /\bAK11\b/.test(upper);
+      const has8FcCols = pageChain === 'FAMILIA_CENTER' && /\bFC08\b/.test(upper);
+      const expectedMinCols = pageChain === 'ALKOSTO' ? (has13AkCols ? 22 : 21) : (has8FcCols ? 17 : 16);
       if (numTokens.length < expectedMinCols) {
         let cursor = i + 1;
         // 1. Si aún no extrajimos tokens en la misma línea, consumir líneas huérfanas de continuación de descripción (ej. "/ 1.00" o palabras del producto)
@@ -2374,12 +2434,21 @@ export function validateAndNormalizeAlkostoOC(
 
     const strictMatch = matchProductoCodizulca(cleanCodEanInput || cleanCod, rawDesc || cleanDesc);
 
-    const finalSku =
+    const isMatchSkuEan = match?.sku ? /^\d{8,14}$/.test(String(match.sku).trim()) : false;
+    const officialSkuCodizulca =
+      strictMatch.matchExacto !== false && strictMatch.codigo !== 'S/C' && strictMatch.codigo !== 'PENDIENTE'
+        ? strictMatch.codigo
+        : '';
+    const finalCodigo =
       (match ? match.sku : '') ||
-      (strictMatch.matchExacto !== false ? strictMatch.codigo : '') ||
+      officialSkuCodizulca ||
       strictMatch.codigo ||
       'PENDIENTE';
-    const finalCodigo = finalSku || 'PENDIENTE';
+    const finalSku =
+      (match && !isMatchSkuEan ? match.sku : '') ||
+      officialSkuCodizulca ||
+      finalCodigo ||
+      'PENDIENTE';
 
     // Separación clara de códigos (Regla 2): codigo_principal, codigo_ean y codigo_interno_alkosto
     const resolvedEan: string | null =
@@ -2415,8 +2484,9 @@ export function validateAndNormalizeAlkostoOC(
       return;
     }
 
-    // Normalizar tiendas (AK01..AK10, FC01..FC07, etc.) desde `tiendas`, `distribucion_tiendas`, `distribucionPorTienda` o raíz del item
+    // Normalizar tiendas (AK01..AK11, AKOP, FC01..FC08, FCOP, etc.) desde `tiendas`, `distribucion_tiendas`, `distribucionPorTienda` o raíz del item
     let cleanTiendas: Record<string, number> = {};
+    const pendingAdminStores: Record<string, number> = {};
     const customStoreItems: AlkostoOcDistribucionTienda[] = [];
 
     if (it.tiendas && typeof it.tiendas === 'object') {
@@ -2437,8 +2507,12 @@ export function validateAndNormalizeAlkostoOC(
           }
           continue;
         }
-        if (numVal > 0 && ALL_VALID_STORE_TAGS.has(uTag) && uTag !== 'CI' && uTag !== 'AKOP' && uTag !== 'FCOP') {
-          cleanTiendas[uTag] = numVal;
+        if (numVal > 0 && ALL_VALID_STORE_TAGS.has(uTag) && uTag !== 'CI') {
+          if (uTag === 'AKOP' || uTag === 'FCOP') {
+            pendingAdminStores[uTag] = numVal;
+          } else {
+            cleanTiendas[uTag] = numVal;
+          }
         }
       }
     }
@@ -2487,11 +2561,15 @@ export function validateAndNormalizeAlkostoOC(
           );
           if (foundSuc) resolvedTag = (foundSuc.tag || foundSuc.codigo).toUpperCase();
         }
-        if (ALL_VALID_STORE_TAGS.has(resolvedTag) && resolvedTag !== 'CI' && resolvedTag !== 'AKOP' && resolvedTag !== 'FCOP') {
-          if (cleanTiendas[resolvedTag] === undefined) {
+        if (ALL_VALID_STORE_TAGS.has(resolvedTag) && resolvedTag !== 'CI') {
+          if (resolvedTag === 'AKOP' || resolvedTag === 'FCOP') {
+            if (pendingAdminStores[resolvedTag] === undefined) {
+              pendingAdminStores[resolvedTag] = storeQty;
+            }
+          } else if (cleanTiendas[resolvedTag] === undefined) {
             cleanTiendas[resolvedTag] = storeQty;
           }
-        } else {
+        } else if (resolvedTag !== 'CI') {
           customStoreItems.push({
             codigo_tienda: rawStoreTag || null,
             nombre_tienda: rawStoreName || rawStoreTag || clienteNombreClean || 'ALKOSTO',
@@ -2501,13 +2579,17 @@ export function validateAndNormalizeAlkostoOC(
       }
     }
 
-    // También soportar tiendas en la raíz del item (it.AK01, it.FC01)
+    // También soportar tiendas en la raíz del item (it.AK01, it.FC01, it.AKOP)
     for (const [k, val] of Object.entries(it)) {
       const uKey = k.trim().toUpperCase();
-      if (ALL_VALID_STORE_TAGS.has(uKey) && uKey !== 'CI' && uKey !== 'AKOP' && uKey !== 'FCOP') {
+      if (ALL_VALID_STORE_TAGS.has(uKey) && uKey !== 'CI') {
         const numVal = parseNumeroEstricto(val, 0);
-        if (numVal > 0 && cleanTiendas[uKey] === undefined) {
-          cleanTiendas[uKey] = numVal;
+        if (numVal > 0) {
+          if (uKey === 'AKOP' || uKey === 'FCOP') {
+            if (pendingAdminStores[uKey] === undefined) pendingAdminStores[uKey] = numVal;
+          } else if (cleanTiendas[uKey] === undefined) {
+            cleanTiendas[uKey] = numVal;
+          }
         }
       }
     }
@@ -2566,6 +2648,31 @@ export function validateAndNormalizeAlkostoOC(
       pickProp(it, ['totalCantidadFamilia', 'total_cantidad_familia', 'totalCantidadFamiliaCenter', 'total_cantidad_familia_center']),
       0
     );
+
+    // Incluir AKOP / FCOP cuando el pedido de la fila está dirigido a la Sede Principal/Galpón (ej. AKOP: 1600 == totalCant)
+    // y descartarlo únicamente cuando las tiendas comerciales (AK01..AK11 / FC01..FC08) ya suman por sí solas el 100% de totalCant (ruido OCR/test)
+    if (pendingAdminStores.AKOP && pendingAdminStores.AKOP > 0) {
+      const sumBaseAk = Object.entries(cleanTiendas)
+        .filter(([tk]) => tk.startsWith('AK'))
+        .reduce((acc, [, v]) => acc + v, 0);
+      const targetAkCant = totalCantAkExplicit > 0 ? totalCantAkExplicit : totalCant;
+      const baseAkAlreadyMatchesTotal =
+        sumBaseAk > 0 && targetAkCant > 0 && Math.abs(sumBaseAk - targetAkCant) <= 0.05;
+      if (!baseAkAlreadyMatchesTotal) {
+        cleanTiendas.AKOP = pendingAdminStores.AKOP;
+      }
+    }
+    if (pendingAdminStores.FCOP && pendingAdminStores.FCOP > 0) {
+      const sumBaseFc = Object.entries(cleanTiendas)
+        .filter(([tk]) => tk.startsWith('FC'))
+        .reduce((acc, [, v]) => acc + v, 0);
+      const targetFcCant = totalCantFcExplicit > 0 ? totalCantFcExplicit : totalCant;
+      const baseFcAlreadyMatchesTotal =
+        sumBaseFc > 0 && targetFcCant > 0 && Math.abs(sumBaseFc - targetFcCant) <= 0.05;
+      if (!baseFcAlreadyMatchesTotal) {
+        cleanTiendas.FCOP = pendingAdminStores.FCOP;
+      }
+    }
 
     // Aplicar Regla de Autocorrector Matemático por Fila contra decimales pegados (ej. 200 -> 2.00)
     if (totalCantAkExplicit > 0 || totalCantFcExplicit > 0) {
@@ -3175,9 +3282,15 @@ export function normalizeOrderForCodizulca(rawData: any): ParsedOrdenCompraAlkos
     );
   }
 
-  const valid17Stores = new Set<string>([
-    ...(CADENAS_ABREVIATURAS?.ALKOSTO || ['AK01', 'AK02', 'AK03', 'AK04', 'AK05', 'AK06', 'AK07', 'AK08', 'AK09', 'AK10']),
-    ...(CADENAS_ABREVIATURAS?.FAMILIA_CENTER || ['FC01', 'FC02', 'FC03', 'FC04', 'FC05', 'FC06', 'FC07'])
+  const valid17Stores = [
+    'AK01', 'AK02', 'AK03', 'AK04', 'AK05', 'AK06', 'AK07', 'AK08', 'AK09', 'AK10',
+    'FC01', 'FC02', 'FC03', 'FC04', 'FC05', 'FC06', 'FC07'
+  ];
+  const validAllowedStores = new Set<string>([
+    ...valid17Stores,
+    'AK11', 'AKOP', 'FC08', 'FCOP',
+    ...(CADENAS_ABREVIATURAS?.ALKOSTO || []),
+    ...(CADENAS_ABREVIATURAS?.FAMILIA_CENTER || [])
   ]);
 
   const safeNum = (val: unknown, fallback = 0): number => {
@@ -3202,7 +3315,7 @@ export function normalizeOrderForCodizulca(rawData: any): ParsedOrdenCompraAlkos
       for (const [k, v] of Object.entries(it.tiendas)) {
         const tag = safeStr(k).toUpperCase();
         const qty = safeNum(v, 0);
-        if (valid17Stores.has(tag) && qty > 0) {
+        if (validAllowedStores.has(tag) && qty > 0) {
           cleanStores[tag] = Number(((cleanStores[tag] || 0) + qty).toFixed(2));
         }
       }
@@ -3219,7 +3332,7 @@ export function normalizeOrderForCodizulca(rawData: any): ParsedOrdenCompraAlkos
       if (!d || typeof d !== 'object') continue;
       const tag = safeStr((d as any).tienda ?? (d as any).codigo_tienda ?? (d as any).codigoTienda).toUpperCase();
       const qty = safeNum((d as any).cantidad, 0);
-      if (valid17Stores.has(tag) && qty > 0 && cleanStores[tag] === undefined) {
+      if (validAllowedStores.has(tag) && qty > 0 && cleanStores[tag] === undefined) {
         cleanStores[tag] = Number(qty.toFixed(2));
       }
     }
@@ -3534,7 +3647,7 @@ export function generarIdDeterministaPedidoAlkosto(params: {
     subtotal: number;
   }>;
 }): string {
-  const cleanTag = /^(ak\d+|fc\d+)$/i.test(params.tagSlug)
+  const cleanTag = /^(ak\d+|akop|fc\d+|fcop)$/i.test(params.tagSlug)
     ? params.tagSlug.toLowerCase()
     : 'doc';
 
@@ -3660,9 +3773,15 @@ export function construirPedidoNormalizadoSucursal(params: {
       : (!isForbiddenAlpha && f.codigo && f.codigo !== 'PENDIENTE' && f.codigo !== 'S/C' && !(!hasExactCatalogMatch && /^\d{8,14}$/.test(String(f.codigo).trim())))
         ? String(f.codigo).trim()
         : '';
+    const isMatchSkuEan = match?.sku ? /^\d{8,14}$/.test(String(match.sku).trim()) : false;
+    const officialCod =
+      productoOficial.matchExacto !== false && productoOficial.codigo !== 'S/C' && productoOficial.codigo !== 'PENDIENTE'
+        ? productoOficial.codigo
+        : '';
     const cleanSku = String(
+      (match && !isMatchSkuEan ? match.sku : '') ||
+      officialCod ||
       (match ? match.sku : '') ||
-      (productoOficial.matchExacto !== false && productoOficial.codigo !== 'S/C' && productoOficial.codigo !== 'PENDIENTE' ? productoOficial.codigo : '') ||
       userAssignedCode ||
       'PENDIENTE'
     ).trim();
@@ -3749,7 +3868,7 @@ export function construirPedidoNormalizadoSucursal(params: {
   const ts = (params.batchTimestamp || Date.now()) + (params.orderIndex || 0) * 50;
   const resolvedTag =
     suc?.tag ||
-    (/^(AK|FC)\d{2}$/i.test(params.storeTagOrCode) ? params.storeTagOrCode.toUpperCase() : undefined);
+    (/^(AK\d{2}|AKOP|FC\d{2}|FCOP)$/i.test(params.storeTagOrCode) ? params.storeTagOrCode.toUpperCase() : undefined);
   const tagSlug = String(resolvedTag || 'doc')
     .toLowerCase()
     .replace(/[^a-z0-9]/g, '');
@@ -3969,10 +4088,16 @@ export function extraerPedidosNormalizadosDeOC(params: {
         }
       }
 
+      const isMatchSkuEan = match?.sku ? /^\d{8,14}$/.test(String(match.sku).trim()) : false;
+      const officialCod =
+        productoOficial.matchExacto !== false && productoOficial.codigo !== 'S/C' && productoOficial.codigo !== 'PENDIENTE'
+          ? productoOficial.codigo
+          : '';
       const rawFinalSku =
         editedRow?.codigo ||
+        (match && !isMatchSkuEan ? match.sku : '') ||
+        officialCod ||
         (match ? match.sku : '') ||
-        (productoOficial.matchExacto !== false ? productoOficial.codigo : '') ||
         ocItem.skuCodizulca ||
         ocItem.codigo;
       const finalSku = /^(LPV|UTH|UHT|QS|JUGOS)$/i.test(String(rawFinalSku || '').trim()) && productoOficial.codigo !== 'S/C'
@@ -4065,7 +4190,7 @@ export function extraerPedidosNormalizadosDeOC(params: {
       Object.entries(r.tiendas).forEach(([tag, val]) => {
         const uTag = tag.trim().toUpperCase();
         const numVal = parseNumeroEstricto(val, 0);
-        if (uTag !== 'CI' && uTag !== 'AKOP' && uTag !== 'FCOP' && Number.isFinite(numVal) && !Number.isNaN(numVal) && numVal > 0) {
+        if (uTag !== 'CI' && Number.isFinite(numVal) && !Number.isNaN(numVal) && numVal > 0) {
           detectedStoresSet.add(uTag);
         }
       });
@@ -4221,7 +4346,7 @@ export function calcularResumenCuadreOC(
     if (!item.tiendas || typeof item.tiendas !== 'object') continue;
     for (const [rawTag, rawQty] of Object.entries(item.tiendas)) {
       const tag = rawTag.trim().toUpperCase();
-      if (tag === 'CI' || tag === 'AKOP' || tag === 'FCOP') continue;
+      if (tag === 'CI') continue;
       const qty = parseNumeroEstricto(rawQty, 0);
       if (!Number.isFinite(qty) || Number.isNaN(qty) || qty <= 0) continue;
       const lineSub = Number((qty * precio).toFixed(2));

@@ -986,5 +986,119 @@ describe('Unit & Regression: alkostoOcParser', () => {
       expect(ak01.renglones?.[0].subtotal).toBe(1200);
       expect(ak01.monto_pedido).toBe(1200);
     });
+
+    it('should deterministically parse CODIZULCA.pdf (OC #0000057146) matching 100% Ground Truth (AKOP + AK01..AK10 + FC01..FC07, SubTotal AK $49,730.00, SubTotal FC $2,550.00, Total $52,280.00, 12 branch orders)', () => {
+      const fullPath = path.resolve(process.cwd(), '..', 'CODIZULCA.pdf');
+      if (!fs.existsSync(fullPath)) return;
+
+      const buf = fs.readFileSync(fullPath);
+      const positionedText = extractPositionedTextFromAlkostoPdfBuffer(buf, zlib.inflateSync);
+      expect(positionedText).toBeTruthy();
+
+      const parsedOC = parseAlkostoRawText(positionedText!);
+      const normalized = normalizeOrderForCodizulca(parsedOC);
+
+      // 1. Cabecera
+      expect(normalized.ordenNro).toBe('0000057146');
+      expect(normalized.fechaEmision).toBe('2026-11-16');
+      expect(normalized.fechaEntrega).toBe('2026-11-17');
+      expect(normalized.diasCredito).toBe(15);
+      expect(normalized.tasaCambio).toBeCloseTo(914.0218, 4);
+
+      // 2. Controles aritméticos de sección y global
+      expect(normalized.subtotalAlkosto).toBe(49730);
+      expect(normalized.subtotalFamiliaCenter).toBe(2550);
+      expect(normalized.subtotalGeneral).toBe(52280);
+      expect(normalized.montoTotal).toBe(52280);
+
+      // 3. Productos homologados (Azúcar 1543, Leche 400g 1574, Leche 900g 1556)
+      expect(normalized.items).toHaveLength(3);
+      const itemAzucar = normalized.items.find(i => i.codigoBarra === '7590377000220' || i.skuCodizulca === '1543')!;
+      expect(itemAzucar).toBeTruthy();
+      expect(itemAzucar.skuCodizulca).toBe('1543');
+      expect(itemAzucar.emp).toBe(20);
+      expect(itemAzucar.costoUnitario).toBeCloseTo(21.8, 4);
+      expect(itemAzucar.tiendas).toEqual({ AKOP: 1600 });
+      expect(itemAzucar.totalRenglon).toBe(34880);
+
+      const itemLeche400 = normalized.items.find(i => i.codigoBarra === '7590377000503' || i.skuCodizulca === '1574')!;
+      expect(itemLeche400).toBeTruthy();
+      expect(itemLeche400.skuCodizulca).toBe('1574');
+      expect(itemLeche400.emp).toBe(10);
+      expect(itemLeche400.costoUnitario).toBe(40);
+      expect(itemLeche400.tiendas).toEqual({
+        AK01: 50,
+        AK03: 30,
+        AK04: 70,
+        AK05: 20,
+        AK06: 20,
+        AK08: 30,
+        AK09: 20,
+        AK10: 30,
+        FC01: 20,
+        FC05: 10
+      });
+
+      const itemLeche900 = normalized.items.find(i => i.codigoBarra === '7590377000510' || i.skuCodizulca === '1556')!;
+      expect(itemLeche900).toBeTruthy();
+      expect(itemLeche900.skuCodizulca).toBe('1556');
+      expect(itemLeche900.emp).toBe(10);
+      expect(itemLeche900.costoUnitario).toBe(90);
+      expect(itemLeche900.tiendas).toEqual({
+        AK01: 10,
+        AK09: 15,
+        AK10: 20,
+        FC01: 10,
+        FC07: 5
+      });
+
+      // 4. Resumen de cuadre matemático
+      const resumen = calcularResumenCuadreOC(normalized);
+      expect(resumen).toBeTruthy();
+      expect(resumen!.numero_oc).toBe('0000057146');
+      expect(resumen!.alkostoCount).toBe(9);
+      expect(resumen!.familiaCount).toBe(3);
+      expect(resumen!.totalSucursalesActivas).toBe(12);
+      expect(resumen!.alkostoMonto).toBe(49730);
+      expect(resumen!.familiaMonto).toBe(2550);
+      expect(resumen!.totalCalculado).toBe(52280);
+      expect(resumen!.cuadreExacto).toBe(true);
+
+      // 5. Extracción de los 12 pedidos por sucursal hacia Sala de Espera
+      const lote = extraerPedidosNormalizadosDeOC({
+        initialData: normalized,
+        filasActuales: [],
+        tiendaSeleccionada: 'CONSOLIDADO',
+        enviarLoteCompleto: true,
+        idClienteSeleccionado: '7498',
+        clienteNombreSeleccionado: 'Alkosto 1 san Felipe',
+        numero_oc: '0000057146',
+        vendedor: 'Sairu Valles',
+        fechaISO: '2026-11-16'
+      });
+
+      expect(lote.pedidos).toHaveLength(12);
+      expect(lote.strictPayloads).toHaveLength(12);
+
+      const byTag = Object.fromEntries(lote.strictPayloads.map(p => [p.sucursal_tag, p]));
+      expect(byTag.AKOP.monto_pedido).toBe(34880);
+      expect(byTag.AKOP.renglones).toEqual([
+        expect.objectContaining({ codigo: '1543', cantidad: 1600, precio_unitario: 21.8, subtotal: 34880 })
+      ]);
+      expect(byTag.AK01.monto_pedido).toBe(2900);
+      expect(byTag.AK03.monto_pedido).toBe(1200);
+      expect(byTag.AK04.monto_pedido).toBe(2800);
+      expect(byTag.AK05.monto_pedido).toBe(800);
+      expect(byTag.AK06.monto_pedido).toBe(800);
+      expect(byTag.AK08.monto_pedido).toBe(1200);
+      expect(byTag.AK09.monto_pedido).toBe(2150);
+      expect(byTag.AK10.monto_pedido).toBe(3000);
+      expect(byTag.FC01.monto_pedido).toBe(1700);
+      expect(byTag.FC05.monto_pedido).toBe(400);
+      expect(byTag.FC07.monto_pedido).toBe(450);
+
+      const sumPayloads = Number(lote.strictPayloads.reduce((acc, p) => acc + p.monto_pedido, 0).toFixed(2));
+      expect(sumPayloads).toBe(52280);
+    });
   });
 });

@@ -176,7 +176,7 @@ function buildFilasFromData(
     } else if (Object.keys(tiendasMap).length > 0) {
       // En CONSOLIDADO: sumar estrictamente las tiendas activas de la cadena seleccionada (AK para Alkosto, FC para Familia Center)
       const chainEntries = Object.entries(tiendasMap).filter(
-        ([tk]) => tk.toUpperCase().startsWith(chainPrefix) && tk.toUpperCase() !== 'AKOP' && tk.toUpperCase() !== 'FCOP' && tk.toUpperCase() !== 'CI'
+        ([tk]) => tk.toUpperCase().startsWith(chainPrefix) && tk.toUpperCase() !== 'CI'
       );
       const hasOtherChainEntries = Object.keys(tiendasMap).some(tk => !tk.toUpperCase().startsWith(chainPrefix));
       if (chainEntries.length > 0) {
@@ -231,9 +231,11 @@ function buildFilasFromData(
     // FASE 2.2: Homologar al código numérico oficial del catálogo solo si hay coincidencia exacta de EAN o sustantivo principal.
     // Si no existe en catálogo, conservar la descripción original del PDF y dejar el SKU editable/pendiente
     // (nunca reutilizar un SKU alucinado, p. ej. 1555 por compartir solo marca/gramaje).
+    const isMatchSkuEan = match?.sku ? /^\d{8,14}$/.test(String(match.sku).trim()) : false;
     const finalSku =
-      (match && !/^(LPV|UTH|UHT|QS|JUGOS)$/i.test(match.sku) ? match.sku : '') ||
+      (match && !isMatchSkuEan && !/^(LPV|UTH|UHT|QS|JUGOS)$/i.test(match.sku) ? match.sku : '') ||
       (hasExactCatalogMatch && productoOficial.matchExacto !== false && productoOficial.codigo !== 'S/C' && productoOficial.codigo !== 'PENDIENTE' ? productoOficial.codigo : '') ||
+      (match && !/^(LPV|UTH|UHT|QS|JUGOS)$/i.test(match.sku) ? match.sku : '') ||
       (hasExactCatalogMatch && it.skuCodizulca && isUsableUserCode(String(it.skuCodizulca).trim()) ? String(it.skuCodizulca).trim() : '') ||
       (isUsableUserCode(rawCode) && hasExactCatalogMatch ? rawCode : '') ||
       'PENDIENTE';
@@ -457,13 +459,13 @@ export function CodizulcaNotaPedido({
 
       const rawItems = extractItemsList(initialData) || [];
 
-      // Extraer el 100% de las tiendas con cantidad > 0 en todas las páginas/cadenas del documento (AK y FC), excluyendo AKOP, FCOP y CI
+      // Extraer el 100% de las tiendas con cantidad > 0 en todas las páginas/cadenas del documento (AK y FC), excluyendo CI
       const allTagsWithQty = new Set<string>();
       (rawItems || []).forEach((it: any) => {
         if (it?.tiendas && typeof it.tiendas === 'object') {
           Object.entries(it.tiendas).forEach(([tk, val]) => {
             const uTag = tk.trim().toUpperCase();
-            if (uTag !== 'CI' && uTag !== 'AKOP' && uTag !== 'FCOP' && parseNumeroSeguro(val) > 0) {
+            if (uTag !== 'CI' && parseNumeroSeguro(val) > 0) {
               allTagsWithQty.add(uTag);
             }
           });
@@ -475,7 +477,7 @@ export function CodizulcaNotaPedido({
             : [];
         (distArr || []).forEach((d: any) => {
           const uTag = String(d?.codigo_tienda ?? d?.codigoTienda ?? '').trim().toUpperCase();
-          if (uTag && uTag !== 'CI' && uTag !== 'AKOP' && uTag !== 'FCOP' && parseNumeroSeguro(d?.cantidad) > 0) {
+          if (uTag && uTag !== 'CI' && parseNumeroSeguro(d?.cantidad) > 0) {
             allTagsWithQty.add(uTag);
           }
         });

@@ -2339,6 +2339,7 @@ async function startServer() {
     { sku: '303', nombre: 'ARROZ BLANCO ESPECIAL 24X1KG', barcode: '', chainCodes: ['303', 'ARROZ'], unid: 'CJ' },
     { sku: '401', nombre: 'HUEVOS BLANCOS SELECCIONADOS', barcode: '', chainCodes: ['401', 'HUEVOS'], unid: 'CJ' },
     { sku: '1569', nombre: 'PATATAS FRESCAS DOBLE COBERTURA 4X2.5KG', barcode: '', chainCodes: ['1569'], unid: 'CJ' },
+    { sku: '1543', nombre: 'AZUCAR BLANCA VENCAMPO 1X20ND', barcode: '7590377000220', chainCodes: ['1543', '7590377000220'], unid: 'BLT' },
     { sku: '1536', nombre: 'LECHE EN POLVO VENCAMPO 10X1KG', barcode: '', chainCodes: ['1536'], unid: 'CJ' },
     { sku: '1556', nombre: 'LECHE EN POLVO VENCAMPO 10X900GR', barcode: '7590377000510', chainCodes: ['1556', '7590377000510'], unid: 'CJ' },
     { sku: '1574', nombre: 'LECHE EN POLVO VENCAMPO 10X400GR', barcode: '7590377000503', chainCodes: ['1574', '7590377000503'], unid: 'CJ' },

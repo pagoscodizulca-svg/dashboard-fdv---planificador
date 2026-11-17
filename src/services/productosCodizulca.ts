@@ -266,6 +266,7 @@ const PRODUCTOS_HISTORICOS_COMPLEMENTARIOS: Record<string, ProductoCodizulca> = 
  * hacia el código numérico y descripción oficial de Codizulca.
  */
 const HOMOLOGACION_EAN_PLU_ALKOSTO: Record<string, ProductoCodizulca> = {
+  '7590377000220': { codigo: '1543', descripcion: 'AZUCAR BLANCA VENCAMPO 1X20ND', matchExacto: true },
   '7590377000411': { codigo: '1642', descripcion: 'ARVEJAS VENCAMPO 25 UND X 400GR', matchExacto: true },
   '7590377000459': { codigo: '1644', descripcion: 'CARAOTAS NEGRAS VENCAMPO 25 UND X 400GR', matchExacto: true },
   '7590377000503': { codigo: '1574', descripcion: 'LECHE EN POLVO VENCAMPO 10X400GR', matchExacto: true },
