@@ -1284,96 +1284,14 @@ async function startServer() {
   });
 
   // ==============================================================
-  // ENDPOINTS DEL PLANIFICADOR DE RUTA INTELIGENTE (RUTERO FDV)
+  // MÓDULO ENRUTADOR RETIRADO DE LA CAPA DE APLICACIÓN (HISTÓRICO INTACTO)
   // ==============================================================
-  const ruteroFilePath = path.resolve(process.cwd(), "rutero_state.json");
-  let ruteroStateInMemory: {
-    asignaciones: Record<string, any>;
-    visitas: Record<string, any>;
-  } = {
-    asignaciones: {},
-    visitas: {}
-  };
-
-  try {
-    if (fs.existsSync(ruteroFilePath)) {
-      const parsedRutero = JSON.parse(fs.readFileSync(ruteroFilePath, "utf8"));
-      if (parsedRutero && typeof parsedRutero === "object") {
-        ruteroStateInMemory = {
-          asignaciones: parsedRutero.asignaciones || {},
-          visitas: parsedRutero.visitas || {}
-        };
-      }
-    }
-  } catch (err: any) {
-    console.warn("[RUTERO] No se pudo cargar rutero_state.json inicial:", err?.message);
-  }
-
-  function persistRuteroStateDisk() {
-    try {
-      fs.writeFileSync(ruteroFilePath, JSON.stringify(ruteroStateInMemory, null, 2), "utf8");
-    } catch (err: any) {
-      console.warn("[RUTERO] Error guardando rutero_state.json:", err?.message);
-    }
-  }
-
-  app.get("/api/rutero", authenticateToken, (req: any, res: any) => {
-    try {
-      res.json({
-        success: true,
-        asignaciones: ruteroStateInMemory.asignaciones,
-        visitas: ruteroStateInMemory.visitas
-      });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: "Error obteniendo rutero", details: err?.message });
-    }
-  });
-
-  app.post("/api/rutero/asignaciones", authenticateToken, (req: any, res: any) => {
-    try {
-      const items = Array.isArray(req.body?.asignaciones) ? req.body.asignaciones : [];
-      for (const item of items) {
-        if (item && item.clienteKey) {
-          ruteroStateInMemory.asignaciones[item.clienteKey] = {
-            ...item,
-            updatedAt: item.updatedAt || new Date().toISOString()
-          };
-        }
-      }
-      persistRuteroStateDisk();
-      res.json({
-        success: true,
-        count: items.length
-      });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: "Error guardando asignaciones de ruta", details: err?.message });
-    }
-  });
-
-  app.post("/api/rutero/visitas", authenticateToken, (req: any, res: any) => {
-    try {
-      const visita = req.body?.visita;
-      if (!visita || !visita.fecha || !visita.clienteKey) {
-        return res.status(400).json({ success: false, error: "Datos de visita incompletos (fecha, clienteKey)" });
-      }
-      const visitKey = `${visita.fecha}::${visita.clienteKey}`;
-      if (visita.estado === "PENDIENTE") {
-        delete ruteroStateInMemory.visitas[visitKey];
-      } else {
-        ruteroStateInMemory.visitas[visitKey] = {
-          ...visita,
-          id: visita.id || visitKey,
-          checkInTimestamp: visita.checkInTimestamp || new Date().toISOString()
-        };
-      }
-      persistRuteroStateDisk();
-      res.json({
-        success: true,
-        visita: ruteroStateInMemory.visitas[visitKey] || null
-      });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: "Error registrando visita en ruta", details: err?.message });
-    }
+  app.all(["/api/rutero", "/api/rutero/*"], (_req: any, res: any) => {
+    return res.status(410).json({
+      success: false,
+      code: "MODULE_RETIRED",
+      error: "El módulo Enrutador fue retirado de la aplicación. Los datos históricos permanecen intactos."
+    });
   });
 
   // ==============================================================

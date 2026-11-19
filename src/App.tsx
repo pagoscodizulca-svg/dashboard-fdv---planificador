@@ -96,9 +96,27 @@ const CobrosOCR = lazyWithRetry(() => import('./components/CobrosOCR').then(m =>
 const TrazabilidadTab = lazyWithRetry(() => import('./components/TrazabilidadTab').then(m => ({ default: m.TrazabilidadTab })), 'TrazabilidadTab');
 const ActualizarMaestra = lazyWithRetry(() => import('./components/ActualizarMaestra').then(m => ({ default: m.ActualizarMaestra })), 'ActualizarMaestra');
 const DegustacionesTab = lazyWithRetry(() => import('./components/DegustacionesTab').then(m => ({ default: m.DegustacionesTab })), 'DegustacionesTab');
-const PlanificadorRutaTab = lazyWithRetry(() => import('./components/PlanificadorRutaTab').then(m => ({ default: m.PlanificadorRutaTab })), 'PlanificadorRutaTab');
 
-type TabId = 'ACTIVACION_RUBRO' | 'VOLUMEN' | 'ACTIVACION_CLIENTES' | 'RUTERO' | 'COBROS_OCR' | 'DEGUSTACIONES' | 'ALKOSTO' | 'TRAZABILIDAD' | 'MAESTRA';
+type TabId = 'ACTIVACION_RUBRO' | 'VOLUMEN' | 'ACTIVACION_CLIENTES' | 'COBROS_OCR' | 'DEGUSTACIONES' | 'ALKOSTO' | 'TRAZABILIDAD' | 'MAESTRA';
+
+const isLegacyEnrutadorUrl = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  try {
+    const pathname = (window.location.pathname || '').toLowerCase();
+    const hash = (window.location.hash || '').toLowerCase();
+    const tabParam = (new URLSearchParams(window.location.search).get('tab') || '').toLowerCase();
+    return (
+      pathname.includes('rutero') ||
+      pathname.includes('enrutador') ||
+      hash.includes('rutero') ||
+      hash.includes('enrutador') ||
+      tabParam === 'rutero' ||
+      tabParam === 'enrutador'
+    );
+  } catch {
+    return false;
+  }
+};
 
 const isIncomingWhatsAppShare = (): boolean => {
   if (typeof window === 'undefined') return false;
@@ -185,20 +203,35 @@ export default function App() {
       }
     };
     const onHashChange = () => {
+      if (isLegacyEnrutadorUrl()) {
+        try {
+          window.history.replaceState(null, '', '/');
+        } catch {}
+        setActiveTab('ACTIVACION_RUBRO');
+        return;
+      }
       if (window.location.hash === '#cobros' || isIncomingWhatsAppShare()) {
         setPendingWhatsAppShare(true);
         setActiveTab('COBROS_OCR');
       }
     };
+    if (isLegacyEnrutadorUrl()) {
+      try {
+        window.history.replaceState(null, '', '/');
+      } catch {}
+      setActiveTab('ACTIVACION_RUBRO');
+    }
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.addEventListener('message', onSwMessage);
     }
     window.addEventListener('hashchange', onHashChange);
+    window.addEventListener('popstate', onHashChange);
     return () => {
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.removeEventListener('message', onSwMessage);
       }
       window.removeEventListener('hashchange', onHashChange);
+      window.removeEventListener('popstate', onHashChange);
     };
   }, []);
 
@@ -899,7 +932,6 @@ export default function App() {
     { id: 'ACTIVACION_RUBRO' as TabId, label: 'Activación (Por rubro)', icon: Target },
     { id: 'VOLUMEN' as TabId, label: 'Volumen (SKU / KG)', icon: Package },
     { id: 'ACTIVACION_CLIENTES' as TabId, label: 'Activación (Clientes)', icon: Users },
-    { id: 'RUTERO' as TabId, label: 'Ruta (Planificador)', icon: Route },
     { id: 'COBROS_OCR' as TabId, label: 'Cobros (OCR)', icon: ScanText },
     { 
       id: 'DEGUSTACIONES' as TabId, 
@@ -1131,16 +1163,6 @@ export default function App() {
                 filteredActivacion={filteredActivacion} 
                 activeVendedorId={activeVendedorDisplayName}
                 vendedorFilter={activeVendedorId}
-              />
-            )}
-            {activeTab === 'RUTERO' && (
-              <PlanificadorRutaTab
-                filteredVolumen={filteredVolumen}
-                filteredActivacion={filteredActivacion}
-                activeVendedorDisplayName={activeVendedorDisplayName}
-                activeVendedorId={activeVendedorId}
-                userRole={userRole}
-                onNavigateToTab={(tab) => setActiveTab(tab as TabId)}
               />
             )}
             {activeTab === 'COBROS_OCR' && (
