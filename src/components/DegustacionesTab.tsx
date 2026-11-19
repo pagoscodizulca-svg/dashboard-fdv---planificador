@@ -425,6 +425,7 @@ export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
       };
 
       await saveDegustacion(nueva);
+      setDegustaciones((prev) => [nueva, ...prev.filter((d) => d.id !== nueva.id)]);
 
       setFormSuccessMessage(`¡Degustación para "${nueva.clienteNombre}" agendada con éxito! Redirigiendo a tu historial de seguimiento...`);
       
@@ -621,7 +622,7 @@ export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
             <button
               onClick={handleSyncGerencia}
               disabled={isSyncingGerencia}
-              title="Sincronizar degustaciones con el Dashboard de Gerencia (https://codizulca-dashboard-4.onrender.com)"
+              title="Sincronizar degustaciones con Trade Marketing (https://trade-marketing-qi6j.onrender.com)"
               className="flex-1 sm:flex-initial flex items-center justify-center gap-2 bg-neutral-900 hover:bg-neutral-800 disabled:opacity-60 text-neutral-300 hover:text-white px-3 sm:px-4 py-2.5 rounded-xl border border-neutral-800 text-xs font-sans font-bold transition-all active:scale-95 touch-manipulation shadow-sm cursor-pointer"
             >
               <RefreshCw className={`w-4 h-4 text-emerald-400 ${isSyncingGerencia ? 'animate-spin' : ''}`} />

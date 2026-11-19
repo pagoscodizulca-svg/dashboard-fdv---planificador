@@ -11,6 +11,7 @@ import {
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import { Degustacion, DegustacionConfig, EstadoDegustacion, TurnoDegustacion, HorarioSlot } from '../types';
+import { getAuthHeaders } from './authService';
 
 const DEGUSTACIONES_COLLECTION = 'degustaciones';
 const CONFIG_COLLECTION = 'degustaciones_config';
@@ -97,76 +98,99 @@ export function setLocalConfig(config: DegustacionConfig) {
 export function subscribeDegustaciones(
   callback: (degustaciones: Degustacion[]) => void
 ): () => void {
-  // Emitir primero el caché local limpio para render instantáneo
+  // 1. Emitir caché local limpio de inmediato para render instantáneo
   const initialData = getLocalCache();
   callback(initialData);
 
+  let isActive = true;
+
+  // 2. Cargar desde la fuente primaria autoritativa (/api/degustaciones -> Supabase)
+  fetch('/api/degustaciones', {
+    method: 'GET',
+    headers: {
+      'Cache-Control': 'no-cache',
+      ...getAuthHeaders()
+    }
+  })
+    .then(async (res) => {
+      if (!isActive || !res.ok) return;
+      const json = await res.json().catch(() => null);
+      if (isActive && json?.success && Array.isArray(json.data)) {
+        const sorted = sortDegustacionesOrdenadas(json.data, false);
+        setLocalCache(sorted);
+        callback(sorted);
+      }
+    })
+    .catch((err) => {
+      console.warn('[DEGUSTACIONES] No se pudo consultar /api/degustaciones, manteniendo caché local:', err?.message || err);
+    });
+
+  // 3. Suscripción secundaria best-effort a Firestore (sin disparar tormentas sync-gerencia al cargar)
+  let unsubscribeFirestore: () => void = () => {};
   try {
     const q = query(collection(db, DEGUSTACIONES_COLLECTION));
-    const unsubscribe = onSnapshot(
+    unsubscribeFirestore = onSnapshot(
       q,
       (snapshot) => {
-        if (!snapshot.empty) {
-          const list: Degustacion[] = [];
-          snapshot.docs.forEach(d => {
-            const rawData = d.data() as Partial<Degustacion>;
-            // Eliminar datos de prueba o documentos vacíos corruptos
-            if (
-              ['deg-001', 'deg-002', 'deg-003'].includes(d.id) ||
-              d.id.startsWith('deg-00') ||
-              (!rawData.clienteNombre && !rawData.fecha)
-            ) {
-              deleteDoc(doc(db, DEGUSTACIONES_COLLECTION, d.id)).catch(e => console.warn("Seed/empty cleanup err:", e));
-              return;
-            }
+        if (!isActive || snapshot.empty) return;
+        const list: Degustacion[] = [];
+        snapshot.docs.forEach(d => {
+          const rawData = d.data() as Partial<Degustacion>;
+          if (
+            ['deg-001', 'deg-002', 'deg-003'].includes(d.id) ||
+            d.id.startsWith('deg-00') ||
+            (!rawData.clienteNombre && !rawData.fecha)
+          ) {
+            return;
+          }
 
-            list.push({
-              id: d.id,
-              clienteCodigo: rawData.clienteCodigo || '',
-              clienteNombre: rawData.clienteNombre || 'Cliente sin nombre',
-              vendedorNombre: rawData.vendedorNombre || '',
-              vendedorId: rawData.vendedorId || '',
-              ruta: rawData.ruta || '',
-              fecha: rawData.fecha || '',
-              turno: rawData.turno || 'MAÑANA',
-              hora: rawData.hora || '',
-              productos: Array.isArray(rawData.productos) ? rawData.productos : [],
-              kilosEstimados: Number(rawData.kilosEstimados) || 0,
-              personasEstimadas: Number(rawData.personasEstimadas) || 0,
-              requierePromotora: Boolean(rawData.requierePromotora),
-              promotoraAsignada: rawData.promotoraAsignada || '',
-              materialPop: Boolean(rawData.materialPop),
-              contactoPunto: rawData.contactoPunto || '',
-              telefonoContacto: rawData.telefonoContacto || '',
-              observaciones: rawData.observaciones || '',
-              estado: rawData.estado || 'SOLICITADA',
-              notasTradeMarketing: rawData.notasTradeMarketing || '',
-              resultado: rawData.resultado,
-              createdAt: rawData.createdAt || new Date().toISOString()
-            });
+          list.push({
+            id: d.id,
+            clienteCodigo: rawData.clienteCodigo || '',
+            clienteNombre: rawData.clienteNombre || 'Cliente sin nombre',
+            vendedorNombre: rawData.vendedorNombre || '',
+            vendedorId: rawData.vendedorId || '',
+            ruta: rawData.ruta || '',
+            fecha: rawData.fecha || '',
+            turno: rawData.turno || 'MAÑANA',
+            hora: rawData.hora || '',
+            productos: Array.isArray(rawData.productos) ? rawData.productos : [],
+            kilosEstimados: Number(rawData.kilosEstimados) || 0,
+            personasEstimadas: Number(rawData.personasEstimadas) || 0,
+            requierePromotora: Boolean(rawData.requierePromotora),
+            promotoraAsignada: rawData.promotoraAsignada || '',
+            materialPop: Boolean(rawData.materialPop),
+            contactoPunto: rawData.contactoPunto || '',
+            telefonoContacto: rawData.telefonoContacto || '',
+            observaciones: rawData.observaciones || '',
+            estado: rawData.estado || 'SOLICITADA',
+            notasTradeMarketing: rawData.notasTradeMarketing || '',
+            resultado: rawData.resultado,
+            createdAt: rawData.createdAt || new Date().toISOString()
           });
+        });
 
-          // Ordenar de forma determinística: fecha descendente, luego turno (MAÑANA antes de TARDE), luego vendedor y cliente
-          const sortedList = sortDegustacionesOrdenadas(list, false);
+        if (list.length > 0) {
+          const existingCache = getLocalCache();
+          const mergedMap = new Map<string, Degustacion>();
+          list.forEach(item => mergedMap.set(item.id, item));
+          // Priorizar registros autoritativos más recientes de Supabase / caché local
+          existingCache.forEach(item => mergedMap.set(item.id, item));
+          const sortedList = sortDegustacionesOrdenadas(Array.from(mergedMap.values()), false);
           setLocalCache(sortedList);
-          callback(sortedList); if (typeof window !== 'undefined' && !(window as any).__gerenciaDegustacionesAutoSynced && sortedList.length > 0) { (window as any).__gerenciaDegustacionesAutoSynced = true; syncAllDegustacionesToGerencia(sortedList).catch(() => {}); }
-        } else {
-          setLocalCache([]);
-          callback([]);
+          callback(sortedList);
         }
       },
-      (error) => {
-        handleFirestoreError(error, OperationType.GET, DEGUSTACIONES_COLLECTION);
-        // Continuar con caché local ante error
-        callback(sortDegustacionesOrdenadas(getLocalCache(), false));
+      () => {
+        // Silenciar error de Firestore si Firebase Auth está deshabilitado (Supabase es primario)
       }
     );
+  } catch (_) {}
 
-    return unsubscribe;
-  } catch (err) {
-    console.warn("Firestore subscription failed, relying on local cache:", err);
-    return () => {};
-  }
+  return () => {
+    isActive = false;
+    unsubscribeFirestore();
+  };
 }
 
 /**
@@ -224,7 +248,7 @@ export function sortDegustacionesOrdenadas(list: Degustacion[], ascending: boole
   });
 }
 
-export const DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL = '/api/degustaciones';
+export const DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL = '';
 export const GOOGLE_SHEETS_WEBHOOK_STORAGE_KEY = 'codizulca_sheets_webhook_url';
 
 export function getGoogleSheetsWebhookUrl(): string {
@@ -286,7 +310,10 @@ export async function syncToGoogleSheets(degustacion: Degustacion): Promise<bool
   }
 }
 
-export const GERENCIA_TRADE_API_URL = (import.meta as any).env?.VITE_GERENCIA_TRADE_API_URL || 'https://codizulca-dashboard-4.onrender.com/api/degustaciones';
+export const GERENCIA_TRADE_API_URL =
+  (import.meta as any).env?.VITE_TRADE_MARKETING_API_URL ||
+  (import.meta as any).env?.VITE_GERENCIA_TRADE_API_URL ||
+  'https://trade-marketing-qi6j.onrender.com/api/degustaciones';
 export const GERENCIA_UTERIO_SURVEYS_URL = (import.meta as any).env?.VITE_GERENCIA_UTERIO_SURVEYS_URL || '';
 export const GERENCIA_UTERIO_ANON_KEY = (import.meta as any).env?.VITE_GERENCIA_UTERIO_ANON_KEY || '';
 export const GERENCIA_SUPABASE_SURVEYS_URL = (import.meta as any).env?.VITE_GERENCIA_SUPABASE_SURVEYS_URL || '';
@@ -572,8 +599,28 @@ export async function syncAllDegustacionesToGerencia(degustaciones: Degustacion[
 /**
  * Guarda o crea una degustación en Firestore y en caché local
  */
+function stripUndefinedFields<T extends Record<string, any>>(obj: T): Record<string, any> {
+  return Object.fromEntries(Object.entries(obj).filter(([, value]) => value !== undefined));
+}
+
 export async function saveDegustacion(degustacion: Degustacion): Promise<void> {
-  // Actualizar inmediatamente en cache local ordenado
+  // 1. Persistir de forma autoritativa e idempotente vía backend FDV (/api/degustaciones -> Supabase + Trade Marketing)
+  const response = await fetch('/api/degustaciones', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Idempotency-Key': degustacion.id,
+      ...getAuthHeaders()
+    },
+    body: JSON.stringify(degustacion)
+  });
+
+  if (!response.ok) {
+    const errBody = await response.json().catch(() => null);
+    throw new Error(errBody?.error || `Error HTTP ${response.status} al sincronizar degustación`);
+  }
+
+  // 2. Actualizar inmediatamente caché local ordenado tras confirmación del servidor
   const current = getLocalCache();
   const index = current.findIndex(d => d.id === degustacion.id);
   let updatedList: Degustacion[];
@@ -585,26 +632,11 @@ export async function saveDegustacion(degustacion: Degustacion): Promise<void> {
   }
   setLocalCache(sortDegustacionesOrdenadas(updatedList, false));
 
-  // Guardar en Firestore
+  // 3. Respaldo secundario best-effort en Firestore (sanitizando undefined y blindado contra excepciones síncronas del SDK)
   try {
-    const docRef = doc(db, DEGUSTACIONES_COLLECTION, degustacion.id);
-    await setDoc(docRef, degustacion, { merge: true });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `${DEGUSTACIONES_COLLECTION}/${degustacion.id}`);
-  }
-
-  // Sincronizar con el backend del Planificador (/api/degustaciones)
-  fetch('/api/degustaciones', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(degustacion)
-  }).catch(() => {});
-
-  // Sincronizar automáticamente con Google Sheets
-  syncToGoogleSheets(degustacion).catch(() => {});
-
-  // Sincronizar directamente con el Dashboard de Gerencia (https://codizulca-dashboard-4.onrender.com/dashboard/trade)
-  await syncToGerenciaDashboard(degustacion).catch(() => {});
+    const firestoreSafePayload = stripUndefinedFields(degustacion);
+    Promise.resolve(setDoc(doc(db, DEGUSTACIONES_COLLECTION, degustacion.id), firestoreSafePayload, { merge: true })).catch(() => {});
+  } catch (_) {}
 }
 
 /**
@@ -614,55 +646,60 @@ export async function updateDegustacion(
   id: string, 
   updates: Partial<Degustacion>
 ): Promise<void> {
+  const response = await fetch(`/api/degustaciones/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      ...getAuthHeaders()
+    },
+    body: JSON.stringify(updates)
+  });
+
+  if (!response.ok) {
+    const errBody = await response.json().catch(() => null);
+    throw new Error(errBody?.error || `Error HTTP ${response.status} al actualizar degustación`);
+  }
+
   const current = getLocalCache();
   const index = current.findIndex(d => d.id === id);
-  let updatedItem: Degustacion | null = null;
   if (index >= 0) {
-    updatedItem = { ...current[index], ...updates, updatedAt: new Date().toISOString() };
+    const updatedItem = { ...current[index], ...updates, updatedAt: new Date().toISOString() };
     current[index] = updatedItem;
     setLocalCache(sortDegustacionesOrdenadas([...current], false));
   }
 
+  // Respaldo secundario best-effort en Firestore
   try {
-    const docRef = doc(db, DEGUSTACIONES_COLLECTION, id);
-    await updateDoc(docRef, {
+    const firestoreSafeUpdates = stripUndefinedFields({
       ...updates,
       updatedAt: new Date().toISOString()
     });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, `${DEGUSTACIONES_COLLECTION}/${id}`);
-  }
-
-  fetch(`/api/degustaciones/${encodeURIComponent(id)}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(updates)
-  }).catch(() => {});
-
-  if (updatedItem) {
-    syncToGoogleSheets(updatedItem).catch(() => {});
-    await syncToGerenciaDashboard(updatedItem).catch(() => {});
-  }
+    Promise.resolve(updateDoc(doc(db, DEGUSTACIONES_COLLECTION, id), firestoreSafeUpdates)).catch(() => {});
+  } catch (_) {}
 }
 
 /**
  * Elimina una degustación
  */
 export async function deleteDegustacion(id: string): Promise<void> {
+  const response = await fetch(`/api/degustaciones/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: {
+      ...getAuthHeaders()
+    }
+  });
+
+  if (!response.ok) {
+    const errBody = await response.json().catch(() => null);
+    throw new Error(errBody?.error || `Error HTTP ${response.status} al eliminar degustación`);
+  }
+
   const current = getLocalCache().filter(d => d.id !== id);
   setLocalCache(current);
 
   try {
-    await deleteDoc(doc(db, DEGUSTACIONES_COLLECTION, id));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, `${DEGUSTACIONES_COLLECTION}/${id}`);
-  }
-
-  fetch(`/api/degustaciones/${encodeURIComponent(id)}`, {
-    method: 'DELETE'
-  }).catch(() => {});
-
-  deleteFromGerenciaDashboard(id).catch(() => {});
+    Promise.resolve(deleteDoc(doc(db, DEGUSTACIONES_COLLECTION, id))).catch(() => {});
+  } catch (_) {}
 }
 
 export function formatYMD(date: Date): string {

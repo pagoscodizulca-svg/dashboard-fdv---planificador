@@ -1010,13 +1010,13 @@ export default function App() {
   ];
 
   return (
-    <div className="min-h-screen bg-black text-neutral-200 selection:bg-neutral-800 p-3 md:p-6 lg:p-8">
+    <div className="min-h-screen overflow-x-hidden bg-black text-neutral-200 selection:bg-neutral-800 p-3 md:p-6 lg:p-8">
       
       {/* HEADER TABS & ROLE / ROUTE SELECTOR */}
-      <header className="max-w-7xl mx-auto flex flex-col xl:flex-row xl:items-center justify-between gap-4 md:gap-6 mb-6 md:mb-8">
+      <header className="max-w-7xl mx-auto flex flex-col gap-3 md:gap-4 mb-6 md:mb-8">
         
         {/* TABS PILL MENU - DESKTOP */}
-        <div className="hidden md:flex bg-neutral-950 p-1.5 rounded-full border border-neutral-800 w-full xl:w-auto">
+        <div className="hidden md:flex flex-wrap items-center gap-1 bg-neutral-950 p-1.5 rounded-2xl border border-neutral-800 w-full max-w-full">
           {tabs.map((tab) => {
             const isActive = activeTab === tab.id;
             const Icon = tab.icon;
@@ -1024,7 +1024,7 @@ export default function App() {
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
-                className={`flex items-center justify-center gap-2 px-5 py-2.5 min-h-[44px] rounded-full text-sm font-sans font-bold transition-all whitespace-nowrap shrink-0 ${
+                className={`flex items-center justify-center gap-2 px-3.5 lg:px-4 py-2 min-h-[40px] rounded-xl text-xs lg:text-sm font-sans font-bold transition-all whitespace-nowrap shrink-0 cursor-pointer ${
                   isActive
                     ? 'bg-red-600 text-white shadow-lg'
                     : 'text-neutral-400 hover:text-white hover:bg-neutral-900'

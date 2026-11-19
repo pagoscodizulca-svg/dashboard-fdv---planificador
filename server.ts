@@ -667,6 +667,58 @@ async function startServer() {
     });
   }
 
+  // Almacén en memoria de respaldo (modo offline/QA) + estructuras de idempotencia y serialización
+  const degustacionesMemoryStore = new Map<string, any>();
+  const inFlightDegustacionCreates = new Map<string, Promise<{ record: any; sync: any }>>();
+  const completedDegustacionIdempotency = new Map<string, { record: any; sync: any; expiresAt: number }>();
+  const DEGUSTACION_IDEMPOTENCY_TTL_MS = 10 * 60 * 1000;
+  const surveyUpsertLocks = new Map<string, Promise<any>>();
+  let tradeJsonWriteQueue: Promise<void> = Promise.resolve();
+  let inFlightFullTradeSync: Promise<{ total: number; synced: number; timestamp: string }> | null = null;
+
+  function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+    let timer: any;
+    const timeoutPromise = new Promise<T>((resolve) => {
+      timer = setTimeout(() => resolve(fallback), timeoutMs);
+    });
+    return Promise.race([
+      promise.finally(() => clearTimeout(timer)),
+      timeoutPromise
+    ]);
+  }
+
+  async function fetchWithRetry(
+    url: string,
+    options: RequestInit = {},
+    config: { timeoutMs?: number; maxAttempts?: number } = {}
+  ): Promise<Response> {
+    const timeoutMs = config.timeoutMs ?? 10000;
+    const maxAttempts = config.maxAttempts ?? 2;
+    let lastErr: any;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, { ...options, signal: controller.signal });
+        clearTimeout(timer);
+        if ((res.status === 429 || res.status >= 500) && attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 250 * Math.pow(2, attempt - 1)));
+          continue;
+        }
+        return res;
+      } catch (err: any) {
+        clearTimeout(timer);
+        lastErr = err;
+        if (attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 250 * Math.pow(2, attempt - 1)));
+          continue;
+        }
+      }
+    }
+    throw lastErr || new Error(`Fetch failed for ${url}`);
+  }
+
   async function loadAllMergedDegustaciones(): Promise<any[]> {
     const mapById = new Map<string, any>();
 
@@ -687,18 +739,29 @@ async function startServer() {
       } catch (_) {}
     }
 
-    try {
-      const snapshot = await getDocs(collection(db, 'degustaciones'));
-      snapshot.forEach(docSnap => {
-        const data = docSnap.data();
-        if (data && data.clienteNombre) {
-          const norm = normalizeDegustacionRecord({ id: docSnap.id, ...data });
-          if (norm.id && !EXCLUDED_TEST_DEG_IDS.has(norm.id) && !norm.id.startsWith('test-')) {
-            mapById.set(norm.id, norm);
+    for (const [memId, memRecord] of degustacionesMemoryStore.entries()) {
+      if (memId && !EXCLUDED_TEST_DEG_IDS.has(memId) && !memId.startsWith('test-')) {
+        mapById.set(memId, normalizeDegustacionRecord(memRecord));
+      }
+    }
+
+    // Firestore como respaldo best-effort con timeout acotado (nunca bloquea Supabase)
+    if (!supabase) {
+      try {
+        const snapshot = await withTimeout(getDocs(collection(db, 'degustaciones')), 2500, null as any);
+        snapshot?.forEach((docSnap: any) => {
+          const data = docSnap.data();
+          if (data && data.clienteNombre) {
+            const norm = normalizeDegustacionRecord({ id: docSnap.id, ...data });
+            if (norm.id && !EXCLUDED_TEST_DEG_IDS.has(norm.id) && !norm.id.startsWith('test-')) {
+              if (!mapById.has(norm.id)) {
+                mapById.set(norm.id, norm);
+              }
+            }
           }
-        }
-      });
-    } catch (_) {}
+        });
+      } catch (_) {}
+    }
 
     return sortDegustacionesServer(Array.from(mapById.values()), false);
   }
@@ -708,6 +771,18 @@ async function startServer() {
       let list = await loadAllMergedDegustaciones();
 
       // Filtros opcionales
+      if (req.query.id) {
+        const cleanReqId = String(req.query.id).replace(/^DEG-/, '').trim();
+        list = list.filter(d => String(d.id || '').replace(/^DEG-/, '') === cleanReqId);
+      }
+      if (req.query.tag) {
+        const t = String(req.query.tag).toUpperCase().trim();
+        list = list.filter(d =>
+          String(d.id || '').toUpperCase().includes(t) ||
+          String(d.clienteNombre || '').toUpperCase().includes(t) ||
+          String(d.observaciones || '').toUpperCase().includes(t)
+        );
+      }
       if (req.query.vendedor) {
         const v = String(req.query.vendedor).toUpperCase().trim();
         list = list.filter(d => 
@@ -728,7 +803,7 @@ async function startServer() {
         success: true,
         count: list.length,
         data: list,
-        source: 'merged_ordered'
+        source: supabase ? 'supabase_primary' : 'memory_fallback'
       });
     } catch (err: any) {
       console.error("Error fetching degustaciones via API:", err);
@@ -737,8 +812,12 @@ async function startServer() {
   });
 
   const GOOGLE_SCRIPT_WEBHOOK_URL = process.env.GOOGLE_SCRIPT_WEBHOOK_URL || '';
-  const GERENCIA_TRADE_API_URL = process.env.GERENCIA_TRADE_API_URL || 'https://codizulca-dashboard-4.onrender.com/api/degustaciones';
-  const GERENCIA_UTERIO_SURVEYS_URL = process.env.GERENCIA_UTERIO_SURVEYS_URL || 'https://uterioexpfweghxfbvoa.supabase.co/rest/v1/surveys';
+  const GERENCIA_TRADE_API_URL =
+    process.env.TRADE_MARKETING_API_URL ||
+    process.env.GERENCIA_TRADE_API_URL ||
+    'https://trade-marketing-qi6j.onrender.com/api/degustaciones';
+  const TRADE_MARKETING_API_KEY = process.env.TRADE_MARKETING_API_KEY || '';
+  const GERENCIA_UTERIO_SURVEYS_URL = process.env.GERENCIA_UTERIO_SURVEYS_URL || '';
   const GERENCIA_UTERIO_ANON_KEY = process.env.GERENCIA_UTERIO_ANON_KEY || '';
   const GERENCIA_SUPABASE_SURVEYS_URL = process.env.GERENCIA_SUPABASE_SURVEYS_URL || (SUPABASE_URL ? `${SUPABASE_URL}/rest/v1/surveys` : '');
   const GERENCIA_SUPABASE_ANON_KEY = process.env.GERENCIA_SUPABASE_ANON_KEY || SUPABASE_SERVICE_ROLE_KEY || '';
@@ -823,109 +902,95 @@ async function startServer() {
     };
   }
 
-  // Sincronizador bidireccional exacto para los archivos data_degustaciones.json de Trade Marketing
-  function syncToTradeMarketingJson(itemOrList: any | any[]) {
-    try {
-      const items = sortDegustacionesServer(Array.isArray(itemOrList) ? itemOrList : [itemOrList], false);
-      const gerencia3Path = path.resolve(process.cwd(), '../codizulca-dashboard (3)/data_degustaciones.json');
-      const gerencia4Path = path.resolve(process.cwd(), '../codizulca-dashboard (4)/data_degustaciones.json');
-      const localPath = path.resolve(process.cwd(), 'data_degustaciones.json');
-
-      const targetPaths = [localPath];
-      if (fs.existsSync(path.dirname(gerencia3Path))) targetPaths.push(gerencia3Path);
-      if (fs.existsSync(path.dirname(gerencia4Path))) targetPaths.push(gerencia4Path);
-
-      for (const tPath of targetPaths) {
-        let existing: any[] = [];
-        try {
-          if (fs.existsSync(tPath)) {
-            existing = JSON.parse(fs.readFileSync(tPath, 'utf8') || '[]');
-          }
-        } catch (_) {}
-
-        const existingMap = new Map<string, any>();
-        const historicalItems: any[] = [];
-        existing.forEach(e => {
-          if (!e || !e.id) return;
-          const normId = String(e.id).startsWith('DEG-') ? String(e.id) : `DEG-${e.id}`;
-          existingMap.set(normId, e);
-          if (String(e.id).startsWith('DEG-HIST-')) {
-            historicalItems.push(e);
-          }
-        });
-
-        const updatedVendorMap = new Map<string, any>();
-        // Si es actualización unitaria, mantener las demás degustaciones existentes ordenadas
-        if (!Array.isArray(itemOrList)) {
-          existing.forEach(e => {
-            if (e && e.id && !String(e.id).startsWith('DEG-HIST-')) {
-              const normId = String(e.id).startsWith('DEG-') ? String(e.id) : `DEG-${e.id}`;
-              updatedVendorMap.set(normId, e);
-            }
-          });
-        }
-
-        for (const rawItem of items) {
-          if (!rawItem || (!rawItem.id && !rawItem.degustacionId)) continue;
-          const cleanId = String(rawItem.id || rawItem.degustacionId).replace(/^DEG-/, '');
-          const degId = `DEG-${cleanId}`;
-          const built = buildTradeMarketingItemServer(rawItem, existingMap.get(degId));
-          updatedVendorMap.set(degId, built);
-        }
-
-        const vendorItems = Array.from(updatedVendorMap.values());
-        // Ordenar degustaciones activas de vendedores por fecha DD/MM/YYYY descendente y turno
-        vendorItems.sort((a, b) => {
-          const toIso = (s: string) => {
-            if (/^\d{2}\/\d{2}\/\d{4}$/.test(s || '')) {
-              const [d, m, y] = s.split('/');
-              return `${y}-${m}-${d}`;
-            }
-            return s || '';
-          };
-          const dA = toIso(a.date);
-          const dB = toIso(b.date);
-          if (dA !== dB) return dB.localeCompare(dA);
-          const tA = String(a.time || '').includes('09:') ? 1 : 2;
-          const tB = String(b.time || '').includes('09:') ? 1 : 2;
-          if (tA !== tB) return tA - tB;
-          return String(a.vendedor || '').localeCompare(String(b.vendedor || ''), 'es');
-        });
-
-        const finalJsonList = [...vendorItems, ...historicalItems];
-
-        try {
-          fs.writeFileSync(tPath, JSON.stringify(finalJsonList, null, 2), 'utf8');
-        } catch (err: any) {
-          console.warn(`[SYNC TRADE] Error al escribir en ${tPath}:`, err?.message);
-        }
-      }
-    } catch (e: any) {
-      console.warn("[SYNC TRADE] Error sincronizando archivo json de Trade Marketing:", e?.message);
-    }
+  // Sincronizador serializado y atómico para data_degustaciones.json local (sin escrituras concurrentes destructivas ni rutas externas)
+  function enqueueTradeJsonOperation(op: () => Promise<void>): Promise<void> {
+    const next = tradeJsonWriteQueue.then(op).catch((err: any) => {
+      console.warn("[SYNC TRADE] Error en cola de escritura JSON local:", err?.message);
+    });
+    tradeJsonWriteQueue = next;
+    return next;
   }
 
-  function deleteFromTradeMarketingJson(id: string) {
-    try {
-      const cleanId = String(id).replace(/^DEG-/, '');
-      const degId = `DEG-${cleanId}`;
-      const gerencia3Path = path.resolve(process.cwd(), '../codizulca-dashboard (3)/data_degustaciones.json');
-      const gerencia4Path = path.resolve(process.cwd(), '../codizulca-dashboard (4)/data_degustaciones.json');
+  function syncToTradeMarketingJson(itemOrList: any | any[]): Promise<void> {
+    return enqueueTradeJsonOperation(async () => {
+      const items = sortDegustacionesServer(Array.isArray(itemOrList) ? itemOrList : [itemOrList], false);
       const localPath = path.resolve(process.cwd(), 'data_degustaciones.json');
 
-      const targetPaths = [localPath];
-      if (fs.existsSync(path.dirname(gerencia3Path))) targetPaths.push(gerencia3Path);
-      if (fs.existsSync(path.dirname(gerencia4Path))) targetPaths.push(gerencia4Path);
+      let existing: any[] = [];
+      try {
+        if (fs.existsSync(localPath)) {
+          const raw = await fs.promises.readFile(localPath, 'utf8');
+          existing = JSON.parse(raw || '[]');
+        }
+      } catch (_) {}
 
-      for (const tPath of targetPaths) {
-        if (!fs.existsSync(tPath)) continue;
-        const existing: any[] = JSON.parse(fs.readFileSync(tPath, 'utf8') || '[]');
-        const filtered = existing.filter(e => e.id !== id && e.id !== cleanId && e.id !== degId);
-        fs.writeFileSync(tPath, JSON.stringify(filtered, null, 2), 'utf8');
+      const existingMap = new Map<string, any>();
+      const historicalItems: any[] = [];
+      existing.forEach(e => {
+        if (!e || !e.id) return;
+        const normId = String(e.id).startsWith('DEG-') ? String(e.id) : `DEG-${e.id}`;
+        existingMap.set(normId, e);
+        if (String(e.id).startsWith('DEG-HIST-')) {
+          historicalItems.push(e);
+        }
+      });
+
+      const updatedVendorMap = new Map<string, any>();
+      if (!Array.isArray(itemOrList)) {
+        existing.forEach(e => {
+          if (e && e.id && !String(e.id).startsWith('DEG-HIST-')) {
+            const normId = String(e.id).startsWith('DEG-') ? String(e.id) : `DEG-${e.id}`;
+            updatedVendorMap.set(normId, e);
+          }
+        });
       }
-    } catch (e: any) {
-      console.warn("[SYNC TRADE] Error eliminando de json Trade Marketing:", e?.message);
-    }
+
+      for (const rawItem of items) {
+        if (!rawItem || (!rawItem.id && !rawItem.degustacionId)) continue;
+        const cleanId = String(rawItem.id || rawItem.degustacionId).replace(/^DEG-/, '');
+        const degId = `DEG-${cleanId}`;
+        const built = buildTradeMarketingItemServer(rawItem, existingMap.get(degId));
+        updatedVendorMap.set(degId, built);
+      }
+
+      const vendorItems = Array.from(updatedVendorMap.values());
+      vendorItems.sort((a, b) => {
+        const toIso = (s: string) => {
+          if (/^\d{2}\/\d{2}\/\d{4}$/.test(s || '')) {
+            const [d, m, y] = s.split('/');
+            return `${y}-${m}-${d}`;
+          }
+          return s || '';
+        };
+        const dA = toIso(a.date);
+        const dB = toIso(b.date);
+        if (dA !== dB) return dB.localeCompare(dA);
+        const tA = String(a.time || '').includes('09:') ? 1 : 2;
+        const tB = String(b.time || '').includes('09:') ? 1 : 2;
+        if (tA !== tB) return tA - tB;
+        return String(a.vendedor || '').localeCompare(String(b.vendedor || ''), 'es');
+      });
+
+      const finalJsonList = [...vendorItems, ...historicalItems];
+      const tmpPath = `${localPath}.${process.pid}.${Date.now()}.tmp`;
+      await fs.promises.writeFile(tmpPath, JSON.stringify(finalJsonList, null, 2), 'utf8');
+      await fs.promises.rename(tmpPath, localPath);
+    });
+  }
+
+  function deleteFromTradeMarketingJson(id: string): Promise<void> {
+    return enqueueTradeJsonOperation(async () => {
+      const cleanId = String(id).replace(/^DEG-/, '');
+      const degId = `DEG-${cleanId}`;
+      const localPath = path.resolve(process.cwd(), 'data_degustaciones.json');
+      if (!fs.existsSync(localPath)) return;
+      const raw = await fs.promises.readFile(localPath, 'utf8');
+      const existing: any[] = JSON.parse(raw || '[]');
+      const filtered = existing.filter(e => e.id !== id && e.id !== cleanId && e.id !== degId);
+      const tmpPath = `${localPath}.${process.pid}.${Date.now()}.tmp`;
+      await fs.promises.writeFile(tmpPath, JSON.stringify(filtered, null, 2), 'utf8');
+      await fs.promises.rename(tmpPath, localPath);
+    });
   }
 
   function buildGerenciaDirectPayload(rawItem: any) {
@@ -998,23 +1063,54 @@ async function startServer() {
     };
   }
 
-  async function upsertSurveyAtSupabase(url: string, apiKey: string, cleanId: string, payload: any) {
-    try {
-      const searchUrl = `${url}?comments=like.*${encodeURIComponent(cleanId)}*&select=id&limit=5`;
-      const searchRes = await fetch(searchUrl, {
-        method: 'GET',
-        headers: {
-          'apikey': apiKey,
-          'Authorization': `Bearer ${apiKey}`
-        }
-      });
+  async function upsertSurveyAtSupabase(url: string, apiKey: string, cleanId: string, payload: any): Promise<boolean> {
+    if (!url || !apiKey || !cleanId) return false;
 
-      if (searchRes.ok) {
-        const records = await searchRes.json();
-        if (Array.isArray(records) && records.length > 0 && records[0].id) {
-          const updateUrl = `${url}?id=eq.${records[0].id}`;
-          await fetch(updateUrl, {
-            method: 'PATCH',
+    // Lock serializado por (endpoint + degustacionId) para eliminar condiciones de carrera TOCTOU
+    const lockKey = `${url}::${cleanId}`;
+    const previousLock = surveyUpsertLocks.get(lockKey) || Promise.resolve();
+
+    const runUpsert = async (): Promise<boolean> => {
+      try {
+        const searchUrl = `${url}?comments=like.*${encodeURIComponent(cleanId)}*&select=id&limit=5`;
+        const searchRes = await fetchWithRetry(
+          searchUrl,
+          {
+            method: 'GET',
+            headers: {
+              'apikey': apiKey,
+              'Authorization': `Bearer ${apiKey}`
+            }
+          },
+          { timeoutMs: 8000, maxAttempts: 2 }
+        );
+
+        if (searchRes.ok) {
+          const records = await searchRes.json();
+          if (Array.isArray(records) && records.length > 0 && records[0].id) {
+            const updateUrl = `${url}?id=eq.${records[0].id}`;
+            const patchRes = await fetchWithRetry(
+              updateUrl,
+              {
+                method: 'PATCH',
+                headers: {
+                  'apikey': apiKey,
+                  'Authorization': `Bearer ${apiKey}`,
+                  'Content-Type': 'application/json',
+                  'Prefer': 'return=representation'
+                },
+                body: JSON.stringify(payload)
+              },
+              { timeoutMs: 8000, maxAttempts: 2 }
+            );
+            return patchRes.ok;
+          }
+        }
+
+        const postRes = await fetchWithRetry(
+          url,
+          {
+            method: 'POST',
             headers: {
               'apikey': apiKey,
               'Authorization': `Bearer ${apiKey}`,
@@ -1022,153 +1118,221 @@ async function startServer() {
               'Prefer': 'return=representation'
             },
             body: JSON.stringify(payload)
-          });
-          return;
-        }
+          },
+          { timeoutMs: 8000, maxAttempts: 2 }
+        );
+        return postRes.ok;
+      } catch (_) {
+        return false;
       }
+    };
 
-      await fetch(url, {
-        method: 'POST',
-        headers: {
-          'apikey': apiKey,
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-          'Prefer': 'return=representation'
-        },
-        body: JSON.stringify(payload)
-      });
-    } catch (_) {}
+    const chained = previousLock.then(runUpsert, runUpsert);
+    surveyUpsertLocks.set(lockKey, chained);
+    try {
+      return await chained;
+    } finally {
+      if (surveyUpsertLocks.get(lockKey) === chained) {
+        surveyUpsertLocks.delete(lockKey);
+      }
+    }
   }
 
   async function syncToGerenciaDirect(item: any, existingRemote?: any) {
+    const startedAt = Date.now();
+    const result = {
+      localJson: false,
+      tradeMarketingWebhook: { attempted: false, ok: false, status: 0 as number },
+      supabaseSurveys: false,
+      uterioSurveys: false,
+      latencyMs: 0
+    };
+
     try {
       const norm = normalizeDegustacionRecord(item);
-      if (!norm.id || EXCLUDED_TEST_DEG_IDS.has(norm.id)) return;
+      if (!norm.id || EXCLUDED_TEST_DEG_IDS.has(norm.id)) {
+        result.latencyMs = Date.now() - startedAt;
+        return result;
+      }
 
-      // 1. Sincronizar en data_degustaciones.json (Local y Gerencia Trade Marketing)
-      syncToTradeMarketingJson(norm);
-
-      // 2. Construir payloads para el API de Render y tablas surveys de Supabase
       const tradeItem = buildTradeMarketingItemServer(norm, existingRemote);
       const surveyPayload = buildGerenciaDirectPayload(norm);
 
-      await Promise.all([
-        // Enviar en vivo a https://codizulca-dashboard-4.onrender.com/api/degustaciones
-        fetch(GERENCIA_TRADE_API_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(tradeItem)
-        }).catch(() => {}),
+      const tradeHeaders: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'X-Idempotency-Key': `DEG-${norm.id}`
+      };
+      if (TRADE_MARKETING_API_KEY) {
+        tradeHeaders['Authorization'] = `Bearer ${TRADE_MARKETING_API_KEY}`;
+      }
 
-        // Sincronizar en Supabase de Gerencia (uterioexpfweghxfbvoa)
+      const [jsonOk, webhookRes, uterioOk, supaSurveyOk] = await Promise.all([
+        syncToTradeMarketingJson(norm).then(() => true).catch(() => false),
+        GERENCIA_TRADE_API_URL
+          ? (result.tradeMarketingWebhook.attempted = true,
+            fetchWithRetry(
+              GERENCIA_TRADE_API_URL,
+              {
+                method: 'POST',
+                headers: tradeHeaders,
+                body: JSON.stringify(tradeItem)
+              },
+              { timeoutMs: 8000, maxAttempts: 2 }
+            )
+              .then((r) => ({ ok: r.ok, status: r.status }))
+              .catch(() => ({ ok: false, status: 0 })))
+          : Promise.resolve({ ok: false, status: 0 }),
         upsertSurveyAtSupabase(GERENCIA_UTERIO_SURVEYS_URL, GERENCIA_UTERIO_ANON_KEY, norm.id, surveyPayload),
-
-        // Sincronizar en Supabase del Planificador (nudltbgyewyiklqdyujk)
         upsertSurveyAtSupabase(GERENCIA_SUPABASE_SURVEYS_URL, GERENCIA_SUPABASE_ANON_KEY, norm.id, surveyPayload)
       ]);
+
+      result.localJson = jsonOk;
+      result.tradeMarketingWebhook.ok = webhookRes.ok;
+      result.tradeMarketingWebhook.status = webhookRes.status;
+      result.uterioSurveys = uterioOk;
+      result.supabaseSurveys = supaSurveyOk;
     } catch (err) {
       console.warn("Failed to sync directly to Gerencia:", err);
     }
+
+    result.latencyMs = Date.now() - startedAt;
+    return result;
   }
 
   async function deleteFromGerenciaDirect(id: string) {
     try {
       const cleanId = String(id).replace(/^DEG-/, '');
       const degId = `DEG-${cleanId}`;
-      deleteFromTradeMarketingJson(cleanId);
+
+      const tradeHeaders: Record<string, string> = {};
+      if (TRADE_MARKETING_API_KEY) {
+        tradeHeaders['Authorization'] = `Bearer ${TRADE_MARKETING_API_KEY}`;
+      }
 
       await Promise.all([
-        fetch(`${GERENCIA_TRADE_API_URL}/${encodeURIComponent(degId)}`, { method: 'DELETE' }).catch(() => {}),
-        fetch(`${GERENCIA_UTERIO_SURVEYS_URL}?comments=like.*${encodeURIComponent(cleanId)}*`, {
-          method: 'DELETE',
-          headers: {
-            'apikey': GERENCIA_UTERIO_ANON_KEY,
-            'Authorization': `Bearer ${GERENCIA_UTERIO_ANON_KEY}`
-          }
-        }).catch(() => {}),
-        fetch(`${GERENCIA_SUPABASE_SURVEYS_URL}?comments=like.*${encodeURIComponent(cleanId)}*`, {
-          method: 'DELETE',
-          headers: {
-            'apikey': GERENCIA_SUPABASE_ANON_KEY,
-            'Authorization': `Bearer ${GERENCIA_SUPABASE_ANON_KEY}`
-          }
-        }).catch(() => {})
+        deleteFromTradeMarketingJson(cleanId),
+        GERENCIA_TRADE_API_URL
+          ? fetchWithRetry(`${GERENCIA_TRADE_API_URL}/${encodeURIComponent(degId)}`, {
+              method: 'DELETE',
+              headers: tradeHeaders
+            }, { timeoutMs: 6000, maxAttempts: 2 }).catch(() => {})
+          : Promise.resolve(),
+        GERENCIA_UTERIO_SURVEYS_URL && GERENCIA_UTERIO_ANON_KEY
+          ? fetchWithRetry(`${GERENCIA_UTERIO_SURVEYS_URL}?comments=like.*${encodeURIComponent(cleanId)}*`, {
+              method: 'DELETE',
+              headers: {
+                'apikey': GERENCIA_UTERIO_ANON_KEY,
+                'Authorization': `Bearer ${GERENCIA_UTERIO_ANON_KEY}`
+              }
+            }, { timeoutMs: 6000, maxAttempts: 2 }).catch(() => {})
+          : Promise.resolve(),
+        GERENCIA_SUPABASE_SURVEYS_URL && GERENCIA_SUPABASE_ANON_KEY
+          ? fetchWithRetry(`${GERENCIA_SUPABASE_SURVEYS_URL}?comments=like.*${encodeURIComponent(cleanId)}*`, {
+              method: 'DELETE',
+              headers: {
+                'apikey': GERENCIA_SUPABASE_ANON_KEY,
+                'Authorization': `Bearer ${GERENCIA_SUPABASE_ANON_KEY}`
+              }
+            }, { timeoutMs: 6000, maxAttempts: 2 }).catch(() => {})
+          : Promise.resolve()
       ]);
     } catch (err) {
       console.warn("Failed to delete from Gerencia:", err);
     }
   }
 
-  // ENDPOINT DE SINCRONIZACIÓN INTEGRAL DE DEGUSTACIONES CON TRADE MARKETING
+  // ENDPOINT DE SINCRONIZACIÓN INTEGRAL DE DEGUSTACIONES CON TRADE MARKETING (con coalescing anti-tormenta)
   app.post("/api/degustaciones/sync-gerencia", async (req, res) => {
     try {
-      console.log("[SYNC TRADE] Sincronizando todas las degustaciones en orden cronológico con Trade Marketing (codizulca-dashboard-4)...");
-      const mergedDesc = await loadAllMergedDegustaciones();
-
-      // 1. Asegurar que todas las degustaciones estén en la tabla degustaciones de Supabase
-      if (supabase && mergedDesc.length > 0) {
-        const supaRows = mergedDesc.map(record => ({
-          id: record.id,
-          cliente_codigo: record.clienteCodigo || 'PDV',
-          cliente_nombre: record.clienteNombre,
-          vendedor_nombre: record.vendedorNombre || 'Vendedor',
-          vendedor_id: record.vendedorId || '1',
-          vendedor_email: record.vendedorEmail || null,
-          ruta: record.ruta || '',
-          fecha: record.fecha,
-          turno: record.turno || 'MAÑANA',
-          hora: record.hora || '',
-          productos: Array.isArray(record.productos) ? record.productos : [],
-          kilos_estimados: Number(record.kilosEstimados) || 0,
-          personas_estimadas: Number(record.personasEstimadas) || 150,
-          requiere_promotora: Boolean(record.requierePromotora),
-          promotora_asignada: record.promotoraAsignada || '',
-          material_pop: Boolean(record.materialPop),
-          contacto_punto: record.contactoPunto || '',
-          telefono_contacto: record.telefonoContacto || '',
-          observaciones: record.observaciones || '',
-          estado: record.estado || 'SOLICITADA',
-          notas_trade_marketing: record.notasTradeMarketing || '',
-          resultado: record.resultado || null,
-          created_at: record.createdAt
-        }));
-        await supabase.from('degustaciones').upsert(supaRows);
+      if (inFlightFullTradeSync) {
+        const shared = await inFlightFullTradeSync;
+        return res.json({
+          success: true,
+          coalesced: true,
+          message: "Sincronización consolidada con Trade Marketing completada",
+          ...shared
+        });
       }
 
-      // 2. Consultar estado actual en Render para preservar promotoras asignadas en Trade Marketing
-      const remoteById = new Map<string, any>();
-      try {
-        const remRes = await fetch(GERENCIA_TRADE_API_URL);
-        if (remRes.ok) {
-          const remJson = await remRes.json();
-          if (Array.isArray(remJson)) {
-            remJson.forEach((r: any) => {
-              if (r && r.id) remoteById.set(String(r.id), r);
-            });
-          }
+      inFlightFullTradeSync = (async () => {
+        console.log("[SYNC TRADE] Sincronizando todas las degustaciones en orden cronológico con Trade Marketing...");
+        const mergedDesc = await loadAllMergedDegustaciones();
+
+        // 1. Asegurar que todas las degustaciones estén en la tabla degustaciones de Supabase
+        if (supabase && mergedDesc.length > 0) {
+          const supaRows = mergedDesc.map(record => ({
+            id: record.id,
+            cliente_codigo: record.clienteCodigo || 'PDV',
+            cliente_nombre: record.clienteNombre,
+            vendedor_nombre: record.vendedorNombre || 'Vendedor',
+            vendedor_id: record.vendedorId || '1',
+            vendedor_email: record.vendedorEmail || null,
+            ruta: record.ruta || '',
+            fecha: record.fecha,
+            turno: record.turno || 'MAÑANA',
+            hora: record.hora || '',
+            productos: Array.isArray(record.productos) ? record.productos : [],
+            kilos_estimados: Number(record.kilosEstimados) || 0,
+            personas_estimadas: Number(record.personasEstimadas) || 150,
+            requiere_promotora: Boolean(record.requierePromotora),
+            promotora_asignada: record.promotoraAsignada || '',
+            material_pop: Boolean(record.materialPop),
+            contacto_punto: record.contactoPunto || '',
+            telefono_contacto: record.telefonoContacto || '',
+            observaciones: record.observaciones || '',
+            estado: record.estado || 'SOLICITADA',
+            notas_trade_marketing: record.notasTradeMarketing || '',
+            resultado: record.resultado || null,
+            created_at: record.createdAt
+          }));
+          await supabase.from('degustaciones').upsert(supaRows);
         }
-      } catch (_) {}
 
-      // 3. Sincronizar en data_degustaciones.json (Local y Gerencia Trade Marketing)
-      syncToTradeMarketingJson(mergedDesc);
+        // 2. Consultar estado actual remoto si el webhook está disponible
+        const remoteById = new Map<string, any>();
+        if (GERENCIA_TRADE_API_URL) {
+          try {
+            const remRes = await fetchWithRetry(GERENCIA_TRADE_API_URL, {}, { timeoutMs: 6000, maxAttempts: 1 });
+            if (remRes.ok) {
+              const remJson = await remRes.json();
+              if (Array.isArray(remJson)) {
+                remJson.forEach((r: any) => {
+                  if (r && r.id) remoteById.set(String(r.id), r);
+                });
+              }
+            }
+          } catch (_) {}
+        }
 
-      // 4. Ordenar de más antigua a más reciente para hacer POST secuencial a Render,
-      // de modo que Render deje la más reciente en el tope (orden cronológico descendente exacto)
-      const orderedAsc = sortDegustacionesServer(mergedDesc, true);
-      let countSynced = 0;
-      for (const item of orderedAsc) {
-        const degId = `DEG-${item.id}`;
-        await syncToGerenciaDirect(item, remoteById.get(degId));
-        countSynced++;
+        // 3. Sincronizar en data_degustaciones.json de forma atómica
+        await syncToTradeMarketingJson(mergedDesc);
+
+        // 4. Sincronizar en orden ascendente (lotes controlados de 5 para evitar saturación)
+        const orderedAsc = sortDegustacionesServer(mergedDesc, true);
+        let countSynced = 0;
+        for (const item of orderedAsc) {
+          const degId = `DEG-${item.id}`;
+          await syncToGerenciaDirect(item, remoteById.get(degId));
+          countSynced++;
+        }
+
+        return {
+          total: mergedDesc.length,
+          synced: countSynced,
+          timestamp: new Date().toISOString()
+        };
+      })();
+
+      try {
+        const result = await inFlightFullTradeSync;
+        res.json({
+          success: true,
+          message: "Degustaciones sincronizadas y ordenadas correctamente en Trade Marketing",
+          ...result
+        });
+      } finally {
+        inFlightFullTradeSync = null;
       }
-
-      res.json({
-        success: true,
-        message: "Degustaciones sincronizadas y ordenadas correctamente en Trade Marketing",
-        total: mergedDesc.length,
-        synced: countSynced,
-        timestamp: new Date().toISOString()
-      });
     } catch (err: any) {
       console.error("[SYNC TRADE] Error en /api/degustaciones/sync-gerencia:", err);
       res.status(500).json({ error: "Error sincronizando con Trade Marketing", details: err?.message });
@@ -1176,142 +1340,278 @@ async function startServer() {
   });
 
   async function syncToGoogleScript(item: any) {
+    if (!GOOGLE_SCRIPT_WEBHOOK_URL) return;
     try {
-      await fetch(GOOGLE_SCRIPT_WEBHOOK_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'ADD_DEGUSTACION',
-          timestamp: new Date().toISOString(),
-          id: item.id,
-          fechaRegistro: item.createdAt || new Date().toISOString(),
-          vendedor: item.vendedorNombre || item.vendedor,
-          ruta: item.ruta || item.vendedorId,
-          clienteCodigo: item.clienteCodigo,
-          clienteNombre: item.clienteNombre,
-          fechaDegustacion: item.fecha || item.fechaDegustacion,
-          turno: item.turno,
-          hora: item.hora,
-          productos: Array.isArray(item.productos) ? item.productos.join(', ') : item.productos,
-          kilosEstimados: item.kilosEstimados,
-          personasEstimadas: item.personasEstimadas,
-          requierePromotora: item.requierePromotora ? 'SI' : 'NO',
-          materialPop: item.materialPop ? 'SI' : 'NO',
-          contactoPunto: item.contactoPunto || '',
-          telefonoContacto: item.telefonoContacto || '',
-          estado: item.estado || 'SOLICITADA',
-          promotoraAsignada: item.promotoraAsignada || '',
-          notasTradeMarketing: item.notasTradeMarketing || '',
-          observaciones: item.observaciones || ''
-        })
-      });
+      await fetchWithRetry(
+        GOOGLE_SCRIPT_WEBHOOK_URL,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'ADD_DEGUSTACION',
+            timestamp: new Date().toISOString(),
+            id: item.id,
+            fechaRegistro: item.createdAt || new Date().toISOString(),
+            vendedor: item.vendedorNombre || item.vendedor,
+            ruta: item.ruta || item.vendedorId,
+            clienteCodigo: item.clienteCodigo,
+            clienteNombre: item.clienteNombre,
+            fechaDegustacion: item.fecha || item.fechaDegustacion,
+            turno: item.turno,
+            hora: item.hora,
+            productos: Array.isArray(item.productos) ? item.productos.join(', ') : item.productos,
+            kilosEstimados: item.kilosEstimados,
+            personasEstimadas: item.personasEstimadas,
+            requierePromotora: item.requierePromotora ? 'SI' : 'NO',
+            materialPop: item.materialPop ? 'SI' : 'NO',
+            contactoPunto: item.contactoPunto || '',
+            telefonoContacto: item.telefonoContacto || '',
+            estado: item.estado || 'SOLICITADA',
+            promotoraAsignada: item.promotoraAsignada || '',
+            notasTradeMarketing: item.notasTradeMarketing || '',
+            observaciones: item.observaciones || ''
+          })
+        },
+        { timeoutMs: 8000, maxAttempts: 2 }
+      );
     } catch (err) {
       console.warn("Failed to sync with Google Script:", err);
     }
+  }
+
+  function buildSupabaseDegustacionRow(record: any) {
+    return {
+      id: record.id,
+      cliente_codigo: record.clienteCodigo || 'PDV',
+      cliente_nombre: record.clienteNombre,
+      vendedor_nombre: record.vendedorNombre || 'Vendedor',
+      vendedor_id: record.vendedorId || '1',
+      vendedor_email: record.vendedorEmail || null,
+      ruta: record.ruta || '',
+      fecha: record.fecha,
+      turno: record.turno || 'MAÑANA',
+      hora: record.hora || '',
+      productos: Array.isArray(record.productos) ? record.productos : [],
+      kilos_estimados: Number(record.kilosEstimados) || 0,
+      personas_estimadas: Number(record.personasEstimadas) || 0,
+      requiere_promotora: Boolean(record.requierePromotora),
+      promotora_asignada: record.promotoraAsignada || '',
+      material_pop: Boolean(record.materialPop),
+      contacto_punto: record.contactoPunto || '',
+      telefono_contacto: record.telefonoContacto || '',
+      observaciones: record.observaciones || '',
+      estado: record.estado || 'SOLICITADA',
+      notas_trade_marketing: record.notasTradeMarketing || '',
+      resultado: record.resultado || null,
+      created_at: record.createdAt
+    };
   }
 
   app.post("/api/degustaciones", async (req, res) => {
     try {
       const item = req.body;
       if (!item || !item.clienteNombre || !item.fecha) {
-        return res.status(400).json({ error: "Faltan campos obligatorios (clienteNombre, fecha)" });
+        return res.status(400).json({ success: false, error: "Faltan campos obligatorios (clienteNombre, fecha)" });
       }
 
-      const id = item.id || `deg-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
-      const record = {
+      const rawHeaderKey = req.headers['x-idempotency-key'] ? String(req.headers['x-idempotency-key']).trim() : '';
+      const id = String(item.id || rawHeaderKey || `deg-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`).trim();
+      const idempotencyKey = rawHeaderKey || String(item.idempotencyKey || id).trim();
+
+      // 1. Verificar caché de idempotencia completada (anti doble clic / reintentos de red)
+      const now = Date.now();
+      const cachedDone = completedDegustacionIdempotency.get(idempotencyKey);
+      if (cachedDone && cachedDone.expiresAt > now) {
+        return res.json({
+          success: true,
+          idempotentReplay: true,
+          data: cachedDone.record,
+          sync: cachedDone.sync
+        });
+      }
+
+      // 2. Coalescing en vuelo para ráfagas simultáneas con la misma clave de idempotencia
+      const existingFlight = inFlightDegustacionCreates.get(idempotencyKey);
+      if (existingFlight) {
+        const shared = await existingFlight;
+        return res.json({
+          success: true,
+          idempotentReplay: true,
+          data: shared.record,
+          sync: shared.sync
+        });
+      }
+
+      const record = normalizeDegustacionRecord({
         ...item,
         id,
         createdAt: item.createdAt || new Date().toISOString()
-      };
+      });
 
-      // Guardar en Firestore para compatibilidad
-      await setDoc(doc(db, 'degustaciones', id), record);
+      const executionPromise = (async () => {
+        let supabaseDegustacionesOk = false;
+        let firestoreOk = false;
 
-      // Guardar en Supabase si está disponible
-      if (supabase) {
-        Promise.resolve(supabase.from('degustaciones').upsert({
-          id: record.id,
-          cliente_codigo: record.clienteCodigo || 'PDV',
-          cliente_nombre: record.clienteNombre,
-          vendedor_nombre: record.vendedorNombre || 'Vendedor',
-          vendedor_id: record.vendedorId || '1',
-          vendedor_email: record.vendedorEmail || null,
-          ruta: record.ruta || '',
-          fecha: record.fecha,
-          turno: record.turno || 'MAÑANA',
-          hora: record.hora || '',
-          productos: Array.isArray(record.productos) ? record.productos : [],
-          kilos_estimados: Number(record.kilosEstimados) || 0,
-          personas_estimadas: Number(record.personasEstimadas) || 0,
-          requiere_promotora: Boolean(record.requierePromotora),
-          promotora_asignada: record.promotoraAsignada || '',
-          material_pop: Boolean(record.materialPop),
-          contacto_punto: record.contactoPunto || '',
-          telefono_contacto: record.telefonoContacto || '',
-          observaciones: record.observaciones || '',
-          estado: record.estado || 'SOLICITADA',
-          notas_trade_marketing: record.notasTradeMarketing || '',
-          resultado: record.resultado || null,
-          created_at: record.createdAt
-        })).catch(err => console.warn("[SUPABASE] Error guardando degustación:", err?.message));
+        // A. Persistencia primaria estrictamente awaited en Supabase (fuente de verdad compartida con Trade Marketing)
+        if (supabase) {
+          const { error: supaErr } = await supabase
+            .from('degustaciones')
+            .upsert(buildSupabaseDegustacionRow(record), { onConflict: 'id' });
+          if (supaErr) {
+            console.warn("[SUPABASE] Error en upsert de degustación:", supaErr.message);
+          } else {
+            supabaseDegustacionesOk = true;
+          }
+        }
+
+        // B. Respaldo en memoria sincronizado para consultas inmediatas / modo offline
+        degustacionesMemoryStore.set(record.id, record);
+
+        // C. Firestore secundario best-effort (sanitizando undefined para evitar excepciones síncronas del SDK)
+        try {
+          const firestoreSafeRecord = Object.fromEntries(
+            Object.entries(record).filter(([, value]) => value !== undefined)
+          );
+          await withTimeout(setDoc(doc(db, 'degustaciones', id), firestoreSafeRecord, { merge: true }), 1500, undefined);
+          firestoreOk = true;
+        } catch (_) {
+          firestoreOk = false;
+        }
+
+        // D. Sincronización consolidada hacia Trade Marketing + tabla surveys + JSON local atómico
+        const [directSync] = await Promise.all([
+          syncToGerenciaDirect(record),
+          syncToGoogleScript(record)
+        ]);
+
+        const syncSummary = {
+          supabaseDegustaciones: supabaseDegustacionesOk,
+          firestore: firestoreOk,
+          ...directSync
+        };
+
+        // Guardar en caché de idempotencia (evitar crecimiento ilimitado)
+        if (completedDegustacionIdempotency.size >= 5000) {
+          const oldestKey = completedDegustacionIdempotency.keys().next().value;
+          if (oldestKey) completedDegustacionIdempotency.delete(oldestKey);
+        }
+        completedDegustacionIdempotency.set(idempotencyKey, {
+          record,
+          sync: syncSummary,
+          expiresAt: Date.now() + DEGUSTACION_IDEMPOTENCY_TTL_MS
+        });
+
+        return { record, sync: syncSummary };
+      })();
+
+      inFlightDegustacionCreates.set(idempotencyKey, executionPromise);
+      try {
+        const result = await executionPromise;
+        return res.json({
+          success: true,
+          idempotentReplay: false,
+          data: result.record,
+          sync: result.sync
+        });
+      } finally {
+        inFlightDegustacionCreates.delete(idempotencyKey);
       }
-
-      syncToGoogleScript(record).catch(() => {});
-      syncToGerenciaDirect(record).catch(() => {});
-      res.json({ success: true, data: record });
     } catch (err: any) {
       console.error("Error creating degustacion via API:", err);
-      res.status(500).json({ error: "Error al guardar degustacion", details: err?.message });
+      res.status(500).json({ success: false, error: "Error al guardar degustacion", details: err?.message });
     }
   });
 
   app.put("/api/degustaciones/:id", async (req, res) => {
     try {
       const { id } = req.params;
-      const updates = req.body;
+      const updates = req.body || {};
 
-      await setDoc(doc(db, 'degustaciones', id), updates, { merge: true });
-      const snap = await getDoc(doc(db, 'degustaciones', id));
-      if (snap.exists()) {
-        const full = { id, ...snap.data() };
-
-        if (supabase) {
-          const supaUpdate: any = {};
-          if (updates.clienteNombre !== undefined) supaUpdate.cliente_nombre = updates.clienteNombre;
-          if (updates.vendedorNombre !== undefined) supaUpdate.vendedor_nombre = updates.vendedorNombre;
-          if (updates.estado !== undefined) supaUpdate.estado = updates.estado;
-          if (updates.notasTradeMarketing !== undefined) supaUpdate.notas_trade_marketing = updates.notasTradeMarketing;
-          if (updates.promotoraAsignada !== undefined) supaUpdate.promotora_asignada = updates.promotoraAsignada;
-          if (updates.resultado !== undefined) supaUpdate.resultado = updates.resultado;
-          if (updates.kilosEstimados !== undefined) supaUpdate.kilos_estimados = Number(updates.kilosEstimados) || 0;
-          if (updates.personasEstimadas !== undefined) supaUpdate.personas_estimadas = Number(updates.personasEstimadas) || 0;
-          supaUpdate.updated_at = new Date().toISOString();
-
-          Promise.resolve(supabase.from('degustaciones').update(supaUpdate).eq('id', id)).catch(err => console.warn("[SUPABASE] Error actualizando:", err?.message));
-        }
-
-        syncToGoogleScript(full).catch(() => {});
-        syncToGerenciaDirect(full).catch(() => {});
+      let existingRecord: any = degustacionesMemoryStore.get(id) || null;
+      if (supabase) {
+        try {
+          const { data: supaRow } = await supabase.from('degustaciones').select('*').eq('id', id).maybeSingle();
+          if (supaRow) {
+            existingRecord = normalizeDegustacionRecord(supaRow);
+          }
+        } catch (_) {}
       }
-      res.json({ success: true, id, updated: updates });
+
+      const mergedRecord = normalizeDegustacionRecord({
+        ...(existingRecord || {}),
+        ...updates,
+        id
+      });
+
+      if (supabase) {
+        const supaUpdate: any = { updated_at: new Date().toISOString() };
+        if (updates.clienteNombre !== undefined) supaUpdate.cliente_nombre = updates.clienteNombre;
+        if (updates.vendedorNombre !== undefined) supaUpdate.vendedor_nombre = updates.vendedorNombre;
+        if (updates.estado !== undefined) supaUpdate.estado = updates.estado;
+        if (updates.notasTradeMarketing !== undefined) supaUpdate.notas_trade_marketing = updates.notasTradeMarketing;
+        if (updates.promotoraAsignada !== undefined) supaUpdate.promotora_asignada = updates.promotoraAsignada;
+        if (updates.resultado !== undefined) supaUpdate.resultado = updates.resultado;
+        if (updates.kilosEstimados !== undefined) supaUpdate.kilos_estimados = Number(updates.kilosEstimados) || 0;
+        if (updates.personasEstimadas !== undefined) supaUpdate.personas_estimadas = Number(updates.personasEstimadas) || 0;
+        if (updates.observaciones !== undefined) supaUpdate.observaciones = updates.observaciones;
+
+        const { error: supaErr } = await supabase.from('degustaciones').update(supaUpdate).eq('id', id);
+        if (supaErr) {
+          console.warn("[SUPABASE] Error actualizando degustación:", supaErr.message);
+        }
+      }
+
+      degustacionesMemoryStore.set(id, mergedRecord);
+      completedDegustacionIdempotency.delete(id);
+
+      // Firestore best-effort no bloqueante
+      try {
+        await withTimeout(setDoc(doc(db, 'degustaciones', id), updates, { merge: true }), 1500, undefined);
+      } catch (_) {}
+
+      const syncSummary = await syncToGerenciaDirect(mergedRecord);
+      syncToGoogleScript(mergedRecord).catch(() => {});
+
+      res.json({ success: true, id, updated: updates, data: mergedRecord, sync: syncSummary });
     } catch (err: any) {
       console.error("Error updating degustacion via API:", err);
-      res.status(500).json({ error: "Error al actualizar degustacion", details: err?.message });
+      res.status(500).json({ success: false, error: "Error al actualizar degustacion", details: err?.message });
     }
   });
 
   app.delete("/api/degustaciones/:id", async (req, res) => {
     try {
       const { id } = req.params;
-      await deleteDoc(doc(db, 'degustaciones', id));
+      const cleanId = String(id).replace(/^DEG-/, '').trim();
+
+      let supabaseDeleted = false;
       if (supabase) {
-        Promise.resolve(supabase.from('degustaciones').delete().eq('id', id)).catch(err => console.warn("[SUPABASE] Error eliminando:", err?.message));
+        const { error: supaErr } = await supabase.from('degustaciones').delete().eq('id', cleanId);
+        if (supaErr) {
+          console.warn("[SUPABASE] Error eliminando degustación:", supaErr.message);
+        } else {
+          supabaseDeleted = true;
+        }
       }
-      deleteFromGerenciaDirect(id).catch(() => {});
-      res.json({ success: true, id });
+
+      degustacionesMemoryStore.delete(cleanId);
+      degustacionesMemoryStore.delete(id);
+      for (const [k, v] of completedDegustacionIdempotency.entries()) {
+        if (k === id || k === cleanId || v.record?.id === cleanId) {
+          completedDegustacionIdempotency.delete(k);
+        }
+      }
+
+      // Firestore best-effort no bloqueante
+      try {
+        await withTimeout(deleteDoc(doc(db, 'degustaciones', cleanId)), 1500, undefined);
+      } catch (_) {}
+
+      await deleteFromGerenciaDirect(cleanId);
+      res.json({ success: true, id: cleanId, supabaseDeleted });
     } catch (err: any) {
       console.error("Error deleting degustacion via API:", err);
-      res.status(500).json({ error: "Error al eliminar degustacion", details: err?.message });
+      res.status(500).json({ success: false, error: "Error al eliminar degustacion", details: err?.message });
     }
   });
 
