@@ -76,6 +76,574 @@ var init_authService = __esm({
   }
 });
 
+// src/utils/vendorKeyNormalizer.ts
+function cleanMojibakeAndInvisible(raw) {
+  if (raw === null || raw === void 0) return "";
+  return String(raw).replace(/[\uFEFF\u200B-\u200D]/g, "").replace(/\u00A0/g, " ").replace(/Ã‘|Ã±|\u00C3\u2018|\u00C3\u00B1/g, "N").replace(/Ã¡|Ã€/g, "A").replace(/Ã©|Ã‰/g, "E").replace(/Ã­|Ã /g, "I").replace(/Ã³|Ã“/g, "O").replace(/Ãº|Ãš/g, "U");
+}
+function normalizeVendorKey(raw) {
+  const cleaned = cleanMojibakeAndInvisible(raw);
+  if (!cleaned) return "";
+  return cleaned.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().replace(/[-–—]+/g, " - ").replace(/\s+/g, " ").trim().replace(/\b([A-Z]{2,})\d+\b/g, "$1").replace(/\s+/g, " ").trim();
+}
+function resolveCanonicalRouteKey(raw) {
+  const key = normalizeVendorKey(raw);
+  if (!key) return "";
+  if (key === "MARIANA CHACIN" || key === "CUENTAS CLAVE 1" || key === "CUENTAS CLAVES 1" || key === "CUENTAS CLAVE 1 - MC" || key === "CUENTAS CLAVES 1 - MC") {
+    return "CUENTAS CLAVES 1 - MC";
+  }
+  if (key === "SAIRU VALLES" || key === "CUENTAS CLAVE 2" || key === "CUENTAS CLAVES 2" || key === "CUENTAS CLAVE 2 - SV" || key === "CUENTAS CLAVES 2 - SV") {
+    return "CUENTAS CLAVES 2 - SV";
+  }
+  if (key === "LUIS GUANIPA" || key === "VICTORIA VARGAS" || key === "RUTA LUIS GUANIPA" || key === "RUTA VICTORIA VARGAS") {
+    return "VICTORIA VARGAS";
+  }
+  if (key === "FOOD SERVICE NORTE" || key === "JAIDER MEDINA") {
+    return "JAIDER MEDINA - FOOD SERVICE NORTE";
+  }
+  if (key === "FOOD SERVICE SENIOR") {
+    return "FOOD SERVICE SENIOR - JUAN HERNANDEZ";
+  }
+  if (key === "MIKELANGELO" || key === "MIKELANGELO DIAZ" || key === "MIKELANGELO DIAZ - PRINCIPAL" || key === "MIKELANGELO DIAZ (PRINCIPAL)") {
+    return "MIKELANGELO DIAZ";
+  }
+  if ((key.includes("MIKELANGELO") || key.includes("SOTO")) && key.includes("VILLA")) {
+    return "MIKELANGELO DIAZ - VILLA DEL ROS";
+  }
+  if (key === "MARIANGEL") {
+    return "MARIANGEL GONZALEZ";
+  }
+  return key;
+}
+function getCaracasYearMonth(date = /* @__PURE__ */ new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Caracas",
+    year: "numeric",
+    month: "2-digit"
+  }).formatToParts(date);
+  const year = parts.find((p) => p.type === "year")?.value || String(date.getUTCFullYear());
+  const month = parts.find((p) => p.type === "month")?.value || String(date.getUTCMonth() + 1).padStart(2, "0");
+  return `${year}-${month}`;
+}
+var init_vendorKeyNormalizer = __esm({
+  "src/utils/vendorKeyNormalizer.ts"() {
+    init_define_import_meta_env();
+  }
+});
+
+// src/utils/vendorRoutes.ts
+function normalizeVendorName(val) {
+  if (!val) return "";
+  return String(val).replace(/Ã‘|Ã±/g, "\xD1").replace(/\s+/g, " ").replace(/\s*-\s*/g, " - ").trim().toUpperCase();
+}
+function normalizeAsciiKey(val) {
+  if (!val) return "";
+  return String(val).replace(/Ã‘|Ã±/g, "N").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+function hydrateVendorProfilesFromMasterCatalog(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return;
+  for (const r of rows) {
+    if (r.activo === false) continue;
+    const canon = normalizeVendorName(r.nombre_canonico);
+    if (!canon || r.is_supervisor_route) continue;
+    const sup = normalizeVendorName(r.supervisor);
+    if (sup && SUPERVISOR_PROFILES[sup] && !SUPERVISOR_PROFILES[sup].supervisedVendors.includes(canon)) {
+      SUPERVISOR_PROFILES[sup].supervisedVendors.push(canon);
+    }
+    if (!VENDOR_PROFILES[canon]) {
+      const routeId = normalizeVendorName(r.ruta_oficial) || canon;
+      const aliases = Array.from(/* @__PURE__ */ new Set([canon, routeId, ...(r.aliases || []).map((a) => normalizeVendorName(a)).filter(Boolean)]));
+      VENDOR_PROFILES[canon] = {
+        canonicalUsername: canon,
+        displayName: r.display_name || canon,
+        email: r.email || void 0,
+        routes: [{ id: routeId, label: `Ruta ${r.display_name || canon}`, aliases }]
+      };
+    }
+  }
+}
+function getSupervisorProfile(username) {
+  const norm = normalizeVendorName(username).replace(/^SUPERVISOR:/, "").trim();
+  if (!norm) return null;
+  if (SUPERVISOR_PROFILES[norm]) return SUPERVISOR_PROFILES[norm];
+  const clean = normalizeAsciiKey(norm);
+  for (const [k, sup] of Object.entries(SUPERVISOR_PROFILES)) {
+    if (normalizeAsciiKey(k) === clean) return sup;
+  }
+  return null;
+}
+function getSupervisedRoutes(supervisorUsername) {
+  const sup = getSupervisorProfile(supervisorUsername);
+  if (!sup) return [];
+  const routes = [];
+  const seen = /* @__PURE__ */ new Set();
+  sup.supervisedVendors.forEach((vKey) => {
+    const prof = VENDOR_PROFILES[vKey];
+    if (prof) {
+      prof.routes.forEach((r) => {
+        if (!seen.has(r.id)) {
+          seen.add(r.id);
+          routes.push(r);
+        }
+      });
+    }
+  });
+  return routes;
+}
+function getSupervisedAliases(supervisorUsername) {
+  const sup = getSupervisorProfile(supervisorUsername);
+  if (!sup) return [];
+  const routes = getSupervisedRoutes(supervisorUsername);
+  return Array.from(
+    /* @__PURE__ */ new Set([
+      ...sup.supervisedVendors,
+      ...routes.flatMap((r) => [r.id, ...r.aliases])
+    ])
+  );
+}
+function matchesVendorAlias(aliases, sheetVendor) {
+  const normSheet = normalizeVendorName(sheetVendor);
+  const canonSheet = normalizeVendorKey(sheetVendor);
+  if (!normSheet && !canonSheet) return false;
+  const cleanSheet = normalizeAsciiKey(canonSheet || normSheet);
+  for (const a of aliases) {
+    const normA = normalizeVendorName(a);
+    const canonA = normalizeVendorKey(a);
+    if (!normA && !canonA) continue;
+    if (canonSheet && canonA && canonSheet === canonA) return true;
+    if (normSheet === normA) return true;
+    const cleanA = normalizeAsciiKey(canonA || normA);
+    if (cleanSheet && cleanSheet === cleanA) return true;
+  }
+  return false;
+}
+function getVendorProfile(username) {
+  const normUser = normalizeVendorName(username);
+  if (VENDOR_PROFILES[normUser]) {
+    return VENDOR_PROFILES[normUser];
+  }
+  const cleanUser = normalizeAsciiKey(normUser);
+  for (const [key, prof] of Object.entries(VENDOR_PROFILES)) {
+    if (normalizeAsciiKey(key) === cleanUser || normalizeAsciiKey(prof.displayName) === cleanUser) {
+      return prof;
+    }
+  }
+  if (/MIKELANGELO|JOHNATAN|JONATHAN|JHONATAN|SOTO/.test(normUser)) {
+    return VENDOR_PROFILES["MIKELANGELO DIAZ"];
+  }
+  return {
+    canonicalUsername: normUser,
+    displayName: normUser,
+    routes: [
+      { id: normUser, label: `Ruta ${normUser}`, aliases: [normUser] }
+    ]
+  };
+}
+var SUPERVISOR_SUMMARY_COLUMNS, VENDOR_PROFILES, mikelProfile, SUPERVISOR_PROFILES;
+var init_vendorRoutes = __esm({
+  "src/utils/vendorRoutes.ts"() {
+    init_define_import_meta_env();
+    init_vendorKeyNormalizer();
+    SUPERVISOR_SUMMARY_COLUMNS = /* @__PURE__ */ new Set([
+      "ALI PEREZ",
+      "NELSON FINOL",
+      "JOHNATAN SOTO"
+    ]);
+    VENDOR_PROFILES = {
+      "MARIA BRICE\xD1O": {
+        canonicalUsername: "MARIA BRICE\xD1O",
+        displayName: "Mar\xEDa Brice\xF1o",
+        routes: [
+          { id: "MARIA BRICE\xD1O", label: "Ruta Mar\xEDa Brice\xF1o", aliases: ["MARIA BRICE\xD1O", "MARIA BRICENO", "MARIA BRICE\xC3\u2018O"] }
+        ]
+      },
+      "MARIANA CHACIN": {
+        canonicalUsername: "MARIANA CHACIN",
+        displayName: "Cuentas claves 1 - MC",
+        routes: [
+          {
+            id: "CUENTAS CLAVES 1 - MC",
+            label: "Cuentas claves 1 - MC",
+            aliases: [
+              "CUENTAS CLAVES 1 - MC",
+              "CUENTAS CLAVE 1 - MC",
+              "CUENTAS CLAVES 1",
+              "CUENTAS CLAVE 1",
+              "MARIANA CHACIN",
+              "MARIANA CHAC\xCDN"
+            ]
+          }
+        ]
+      },
+      "MIKELANGELO DIAZ": {
+        canonicalUsername: "MIKELANGELO DIAZ",
+        displayName: "Mikelangelo Diaz",
+        email: "Mikelangelodiaz@gmail.com",
+        routes: [
+          {
+            id: "MIKELANGELO DIAZ",
+            label: "Ruta Mikelangelo Diaz (Principal)",
+            aliases: [
+              "MIKELANGELO DIAZ",
+              "MIKELANGELO DIAZ1",
+              "MIKELANGELO",
+              "MIKELANGELO DIAZ - PRINCIPAL",
+              "MIKELANGELO DIAZ-PRINCIPAL",
+              "MIKELANGELO DIAZ (PRINCIPAL)",
+              "MIKELANGELODIAZ@GMAIL.COM",
+              "JOHNATAN SOTO",
+              "JOHNATAN",
+              "JONATHAN",
+              "JHONATAN",
+              "JHONATAN SOTO",
+              "RUTA MIKELANGELO DIAZ",
+              "RUTA JOHNATAN SOTO"
+            ]
+          },
+          {
+            id: "MIKELANGELO DIAZ - VILLA DEL ROS",
+            label: "Ruta Villa del Rosario",
+            aliases: [
+              "MIKELANGELO DIAZ - VILLA DEL ROS",
+              "MIKELANGELO DIAZ- VILLA DEL ROS",
+              "MIKELANGELO DIAZ-VILLA DEL ROS",
+              "MIKELANGELO DIAZ VILLA DEL ROS",
+              "MIKELANGELO DIAZ - VILLA DEL ROSARIO",
+              "MIKELANGELO DIAZ VILLA DEL ROSARIO",
+              "MIKELANGELO VILLA DEL ROS",
+              "MIKELANGELO - VILLA DEL ROS",
+              "MIKELANGELO VILLA DEL ROSARIO",
+              "JOHNATAN SOTO VILLA DEL ROS",
+              "JOHNATAN SOTO - VILLA DEL ROS",
+              "JOHNATAN SOTO VILLA DEL ROSARIO",
+              "JOHNATAN SOTO - VILLA DEL ROSARIO",
+              "VILLA DEL ROSARIO",
+              "VILLA DEL ROS",
+              "RUTA VILLA DEL ROSARIO",
+              "RUTA VILLA DEL ROS"
+            ]
+          }
+        ]
+      },
+      "HERNAN PAZ": {
+        canonicalUsername: "HERNAN PAZ",
+        displayName: "Hern\xE1n Paz",
+        routes: [
+          { id: "HERNAN PAZ", label: "Ruta Hern\xE1n Paz", aliases: ["HERNAN PAZ"] }
+        ]
+      },
+      "OSWALDO CHURION": {
+        canonicalUsername: "OSWALDO CHURION",
+        displayName: "Oswaldo Churi\xF3n",
+        routes: [
+          { id: "OSWALDO CHURION", label: "Ruta Oswaldo Churi\xF3n", aliases: ["OSWALDO CHURION"] }
+        ]
+      },
+      "CARLOS FUENMAYOR": {
+        canonicalUsername: "CARLOS FUENMAYOR",
+        displayName: "Carlos Fuenmayor",
+        routes: [
+          { id: "CARLOS FUENMAYOR", label: "Ruta Carlos Fuenmayor", aliases: ["CARLOS FUENMAYOR"] }
+        ]
+      },
+      "SARAH REYES": {
+        canonicalUsername: "SARAH REYES",
+        displayName: "Sarah Reyes",
+        routes: [
+          { id: "SARAH REYES", label: "Ruta Sarah Reyes", aliases: ["SARAH REYES"] }
+        ]
+      },
+      "J PABLO ARAUJO": {
+        canonicalUsername: "J PABLO ARAUJO",
+        displayName: "J Pablo Araujo",
+        routes: [
+          { id: "J PABLO ARAUJO", label: "Ruta J Pablo Araujo", aliases: ["J PABLO ARAUJO"] },
+          { id: "J PABLO ARAUJO - CAB/OJE", label: "Ruta Cabimas / Ojeda", aliases: ["J PABLO ARAUJO - CAB/OJE", "J PABLO ARAUJO - CAB", "J PABLO ARAUJO- CAB/OJE"] }
+        ]
+      },
+      "J PABLO ARAUJO - CAB/OJE": {
+        canonicalUsername: "J PABLO ARAUJO",
+        displayName: "J Pablo Araujo",
+        routes: [
+          { id: "J PABLO ARAUJO", label: "Ruta J Pablo Araujo", aliases: ["J PABLO ARAUJO"] },
+          { id: "J PABLO ARAUJO - CAB/OJE", label: "Ruta Cabimas / Ojeda", aliases: ["J PABLO ARAUJO - CAB/OJE", "J PABLO ARAUJO - CAB", "J PABLO ARAUJO- CAB/OJE"] }
+        ]
+      },
+      "JOSE G. GONZALEZ": {
+        canonicalUsername: "JOSE G. GONZALEZ",
+        displayName: "Jos\xE9 G. Gonz\xE1lez",
+        routes: [
+          { id: "JOSE G. GONZALEZ", label: "Ruta Jos\xE9 G. Gonz\xE1lez", aliases: ["JOSE G. GONZALEZ", "JOSE GONZALEZ"] }
+        ]
+      },
+      "FOOD SERVICE SUR": {
+        canonicalUsername: "FOOD SERVICE SUR",
+        displayName: "Food Service Sur",
+        routes: [
+          { id: "FOOD SERVICE SUR", label: "Ruta Food Service Sur", aliases: ["FOOD SERVICE SUR"] }
+        ]
+      },
+      "JAIDER MEDINA - FOOD SERVICE NORTE": {
+        canonicalUsername: "JAIDER MEDINA - FOOD SERVICE NORTE",
+        displayName: "Jaider Medina (Food Service Norte)",
+        routes: [
+          { id: "JAIDER MEDINA - FOOD SERVICE NORTE", label: "Ruta Food Service Norte", aliases: ["JAIDER MEDINA - FOOD SERVICE NORTE", "JAIDER MEDINA", "FOOD SERVICE NORTE"] }
+        ]
+      },
+      "ANGELICA MORENO": {
+        canonicalUsername: "ANGELICA MORENO",
+        displayName: "Ang\xE9lica Moreno",
+        routes: [
+          { id: "ANGELICA MORENO", label: "Ruta Ang\xE9lica Moreno", aliases: ["ANGELICA MORENO"] }
+        ]
+      },
+      "ADEL JARABA": {
+        canonicalUsername: "ADEL JARABA",
+        displayName: "Adel Jaraba",
+        routes: [
+          { id: "ADEL JARABA", label: "Ruta Adel Jaraba", aliases: ["ADEL JARABA"] }
+        ]
+      },
+      "JUAN HERNANDEZ": {
+        canonicalUsername: "JUAN HERNANDEZ",
+        displayName: "Juan Hern\xE1ndez",
+        routes: [
+          { id: "JUAN HERNANDEZ", label: "Ruta Juan Hern\xE1ndez", aliases: ["JUAN HERNANDEZ"] },
+          { id: "FOOD SERVICE SENIOR", label: "Ruta Food Service Senior", aliases: ["FOOD SERVICE SENIOR", "FOOD SERVICE SENIOR - JUAN HERNANDEZ"] }
+        ]
+      },
+      "YOLEIDA LUGO": {
+        canonicalUsername: "YOLEIDA LUGO",
+        displayName: "Yoleida Lugo",
+        routes: [
+          { id: "YOLEIDA LUGO", label: "Ruta Yoleida Lugo", aliases: ["YOLEIDA LUGO"] }
+        ]
+      },
+      "SAIRU VALLES": {
+        canonicalUsername: "SAIRU VALLES",
+        displayName: "Cuentas claves 2 - SV",
+        routes: [
+          {
+            id: "CUENTAS CLAVES 2 - SV",
+            label: "Cuentas claves 2 - SV",
+            aliases: [
+              "CUENTAS CLAVES 2 - SV",
+              "CUENTAS CLAVE 2 - SV",
+              "CUENTAS CLAVES 2",
+              "CUENTAS CLAVE 2",
+              "SAIRU VALLES",
+              "SAIR\xDA VALLES"
+            ]
+          }
+        ]
+      },
+      "ELISA SOLER": {
+        canonicalUsername: "ELISA SOLER",
+        displayName: "Elisa Soler",
+        routes: [
+          { id: "ELISA SOLER", label: "Ruta Elisa Soler", aliases: ["ELISA SOLER"] }
+        ]
+      },
+      "ANGEL NAVARRO": {
+        canonicalUsername: "ANGEL NAVARRO",
+        displayName: "\xC1ngel Navarro",
+        routes: [
+          { id: "ANGEL NAVARRO", label: "Ruta \xC1ngel Navarro", aliases: ["ANGEL NAVARRO", "\xC1NGEL NAVARRO"] }
+        ]
+      },
+      "MARIANGEL GONZALEZ": {
+        canonicalUsername: "MARIANGEL GONZALEZ",
+        displayName: "Mariangel Gonz\xE1lez",
+        routes: [
+          { id: "MARIANGEL GONZALEZ", label: "Ruta Mariangel Gonz\xE1lez", aliases: ["MARIANGEL GONZALEZ", "MARIANGEL GONZ\xC1LEZ", "MARIANGEL"] }
+        ]
+      },
+      "VICTOR CAMPOS": {
+        canonicalUsername: "VICTOR CAMPOS",
+        displayName: "V\xEDctor Campos",
+        routes: [
+          { id: "VICTOR CAMPOS", label: "Ruta V\xEDctor Campos", aliases: ["VICTOR CAMPOS", "V\xCDCTOR CAMPOS"] }
+        ]
+      },
+      "EDUARDO PI\xD1A": {
+        canonicalUsername: "EDUARDO PI\xD1A",
+        displayName: "Eduardo Pi\xF1a",
+        routes: [
+          { id: "EDUARDO PI\xD1A", label: "Ruta Eduardo Pi\xF1a", aliases: ["EDUARDO PI\xD1A", "EDUARDO PINA", "EDUARDO PI\xC3\u2018A"] }
+        ]
+      },
+      "LEONARDO RIOS": {
+        canonicalUsername: "LEONARDO RIOS",
+        displayName: "Leonardo R\xEDos",
+        routes: [
+          { id: "LEONARDO RIOS", label: "Ruta Leonardo R\xEDos", aliases: ["LEONARDO RIOS"] }
+        ]
+      },
+      "MARYERY GARCIA": {
+        canonicalUsername: "MARYERY GARCIA",
+        displayName: "Maryery Garc\xEDa",
+        routes: [
+          { id: "MARYERY GARCIA", label: "Ruta Maryery Garc\xEDa", aliases: ["MARYERY GARCIA"] }
+        ]
+      },
+      "VICTORIA VARGAS": {
+        canonicalUsername: "VICTORIA VARGAS",
+        displayName: "Victoria Vargas",
+        routes: [
+          {
+            id: "VICTORIA VARGAS",
+            label: "Ruta Victoria Vargas",
+            aliases: ["VICTORIA VARGAS", "LUIS GUANIPA", "RUTA VICTORIA VARGAS", "RUTA LUIS GUANIPA"]
+          }
+        ]
+      },
+      "PEDRO ABREU": {
+        canonicalUsername: "PEDRO ABREU",
+        displayName: "Pedro Abreu",
+        routes: [
+          { id: "PEDRO ABREU", label: "Ruta Pedro Abreu", aliases: ["PEDRO ABREU"] }
+        ]
+      },
+      "OSCAR ORTIZ": {
+        canonicalUsername: "OSCAR ORTIZ",
+        displayName: "\xD3scar Ortiz",
+        routes: [
+          { id: "OSCAR ORTIZ- LA COSTA", label: "Ruta La Costa", aliases: ["OSCAR ORTIZ- LA COSTA", "OSCAR ORTIZ-  LA COSTA", "OSCAR ORTIZ - LA COSTA", "OSCAR ORTIZ LA COSTA", "LA COSTA"] },
+          { id: "OSCAR ORTIZ- CORO", label: "Ruta Coro", aliases: ["OSCAR ORTIZ- CORO", "OSCAR ORTIZ - CORO", "OSCAR ORTIZ CORO", "CORO"] }
+        ]
+      }
+    };
+    mikelProfile = VENDOR_PROFILES["MIKELANGELO DIAZ"];
+    VENDOR_PROFILES["MIKELANGELODIAZ@GMAIL.COM"] = mikelProfile;
+    VENDOR_PROFILES["MIKELANGELO"] = mikelProfile;
+    VENDOR_PROFILES["MIKELANGELO DIAZ1"] = mikelProfile;
+    VENDOR_PROFILES["MIKELANGELO DIAZ - VILLA DEL ROS"] = mikelProfile;
+    VENDOR_PROFILES["MIKELANGELO DIAZ VILLA DEL ROS"] = mikelProfile;
+    VENDOR_PROFILES["MIKELANGELO VILLA DEL ROS"] = mikelProfile;
+    VENDOR_PROFILES["JOHNATAN SOTO"] = mikelProfile;
+    VENDOR_PROFILES["JOHNATAN SOTO VILLA DEL ROS"] = mikelProfile;
+    VENDOR_PROFILES["JOHNATAN"] = mikelProfile;
+    VENDOR_PROFILES["JONATHAN"] = mikelProfile;
+    VENDOR_PROFILES["JHONATAN"] = mikelProfile;
+    VENDOR_PROFILES["JAIDER MEDINA"] = VENDOR_PROFILES["JAIDER MEDINA - FOOD SERVICE NORTE"];
+    VENDOR_PROFILES["FOOD SERVICE NORTE"] = VENDOR_PROFILES["JAIDER MEDINA - FOOD SERVICE NORTE"];
+    VENDOR_PROFILES["MARIANGEL"] = VENDOR_PROFILES["MARIANGEL GONZALEZ"];
+    VENDOR_PROFILES["FOOD SERVICE SENIOR - JUAN HERNANDEZ"] = VENDOR_PROFILES["JUAN HERNANDEZ"];
+    VENDOR_PROFILES["FOOD SERVICE SENIOR"] = VENDOR_PROFILES["JUAN HERNANDEZ"];
+    VENDOR_PROFILES["CUENTAS CLAVES 1 - MC"] = VENDOR_PROFILES["MARIANA CHACIN"];
+    VENDOR_PROFILES["CUENTAS CLAVE 1 - MC"] = VENDOR_PROFILES["MARIANA CHACIN"];
+    VENDOR_PROFILES["CUENTAS CLAVES 1"] = VENDOR_PROFILES["MARIANA CHACIN"];
+    VENDOR_PROFILES["CUENTAS CLAVE 1"] = VENDOR_PROFILES["MARIANA CHACIN"];
+    VENDOR_PROFILES["CUENTAS CLAVES 2 - SV"] = VENDOR_PROFILES["SAIRU VALLES"];
+    VENDOR_PROFILES["CUENTAS CLAVE 2 - SV"] = VENDOR_PROFILES["SAIRU VALLES"];
+    VENDOR_PROFILES["CUENTAS CLAVES 2"] = VENDOR_PROFILES["SAIRU VALLES"];
+    VENDOR_PROFILES["CUENTAS CLAVE 2"] = VENDOR_PROFILES["SAIRU VALLES"];
+    VENDOR_PROFILES["OSCAR ORTIZ- LA COSTA"] = VENDOR_PROFILES["OSCAR ORTIZ"];
+    VENDOR_PROFILES["OSCAR ORTIZ - LA COSTA"] = VENDOR_PROFILES["OSCAR ORTIZ"];
+    VENDOR_PROFILES["OSCAR ORTIZ- CORO"] = VENDOR_PROFILES["OSCAR ORTIZ"];
+    VENDOR_PROFILES["OSCAR ORTIZ - CORO"] = VENDOR_PROFILES["OSCAR ORTIZ"];
+    VENDOR_PROFILES["LUIS GUANIPA"] = VENDOR_PROFILES["VICTORIA VARGAS"];
+    SUPERVISOR_PROFILES = {
+      "ALI PEREZ": {
+        canonicalUsername: "ALI PEREZ",
+        displayName: "Al\xED P\xE9rez (Supervisor)",
+        supervisedVendors: [
+          "ANGEL NAVARRO",
+          "MARIANGEL GONZALEZ",
+          "VICTOR CAMPOS",
+          "ELISA SOLER",
+          "LEONARDO RIOS",
+          "VICTORIA VARGAS",
+          "OSCAR ORTIZ"
+        ]
+      },
+      "JOHNATAN SOTO": {
+        canonicalUsername: "JOHNATAN SOTO",
+        displayName: "Johnatan Soto (Supervisor)",
+        supervisedVendors: [
+          "MIKELANGELO DIAZ",
+          "HERNAN PAZ",
+          "OSWALDO CHURION",
+          "ANGELICA MORENO",
+          "ADEL JARABA",
+          "JUAN HERNANDEZ",
+          "JAIDER MEDINA - FOOD SERVICE NORTE"
+        ]
+      },
+      "NELSON FINOL": {
+        canonicalUsername: "NELSON FINOL",
+        displayName: "Nelson Finol (Supervisor)",
+        supervisedVendors: [
+          "MARIA BRICE\xD1O",
+          "MARIANA CHACIN",
+          "CARLOS FUENMAYOR",
+          "SARAH REYES",
+          "J PABLO ARAUJO",
+          "J PABLO ARAUJO - CAB/OJE",
+          "JOSE G. GONZALEZ",
+          "FOOD SERVICE SUR",
+          "YOLEIDA LUGO",
+          "SAIRU VALLES",
+          "EDUARDO PI\xD1A",
+          "MARYERY GARCIA",
+          "PEDRO ABREU"
+        ]
+      }
+    };
+  }
+});
+
+// src/utils/alkostoPermissions.ts
+function normalizeAsciiUpper(value) {
+  if (!value) return "";
+  return String(value).replace(/Ã‘|Ã±/g, "N").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim().toUpperCase();
+}
+function isSairuVallesIdentity(identity) {
+  if (!identity) return false;
+  const normalizedId = String(identity.vendorId ?? "").trim();
+  if (normalizedId && SAIRU_VALLES_VENDOR_IDS.has(normalizedId)) {
+    return true;
+  }
+  const candidates = [identity.username, identity.vendorKey, identity.route];
+  for (const raw of candidates) {
+    if (!raw) continue;
+    const ascii = normalizeAsciiUpper(raw);
+    if (!ascii) continue;
+    if (ascii.includes("SAIRU") || ascii.includes("VALLES") || ascii.includes("CUENTAS CLAVES 2") || ascii.includes("CUENTAS CLAVE 2")) {
+      return true;
+    }
+    const canonicalKey = normalizeVendorKey(raw);
+    if (canonicalKey === "SAIRU VALLES") {
+      return true;
+    }
+  }
+  return false;
+}
+function canAccessAlkosto(identity) {
+  if (!identity) return false;
+  if (isSairuVallesIdentity(identity)) {
+    return false;
+  }
+  const roleUpper = normalizeAsciiUpper(identity.role);
+  if (roleUpper === "ADMIN") {
+    return true;
+  }
+  if (roleUpper === "SUPERVISOR" || Boolean(getSupervisorProfile(identity.username))) {
+    return true;
+  }
+  return false;
+}
+var ALKOSTO_ACCESS_DENIED_MESSAGE, SAIRU_VALLES_VENDOR_IDS;
+var init_alkostoPermissions = __esm({
+  "src/utils/alkostoPermissions.ts"() {
+    init_define_import_meta_env();
+    init_vendorKeyNormalizer();
+    init_vendorRoutes();
+    ALKOSTO_ACCESS_DENIED_MESSAGE = "Acceso restringido: el m\xF3dulo Alkosto no est\xE1 habilitado para tu perfil.";
+    SAIRU_VALLES_VENDOR_IDS = /* @__PURE__ */ new Set(["26", "56"]);
+  }
+});
+
 // src/services/productosCodizulca.ts
 function normalizeEncodingEspeciales(raw) {
   if (!raw) return "";
@@ -883,6 +1451,7 @@ var init_alkostoService = __esm({
     import_firestore2 = require("firebase/firestore");
     init_firebase();
     init_authService();
+    init_alkostoPermissions();
     init_productosCodizulca();
     SUCURSALES_ALKOSTO = [
       { codigo: "7498", tag: "AK01", nombre: "Alkosto 1 san Felipe", zona: "san Felipe", direccion: "Direcci\xF3n de despacho; calle 98 CC san Felipe 1 nivel PB sector casco central." },
@@ -4317,6 +4886,7 @@ __export(server_exports, {
   metasPeriodoActual: () => metasPeriodoActual,
   rateLimiter: () => rateLimiter,
   requireAdmin: () => requireAdmin,
+  requireAlkostoAccess: () => requireAlkostoAccess,
   requireSupervisorOrAdmin: () => requireSupervisorOrAdmin
 });
 module.exports = __toCommonJS(server_exports);
@@ -6509,515 +7079,7 @@ function resolveBcvRateWithBusinessDayFallback(ratesMap, fechaInput, maxLookback
 
 // server.ts
 init_firebase();
-
-// src/utils/vendorRoutes.ts
-init_define_import_meta_env();
-
-// src/utils/vendorKeyNormalizer.ts
-init_define_import_meta_env();
-function cleanMojibakeAndInvisible(raw) {
-  if (raw === null || raw === void 0) return "";
-  return String(raw).replace(/[\uFEFF\u200B-\u200D]/g, "").replace(/\u00A0/g, " ").replace(/Ã‘|Ã±|\u00C3\u2018|\u00C3\u00B1/g, "N").replace(/Ã¡|Ã€/g, "A").replace(/Ã©|Ã‰/g, "E").replace(/Ã­|Ã /g, "I").replace(/Ã³|Ã“/g, "O").replace(/Ãº|Ãš/g, "U");
-}
-function normalizeVendorKey(raw) {
-  const cleaned = cleanMojibakeAndInvisible(raw);
-  if (!cleaned) return "";
-  return cleaned.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().replace(/[-–—]+/g, " - ").replace(/\s+/g, " ").trim().replace(/\b([A-Z]{2,})\d+\b/g, "$1").replace(/\s+/g, " ").trim();
-}
-function resolveCanonicalRouteKey(raw) {
-  const key = normalizeVendorKey(raw);
-  if (!key) return "";
-  if (key === "MARIANA CHACIN" || key === "CUENTAS CLAVE 1" || key === "CUENTAS CLAVES 1" || key === "CUENTAS CLAVE 1 - MC" || key === "CUENTAS CLAVES 1 - MC") {
-    return "CUENTAS CLAVES 1 - MC";
-  }
-  if (key === "SAIRU VALLES" || key === "CUENTAS CLAVE 2" || key === "CUENTAS CLAVES 2" || key === "CUENTAS CLAVE 2 - SV" || key === "CUENTAS CLAVES 2 - SV") {
-    return "CUENTAS CLAVES 2 - SV";
-  }
-  if (key === "LUIS GUANIPA" || key === "VICTORIA VARGAS" || key === "RUTA LUIS GUANIPA" || key === "RUTA VICTORIA VARGAS") {
-    return "VICTORIA VARGAS";
-  }
-  if (key === "FOOD SERVICE NORTE" || key === "JAIDER MEDINA") {
-    return "JAIDER MEDINA - FOOD SERVICE NORTE";
-  }
-  if (key === "FOOD SERVICE SENIOR") {
-    return "FOOD SERVICE SENIOR - JUAN HERNANDEZ";
-  }
-  if (key === "MIKELANGELO" || key === "MIKELANGELO DIAZ" || key === "MIKELANGELO DIAZ - PRINCIPAL" || key === "MIKELANGELO DIAZ (PRINCIPAL)") {
-    return "MIKELANGELO DIAZ";
-  }
-  if ((key.includes("MIKELANGELO") || key.includes("SOTO")) && key.includes("VILLA")) {
-    return "MIKELANGELO DIAZ - VILLA DEL ROS";
-  }
-  if (key === "MARIANGEL") {
-    return "MARIANGEL GONZALEZ";
-  }
-  return key;
-}
-function getCaracasYearMonth(date = /* @__PURE__ */ new Date()) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/Caracas",
-    year: "numeric",
-    month: "2-digit"
-  }).formatToParts(date);
-  const year = parts.find((p) => p.type === "year")?.value || String(date.getUTCFullYear());
-  const month = parts.find((p) => p.type === "month")?.value || String(date.getUTCMonth() + 1).padStart(2, "0");
-  return `${year}-${month}`;
-}
-
-// src/utils/vendorRoutes.ts
-var SUPERVISOR_SUMMARY_COLUMNS = /* @__PURE__ */ new Set([
-  "ALI PEREZ",
-  "NELSON FINOL",
-  "JOHNATAN SOTO"
-]);
-function normalizeVendorName(val) {
-  if (!val) return "";
-  return String(val).replace(/Ã‘|Ã±/g, "\xD1").replace(/\s+/g, " ").replace(/\s*-\s*/g, " - ").trim().toUpperCase();
-}
-function normalizeAsciiKey(val) {
-  if (!val) return "";
-  return String(val).replace(/Ã‘|Ã±/g, "N").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-}
-var VENDOR_PROFILES = {
-  "MARIA BRICE\xD1O": {
-    canonicalUsername: "MARIA BRICE\xD1O",
-    displayName: "Mar\xEDa Brice\xF1o",
-    routes: [
-      { id: "MARIA BRICE\xD1O", label: "Ruta Mar\xEDa Brice\xF1o", aliases: ["MARIA BRICE\xD1O", "MARIA BRICENO", "MARIA BRICE\xC3\u2018O"] }
-    ]
-  },
-  "MARIANA CHACIN": {
-    canonicalUsername: "MARIANA CHACIN",
-    displayName: "Cuentas claves 1 - MC",
-    routes: [
-      {
-        id: "CUENTAS CLAVES 1 - MC",
-        label: "Cuentas claves 1 - MC",
-        aliases: [
-          "CUENTAS CLAVES 1 - MC",
-          "CUENTAS CLAVE 1 - MC",
-          "CUENTAS CLAVES 1",
-          "CUENTAS CLAVE 1",
-          "MARIANA CHACIN",
-          "MARIANA CHAC\xCDN"
-        ]
-      }
-    ]
-  },
-  "MIKELANGELO DIAZ": {
-    canonicalUsername: "MIKELANGELO DIAZ",
-    displayName: "Mikelangelo Diaz",
-    email: "Mikelangelodiaz@gmail.com",
-    routes: [
-      {
-        id: "MIKELANGELO DIAZ",
-        label: "Ruta Mikelangelo Diaz (Principal)",
-        aliases: [
-          "MIKELANGELO DIAZ",
-          "MIKELANGELO DIAZ1",
-          "MIKELANGELO",
-          "MIKELANGELO DIAZ - PRINCIPAL",
-          "MIKELANGELO DIAZ-PRINCIPAL",
-          "MIKELANGELO DIAZ (PRINCIPAL)",
-          "MIKELANGELODIAZ@GMAIL.COM",
-          "JOHNATAN SOTO",
-          "JOHNATAN",
-          "JONATHAN",
-          "JHONATAN",
-          "JHONATAN SOTO",
-          "RUTA MIKELANGELO DIAZ",
-          "RUTA JOHNATAN SOTO"
-        ]
-      },
-      {
-        id: "MIKELANGELO DIAZ - VILLA DEL ROS",
-        label: "Ruta Villa del Rosario",
-        aliases: [
-          "MIKELANGELO DIAZ - VILLA DEL ROS",
-          "MIKELANGELO DIAZ- VILLA DEL ROS",
-          "MIKELANGELO DIAZ-VILLA DEL ROS",
-          "MIKELANGELO DIAZ VILLA DEL ROS",
-          "MIKELANGELO DIAZ - VILLA DEL ROSARIO",
-          "MIKELANGELO DIAZ VILLA DEL ROSARIO",
-          "MIKELANGELO VILLA DEL ROS",
-          "MIKELANGELO - VILLA DEL ROS",
-          "MIKELANGELO VILLA DEL ROSARIO",
-          "JOHNATAN SOTO VILLA DEL ROS",
-          "JOHNATAN SOTO - VILLA DEL ROS",
-          "JOHNATAN SOTO VILLA DEL ROSARIO",
-          "JOHNATAN SOTO - VILLA DEL ROSARIO",
-          "VILLA DEL ROSARIO",
-          "VILLA DEL ROS",
-          "RUTA VILLA DEL ROSARIO",
-          "RUTA VILLA DEL ROS"
-        ]
-      }
-    ]
-  },
-  "HERNAN PAZ": {
-    canonicalUsername: "HERNAN PAZ",
-    displayName: "Hern\xE1n Paz",
-    routes: [
-      { id: "HERNAN PAZ", label: "Ruta Hern\xE1n Paz", aliases: ["HERNAN PAZ"] }
-    ]
-  },
-  "OSWALDO CHURION": {
-    canonicalUsername: "OSWALDO CHURION",
-    displayName: "Oswaldo Churi\xF3n",
-    routes: [
-      { id: "OSWALDO CHURION", label: "Ruta Oswaldo Churi\xF3n", aliases: ["OSWALDO CHURION"] }
-    ]
-  },
-  "CARLOS FUENMAYOR": {
-    canonicalUsername: "CARLOS FUENMAYOR",
-    displayName: "Carlos Fuenmayor",
-    routes: [
-      { id: "CARLOS FUENMAYOR", label: "Ruta Carlos Fuenmayor", aliases: ["CARLOS FUENMAYOR"] }
-    ]
-  },
-  "SARAH REYES": {
-    canonicalUsername: "SARAH REYES",
-    displayName: "Sarah Reyes",
-    routes: [
-      { id: "SARAH REYES", label: "Ruta Sarah Reyes", aliases: ["SARAH REYES"] }
-    ]
-  },
-  "J PABLO ARAUJO": {
-    canonicalUsername: "J PABLO ARAUJO",
-    displayName: "J Pablo Araujo",
-    routes: [
-      { id: "J PABLO ARAUJO", label: "Ruta J Pablo Araujo", aliases: ["J PABLO ARAUJO"] },
-      { id: "J PABLO ARAUJO - CAB/OJE", label: "Ruta Cabimas / Ojeda", aliases: ["J PABLO ARAUJO - CAB/OJE", "J PABLO ARAUJO - CAB", "J PABLO ARAUJO- CAB/OJE"] }
-    ]
-  },
-  "J PABLO ARAUJO - CAB/OJE": {
-    canonicalUsername: "J PABLO ARAUJO",
-    displayName: "J Pablo Araujo",
-    routes: [
-      { id: "J PABLO ARAUJO", label: "Ruta J Pablo Araujo", aliases: ["J PABLO ARAUJO"] },
-      { id: "J PABLO ARAUJO - CAB/OJE", label: "Ruta Cabimas / Ojeda", aliases: ["J PABLO ARAUJO - CAB/OJE", "J PABLO ARAUJO - CAB", "J PABLO ARAUJO- CAB/OJE"] }
-    ]
-  },
-  "JOSE G. GONZALEZ": {
-    canonicalUsername: "JOSE G. GONZALEZ",
-    displayName: "Jos\xE9 G. Gonz\xE1lez",
-    routes: [
-      { id: "JOSE G. GONZALEZ", label: "Ruta Jos\xE9 G. Gonz\xE1lez", aliases: ["JOSE G. GONZALEZ", "JOSE GONZALEZ"] }
-    ]
-  },
-  "FOOD SERVICE SUR": {
-    canonicalUsername: "FOOD SERVICE SUR",
-    displayName: "Food Service Sur",
-    routes: [
-      { id: "FOOD SERVICE SUR", label: "Ruta Food Service Sur", aliases: ["FOOD SERVICE SUR"] }
-    ]
-  },
-  "JAIDER MEDINA - FOOD SERVICE NORTE": {
-    canonicalUsername: "JAIDER MEDINA - FOOD SERVICE NORTE",
-    displayName: "Jaider Medina (Food Service Norte)",
-    routes: [
-      { id: "JAIDER MEDINA - FOOD SERVICE NORTE", label: "Ruta Food Service Norte", aliases: ["JAIDER MEDINA - FOOD SERVICE NORTE", "JAIDER MEDINA", "FOOD SERVICE NORTE"] }
-    ]
-  },
-  "ANGELICA MORENO": {
-    canonicalUsername: "ANGELICA MORENO",
-    displayName: "Ang\xE9lica Moreno",
-    routes: [
-      { id: "ANGELICA MORENO", label: "Ruta Ang\xE9lica Moreno", aliases: ["ANGELICA MORENO"] }
-    ]
-  },
-  "ADEL JARABA": {
-    canonicalUsername: "ADEL JARABA",
-    displayName: "Adel Jaraba",
-    routes: [
-      { id: "ADEL JARABA", label: "Ruta Adel Jaraba", aliases: ["ADEL JARABA"] }
-    ]
-  },
-  "JUAN HERNANDEZ": {
-    canonicalUsername: "JUAN HERNANDEZ",
-    displayName: "Juan Hern\xE1ndez",
-    routes: [
-      { id: "JUAN HERNANDEZ", label: "Ruta Juan Hern\xE1ndez", aliases: ["JUAN HERNANDEZ"] },
-      { id: "FOOD SERVICE SENIOR", label: "Ruta Food Service Senior", aliases: ["FOOD SERVICE SENIOR", "FOOD SERVICE SENIOR - JUAN HERNANDEZ"] }
-    ]
-  },
-  "YOLEIDA LUGO": {
-    canonicalUsername: "YOLEIDA LUGO",
-    displayName: "Yoleida Lugo",
-    routes: [
-      { id: "YOLEIDA LUGO", label: "Ruta Yoleida Lugo", aliases: ["YOLEIDA LUGO"] }
-    ]
-  },
-  "SAIRU VALLES": {
-    canonicalUsername: "SAIRU VALLES",
-    displayName: "Cuentas claves 2 - SV",
-    routes: [
-      {
-        id: "CUENTAS CLAVES 2 - SV",
-        label: "Cuentas claves 2 - SV",
-        aliases: [
-          "CUENTAS CLAVES 2 - SV",
-          "CUENTAS CLAVE 2 - SV",
-          "CUENTAS CLAVES 2",
-          "CUENTAS CLAVE 2",
-          "SAIRU VALLES",
-          "SAIR\xDA VALLES"
-        ]
-      }
-    ]
-  },
-  "ELISA SOLER": {
-    canonicalUsername: "ELISA SOLER",
-    displayName: "Elisa Soler",
-    routes: [
-      { id: "ELISA SOLER", label: "Ruta Elisa Soler", aliases: ["ELISA SOLER"] }
-    ]
-  },
-  "ANGEL NAVARRO": {
-    canonicalUsername: "ANGEL NAVARRO",
-    displayName: "\xC1ngel Navarro",
-    routes: [
-      { id: "ANGEL NAVARRO", label: "Ruta \xC1ngel Navarro", aliases: ["ANGEL NAVARRO", "\xC1NGEL NAVARRO"] }
-    ]
-  },
-  "MARIANGEL GONZALEZ": {
-    canonicalUsername: "MARIANGEL GONZALEZ",
-    displayName: "Mariangel Gonz\xE1lez",
-    routes: [
-      { id: "MARIANGEL GONZALEZ", label: "Ruta Mariangel Gonz\xE1lez", aliases: ["MARIANGEL GONZALEZ", "MARIANGEL GONZ\xC1LEZ", "MARIANGEL"] }
-    ]
-  },
-  "VICTOR CAMPOS": {
-    canonicalUsername: "VICTOR CAMPOS",
-    displayName: "V\xEDctor Campos",
-    routes: [
-      { id: "VICTOR CAMPOS", label: "Ruta V\xEDctor Campos", aliases: ["VICTOR CAMPOS", "V\xCDCTOR CAMPOS"] }
-    ]
-  },
-  "EDUARDO PI\xD1A": {
-    canonicalUsername: "EDUARDO PI\xD1A",
-    displayName: "Eduardo Pi\xF1a",
-    routes: [
-      { id: "EDUARDO PI\xD1A", label: "Ruta Eduardo Pi\xF1a", aliases: ["EDUARDO PI\xD1A", "EDUARDO PINA", "EDUARDO PI\xC3\u2018A"] }
-    ]
-  },
-  "LEONARDO RIOS": {
-    canonicalUsername: "LEONARDO RIOS",
-    displayName: "Leonardo R\xEDos",
-    routes: [
-      { id: "LEONARDO RIOS", label: "Ruta Leonardo R\xEDos", aliases: ["LEONARDO RIOS"] }
-    ]
-  },
-  "MARYERY GARCIA": {
-    canonicalUsername: "MARYERY GARCIA",
-    displayName: "Maryery Garc\xEDa",
-    routes: [
-      { id: "MARYERY GARCIA", label: "Ruta Maryery Garc\xEDa", aliases: ["MARYERY GARCIA"] }
-    ]
-  },
-  "VICTORIA VARGAS": {
-    canonicalUsername: "VICTORIA VARGAS",
-    displayName: "Victoria Vargas",
-    routes: [
-      {
-        id: "VICTORIA VARGAS",
-        label: "Ruta Victoria Vargas",
-        aliases: ["VICTORIA VARGAS", "LUIS GUANIPA", "RUTA VICTORIA VARGAS", "RUTA LUIS GUANIPA"]
-      }
-    ]
-  },
-  "PEDRO ABREU": {
-    canonicalUsername: "PEDRO ABREU",
-    displayName: "Pedro Abreu",
-    routes: [
-      { id: "PEDRO ABREU", label: "Ruta Pedro Abreu", aliases: ["PEDRO ABREU"] }
-    ]
-  },
-  "OSCAR ORTIZ": {
-    canonicalUsername: "OSCAR ORTIZ",
-    displayName: "\xD3scar Ortiz",
-    routes: [
-      { id: "OSCAR ORTIZ- LA COSTA", label: "Ruta La Costa", aliases: ["OSCAR ORTIZ- LA COSTA", "OSCAR ORTIZ-  LA COSTA", "OSCAR ORTIZ - LA COSTA", "OSCAR ORTIZ LA COSTA", "LA COSTA"] },
-      { id: "OSCAR ORTIZ- CORO", label: "Ruta Coro", aliases: ["OSCAR ORTIZ- CORO", "OSCAR ORTIZ - CORO", "OSCAR ORTIZ CORO", "CORO"] }
-    ]
-  }
-};
-var mikelProfile = VENDOR_PROFILES["MIKELANGELO DIAZ"];
-VENDOR_PROFILES["MIKELANGELODIAZ@GMAIL.COM"] = mikelProfile;
-VENDOR_PROFILES["MIKELANGELO"] = mikelProfile;
-VENDOR_PROFILES["MIKELANGELO DIAZ1"] = mikelProfile;
-VENDOR_PROFILES["MIKELANGELO DIAZ - VILLA DEL ROS"] = mikelProfile;
-VENDOR_PROFILES["MIKELANGELO DIAZ VILLA DEL ROS"] = mikelProfile;
-VENDOR_PROFILES["MIKELANGELO VILLA DEL ROS"] = mikelProfile;
-VENDOR_PROFILES["JOHNATAN SOTO"] = mikelProfile;
-VENDOR_PROFILES["JOHNATAN SOTO VILLA DEL ROS"] = mikelProfile;
-VENDOR_PROFILES["JOHNATAN"] = mikelProfile;
-VENDOR_PROFILES["JONATHAN"] = mikelProfile;
-VENDOR_PROFILES["JHONATAN"] = mikelProfile;
-VENDOR_PROFILES["JAIDER MEDINA"] = VENDOR_PROFILES["JAIDER MEDINA - FOOD SERVICE NORTE"];
-VENDOR_PROFILES["FOOD SERVICE NORTE"] = VENDOR_PROFILES["JAIDER MEDINA - FOOD SERVICE NORTE"];
-VENDOR_PROFILES["MARIANGEL"] = VENDOR_PROFILES["MARIANGEL GONZALEZ"];
-VENDOR_PROFILES["FOOD SERVICE SENIOR - JUAN HERNANDEZ"] = VENDOR_PROFILES["JUAN HERNANDEZ"];
-VENDOR_PROFILES["FOOD SERVICE SENIOR"] = VENDOR_PROFILES["JUAN HERNANDEZ"];
-VENDOR_PROFILES["CUENTAS CLAVES 1 - MC"] = VENDOR_PROFILES["MARIANA CHACIN"];
-VENDOR_PROFILES["CUENTAS CLAVE 1 - MC"] = VENDOR_PROFILES["MARIANA CHACIN"];
-VENDOR_PROFILES["CUENTAS CLAVES 1"] = VENDOR_PROFILES["MARIANA CHACIN"];
-VENDOR_PROFILES["CUENTAS CLAVE 1"] = VENDOR_PROFILES["MARIANA CHACIN"];
-VENDOR_PROFILES["CUENTAS CLAVES 2 - SV"] = VENDOR_PROFILES["SAIRU VALLES"];
-VENDOR_PROFILES["CUENTAS CLAVE 2 - SV"] = VENDOR_PROFILES["SAIRU VALLES"];
-VENDOR_PROFILES["CUENTAS CLAVES 2"] = VENDOR_PROFILES["SAIRU VALLES"];
-VENDOR_PROFILES["CUENTAS CLAVE 2"] = VENDOR_PROFILES["SAIRU VALLES"];
-VENDOR_PROFILES["OSCAR ORTIZ- LA COSTA"] = VENDOR_PROFILES["OSCAR ORTIZ"];
-VENDOR_PROFILES["OSCAR ORTIZ - LA COSTA"] = VENDOR_PROFILES["OSCAR ORTIZ"];
-VENDOR_PROFILES["OSCAR ORTIZ- CORO"] = VENDOR_PROFILES["OSCAR ORTIZ"];
-VENDOR_PROFILES["OSCAR ORTIZ - CORO"] = VENDOR_PROFILES["OSCAR ORTIZ"];
-VENDOR_PROFILES["LUIS GUANIPA"] = VENDOR_PROFILES["VICTORIA VARGAS"];
-var SUPERVISOR_PROFILES = {
-  "ALI PEREZ": {
-    canonicalUsername: "ALI PEREZ",
-    displayName: "Al\xED P\xE9rez (Supervisor)",
-    supervisedVendors: [
-      "ANGEL NAVARRO",
-      "MARIANGEL GONZALEZ",
-      "VICTOR CAMPOS",
-      "ELISA SOLER",
-      "LEONARDO RIOS",
-      "VICTORIA VARGAS",
-      "OSCAR ORTIZ"
-    ]
-  },
-  "JOHNATAN SOTO": {
-    canonicalUsername: "JOHNATAN SOTO",
-    displayName: "Johnatan Soto (Supervisor)",
-    supervisedVendors: [
-      "MIKELANGELO DIAZ",
-      "HERNAN PAZ",
-      "OSWALDO CHURION",
-      "ANGELICA MORENO",
-      "ADEL JARABA",
-      "JUAN HERNANDEZ",
-      "JAIDER MEDINA - FOOD SERVICE NORTE"
-    ]
-  },
-  "NELSON FINOL": {
-    canonicalUsername: "NELSON FINOL",
-    displayName: "Nelson Finol (Supervisor)",
-    supervisedVendors: [
-      "MARIA BRICE\xD1O",
-      "MARIANA CHACIN",
-      "CARLOS FUENMAYOR",
-      "SARAH REYES",
-      "J PABLO ARAUJO",
-      "J PABLO ARAUJO - CAB/OJE",
-      "JOSE G. GONZALEZ",
-      "FOOD SERVICE SUR",
-      "YOLEIDA LUGO",
-      "SAIRU VALLES",
-      "EDUARDO PI\xD1A",
-      "MARYERY GARCIA",
-      "PEDRO ABREU"
-    ]
-  }
-};
-function hydrateVendorProfilesFromMasterCatalog(rows) {
-  if (!Array.isArray(rows) || rows.length === 0) return;
-  for (const r of rows) {
-    if (r.activo === false) continue;
-    const canon = normalizeVendorName(r.nombre_canonico);
-    if (!canon || r.is_supervisor_route) continue;
-    const sup = normalizeVendorName(r.supervisor);
-    if (sup && SUPERVISOR_PROFILES[sup] && !SUPERVISOR_PROFILES[sup].supervisedVendors.includes(canon)) {
-      SUPERVISOR_PROFILES[sup].supervisedVendors.push(canon);
-    }
-    if (!VENDOR_PROFILES[canon]) {
-      const routeId = normalizeVendorName(r.ruta_oficial) || canon;
-      const aliases = Array.from(/* @__PURE__ */ new Set([canon, routeId, ...(r.aliases || []).map((a) => normalizeVendorName(a)).filter(Boolean)]));
-      VENDOR_PROFILES[canon] = {
-        canonicalUsername: canon,
-        displayName: r.display_name || canon,
-        email: r.email || void 0,
-        routes: [{ id: routeId, label: `Ruta ${r.display_name || canon}`, aliases }]
-      };
-    }
-  }
-}
-function getSupervisorProfile(username) {
-  const norm = normalizeVendorName(username).replace(/^SUPERVISOR:/, "").trim();
-  if (!norm) return null;
-  if (SUPERVISOR_PROFILES[norm]) return SUPERVISOR_PROFILES[norm];
-  const clean = normalizeAsciiKey(norm);
-  for (const [k, sup] of Object.entries(SUPERVISOR_PROFILES)) {
-    if (normalizeAsciiKey(k) === clean) return sup;
-  }
-  return null;
-}
-function getSupervisedRoutes(supervisorUsername) {
-  const sup = getSupervisorProfile(supervisorUsername);
-  if (!sup) return [];
-  const routes = [];
-  const seen = /* @__PURE__ */ new Set();
-  sup.supervisedVendors.forEach((vKey) => {
-    const prof = VENDOR_PROFILES[vKey];
-    if (prof) {
-      prof.routes.forEach((r) => {
-        if (!seen.has(r.id)) {
-          seen.add(r.id);
-          routes.push(r);
-        }
-      });
-    }
-  });
-  return routes;
-}
-function getSupervisedAliases(supervisorUsername) {
-  const sup = getSupervisorProfile(supervisorUsername);
-  if (!sup) return [];
-  const routes = getSupervisedRoutes(supervisorUsername);
-  return Array.from(
-    /* @__PURE__ */ new Set([
-      ...sup.supervisedVendors,
-      ...routes.flatMap((r) => [r.id, ...r.aliases])
-    ])
-  );
-}
-function matchesVendorAlias(aliases, sheetVendor) {
-  const normSheet = normalizeVendorName(sheetVendor);
-  const canonSheet = normalizeVendorKey(sheetVendor);
-  if (!normSheet && !canonSheet) return false;
-  const cleanSheet = normalizeAsciiKey(canonSheet || normSheet);
-  for (const a of aliases) {
-    const normA = normalizeVendorName(a);
-    const canonA = normalizeVendorKey(a);
-    if (!normA && !canonA) continue;
-    if (canonSheet && canonA && canonSheet === canonA) return true;
-    if (normSheet === normA) return true;
-    const cleanA = normalizeAsciiKey(canonA || normA);
-    if (cleanSheet && cleanSheet === cleanA) return true;
-  }
-  return false;
-}
-function getVendorProfile(username) {
-  const normUser = normalizeVendorName(username);
-  if (VENDOR_PROFILES[normUser]) {
-    return VENDOR_PROFILES[normUser];
-  }
-  const cleanUser = normalizeAsciiKey(normUser);
-  for (const [key, prof] of Object.entries(VENDOR_PROFILES)) {
-    if (normalizeAsciiKey(key) === cleanUser || normalizeAsciiKey(prof.displayName) === cleanUser) {
-      return prof;
-    }
-  }
-  if (/MIKELANGELO|JOHNATAN|JONATHAN|JHONATAN|SOTO/.test(normUser)) {
-    return VENDOR_PROFILES["MIKELANGELO DIAZ"];
-  }
-  return {
-    canonicalUsername: normUser,
-    displayName: normUser,
-    routes: [
-      { id: normUser, label: `Ruta ${normUser}`, aliases: [normUser] }
-    ]
-  };
-}
+init_vendorRoutes();
 
 // src/utils/maestraCatalogSanitizer.ts
 init_define_import_meta_env();
@@ -7698,6 +7760,8 @@ function getRuntimeSellerCatalog() {
 
 // src/services/googleSheetsParser.ts
 init_define_import_meta_env();
+init_vendorRoutes();
+init_vendorKeyNormalizer();
 var DEFAULT_GOOGLE_SHEET_ID = "";
 function sanitizeGoogleSheetId(raw) {
   if (!raw) return DEFAULT_GOOGLE_SHEET_ID;
@@ -9161,10 +9225,14 @@ function parseWorkbookFull(XLSX2, workbook, options) {
   };
 }
 
+// server.ts
+init_vendorKeyNormalizer();
+
 // src/services/monthlySyncEngine.ts
 init_define_import_meta_env();
 var import_crypto = __toESM(require("crypto"), 1);
 var import_bcryptjs = __toESM(require("bcryptjs"), 1);
+init_vendorKeyNormalizer();
 function computeBufferSha256(bytes) {
   return import_crypto.default.createHash("sha256").update(bytes).digest("hex");
 }
@@ -9255,6 +9323,7 @@ var DEFAULT_VENDOR_BCRYPT_CREDENTIALS = {
 };
 
 // server.ts
+init_alkostoPermissions();
 var import_firestore3 = require("firebase/firestore");
 var import_supabase_js = require("@supabase/supabase-js");
 var import_jsonwebtoken = __toESM(require("jsonwebtoken"), 1);
@@ -9322,6 +9391,33 @@ function requireSupervisorOrAdmin(req, res, next) {
     success: false,
     error: "Acceso restringido: Solo Administradores o Supervisores pueden disparar la sincronizaci\xF3n global."
   });
+}
+function requireAlkostoAccess(req, res, next) {
+  const user = req.user;
+  if (!user) {
+    return res.status(401).json({
+      success: false,
+      code: "AUTH_REQUIRED",
+      error: "Token de autenticaci\xF3n requerido"
+    });
+  }
+  const allowed = canAccessAlkosto({
+    username: user.username,
+    role: user.role,
+    vendorId: user.vendorId,
+    vendorKey: user.vendorKey
+  });
+  if (!allowed) {
+    console.warn(
+      `[SECURITY][ALKOSTO] 403 Forbidden - usuario="${String(user.username || "unknown")}" vendorId="${String(user.vendorId ?? "")}" endpoint="${req.method} ${req.originalUrl}"`
+    );
+    return res.status(403).json({
+      success: false,
+      code: "ALKOSTO_FORBIDDEN",
+      error: ALKOSTO_ACCESS_DENIED_MESSAGE
+    });
+  }
+  return next();
 }
 var rateLimitMap = /* @__PURE__ */ new Map();
 function rateLimiter(windowMs, maxRequests, label) {
@@ -9698,6 +9794,49 @@ async function startServer() {
       return ascending ? String(b.id || "").localeCompare(String(a.id || "")) : String(a.id || "").localeCompare(String(b.id || ""));
     });
   }
+  const degustacionesMemoryStore = /* @__PURE__ */ new Map();
+  const inFlightDegustacionCreates = /* @__PURE__ */ new Map();
+  const completedDegustacionIdempotency = /* @__PURE__ */ new Map();
+  const DEGUSTACION_IDEMPOTENCY_TTL_MS = 10 * 60 * 1e3;
+  const surveyUpsertLocks = /* @__PURE__ */ new Map();
+  let tradeJsonWriteQueue = Promise.resolve();
+  let inFlightFullTradeSync = null;
+  function withTimeout(promise, timeoutMs, fallback) {
+    let timer;
+    const timeoutPromise = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(fallback), timeoutMs);
+    });
+    return Promise.race([
+      promise.finally(() => clearTimeout(timer)),
+      timeoutPromise
+    ]);
+  }
+  async function fetchWithRetry(url, options = {}, config = {}) {
+    const timeoutMs = config.timeoutMs ?? 1e4;
+    const maxAttempts = config.maxAttempts ?? 2;
+    let lastErr;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, { ...options, signal: controller.signal });
+        clearTimeout(timer);
+        if ((res.status === 429 || res.status >= 500) && attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 250 * Math.pow(2, attempt - 1)));
+          continue;
+        }
+        return res;
+      } catch (err) {
+        clearTimeout(timer);
+        lastErr = err;
+        if (attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 250 * Math.pow(2, attempt - 1)));
+          continue;
+        }
+      }
+    }
+    throw lastErr || new Error(`Fetch failed for ${url}`);
+  }
   async function loadAllMergedDegustaciones() {
     const mapById = /* @__PURE__ */ new Map();
     if (supabase) {
@@ -9714,24 +9853,43 @@ async function startServer() {
       } catch (_) {
       }
     }
-    try {
-      const snapshot = await (0, import_firestore3.getDocs)((0, import_firestore3.collection)(db, "degustaciones"));
-      snapshot.forEach((docSnap) => {
-        const data = docSnap.data();
-        if (data && data.clienteNombre) {
-          const norm = normalizeDegustacionRecord({ id: docSnap.id, ...data });
-          if (norm.id && !EXCLUDED_TEST_DEG_IDS.has(norm.id) && !norm.id.startsWith("test-")) {
-            mapById.set(norm.id, norm);
+    for (const [memId, memRecord] of degustacionesMemoryStore.entries()) {
+      if (memId && !EXCLUDED_TEST_DEG_IDS.has(memId) && !memId.startsWith("test-")) {
+        mapById.set(memId, normalizeDegustacionRecord(memRecord));
+      }
+    }
+    if (!supabase) {
+      try {
+        const snapshot = await withTimeout((0, import_firestore3.getDocs)((0, import_firestore3.collection)(db, "degustaciones")), 2500, null);
+        snapshot?.forEach((docSnap) => {
+          const data = docSnap.data();
+          if (data && data.clienteNombre) {
+            const norm = normalizeDegustacionRecord({ id: docSnap.id, ...data });
+            if (norm.id && !EXCLUDED_TEST_DEG_IDS.has(norm.id) && !norm.id.startsWith("test-")) {
+              if (!mapById.has(norm.id)) {
+                mapById.set(norm.id, norm);
+              }
+            }
           }
-        }
-      });
-    } catch (_) {
+        });
+      } catch (_) {
+      }
     }
     return sortDegustacionesServer(Array.from(mapById.values()), false);
   }
   app2.get("/api/degustaciones", async (req, res) => {
     try {
       let list = await loadAllMergedDegustaciones();
+      if (req.query.id) {
+        const cleanReqId = String(req.query.id).replace(/^DEG-/, "").trim();
+        list = list.filter((d) => String(d.id || "").replace(/^DEG-/, "") === cleanReqId);
+      }
+      if (req.query.tag) {
+        const t = String(req.query.tag).toUpperCase().trim();
+        list = list.filter(
+          (d) => String(d.id || "").toUpperCase().includes(t) || String(d.clienteNombre || "").toUpperCase().includes(t) || String(d.observaciones || "").toUpperCase().includes(t)
+        );
+      }
       if (req.query.vendedor) {
         const v = String(req.query.vendedor).toUpperCase().trim();
         list = list.filter(
@@ -9750,7 +9908,7 @@ async function startServer() {
         success: true,
         count: list.length,
         data: list,
-        source: "merged_ordered"
+        source: supabase ? "supabase_primary" : "memory_fallback"
       });
     } catch (err) {
       console.error("Error fetching degustaciones via API:", err);
@@ -9758,8 +9916,9 @@ async function startServer() {
     }
   });
   const GOOGLE_SCRIPT_WEBHOOK_URL = process.env.GOOGLE_SCRIPT_WEBHOOK_URL || "";
-  const GERENCIA_TRADE_API_URL = process.env.GERENCIA_TRADE_API_URL || "https://codizulca-dashboard-4.onrender.com/api/degustaciones";
-  const GERENCIA_UTERIO_SURVEYS_URL = process.env.GERENCIA_UTERIO_SURVEYS_URL || "https://uterioexpfweghxfbvoa.supabase.co/rest/v1/surveys";
+  const GERENCIA_TRADE_API_URL = process.env.TRADE_MARKETING_API_URL || process.env.GERENCIA_TRADE_API_URL || "https://trade-marketing-qi6j.onrender.com/api/degustaciones";
+  const TRADE_MARKETING_API_KEY = process.env.TRADE_MARKETING_API_KEY || "";
+  const GERENCIA_UTERIO_SURVEYS_URL = process.env.GERENCIA_UTERIO_SURVEYS_URL || "";
   const GERENCIA_UTERIO_ANON_KEY = process.env.GERENCIA_UTERIO_ANON_KEY || "";
   const GERENCIA_SUPABASE_SURVEYS_URL = process.env.GERENCIA_SUPABASE_SURVEYS_URL || (SUPABASE_URL ? `${SUPABASE_URL}/rest/v1/surveys` : "");
   const GERENCIA_SUPABASE_ANON_KEY = process.env.GERENCIA_SUPABASE_ANON_KEY || SUPABASE_SERVICE_ROLE_KEY || "";
@@ -9819,96 +9978,87 @@ async function startServer() {
       comments: fullComments
     };
   }
+  function enqueueTradeJsonOperation(op) {
+    const next = tradeJsonWriteQueue.then(op).catch((err) => {
+      console.warn("[SYNC TRADE] Error en cola de escritura JSON local:", err?.message);
+    });
+    tradeJsonWriteQueue = next;
+    return next;
+  }
   function syncToTradeMarketingJson(itemOrList) {
-    try {
+    return enqueueTradeJsonOperation(async () => {
       const items = sortDegustacionesServer(Array.isArray(itemOrList) ? itemOrList : [itemOrList], false);
-      const gerencia3Path = import_path.default.resolve(process.cwd(), "../codizulca-dashboard (3)/data_degustaciones.json");
-      const gerencia4Path = import_path.default.resolve(process.cwd(), "../codizulca-dashboard (4)/data_degustaciones.json");
       const localPath = import_path.default.resolve(process.cwd(), "data_degustaciones.json");
-      const targetPaths = [localPath];
-      if (import_fs.default.existsSync(import_path.default.dirname(gerencia3Path))) targetPaths.push(gerencia3Path);
-      if (import_fs.default.existsSync(import_path.default.dirname(gerencia4Path))) targetPaths.push(gerencia4Path);
-      for (const tPath of targetPaths) {
-        let existing = [];
-        try {
-          if (import_fs.default.existsSync(tPath)) {
-            existing = JSON.parse(import_fs.default.readFileSync(tPath, "utf8") || "[]");
-          }
-        } catch (_) {
+      let existing = [];
+      try {
+        if (import_fs.default.existsSync(localPath)) {
+          const raw = await import_fs.default.promises.readFile(localPath, "utf8");
+          existing = JSON.parse(raw || "[]");
         }
-        const existingMap = /* @__PURE__ */ new Map();
-        const historicalItems = [];
-        existing.forEach((e) => {
-          if (!e || !e.id) return;
-          const normId = String(e.id).startsWith("DEG-") ? String(e.id) : `DEG-${e.id}`;
-          existingMap.set(normId, e);
-          if (String(e.id).startsWith("DEG-HIST-")) {
-            historicalItems.push(e);
-          }
-        });
-        const updatedVendorMap = /* @__PURE__ */ new Map();
-        if (!Array.isArray(itemOrList)) {
-          existing.forEach((e) => {
-            if (e && e.id && !String(e.id).startsWith("DEG-HIST-")) {
-              const normId = String(e.id).startsWith("DEG-") ? String(e.id) : `DEG-${e.id}`;
-              updatedVendorMap.set(normId, e);
-            }
-          });
-        }
-        for (const rawItem of items) {
-          if (!rawItem || !rawItem.id && !rawItem.degustacionId) continue;
-          const cleanId = String(rawItem.id || rawItem.degustacionId).replace(/^DEG-/, "");
-          const degId = `DEG-${cleanId}`;
-          const built = buildTradeMarketingItemServer(rawItem, existingMap.get(degId));
-          updatedVendorMap.set(degId, built);
-        }
-        const vendorItems = Array.from(updatedVendorMap.values());
-        vendorItems.sort((a, b) => {
-          const toIso = (s) => {
-            if (/^\d{2}\/\d{2}\/\d{4}$/.test(s || "")) {
-              const [d, m, y] = s.split("/");
-              return `${y}-${m}-${d}`;
-            }
-            return s || "";
-          };
-          const dA = toIso(a.date);
-          const dB = toIso(b.date);
-          if (dA !== dB) return dB.localeCompare(dA);
-          const tA = String(a.time || "").includes("09:") ? 1 : 2;
-          const tB = String(b.time || "").includes("09:") ? 1 : 2;
-          if (tA !== tB) return tA - tB;
-          return String(a.vendedor || "").localeCompare(String(b.vendedor || ""), "es");
-        });
-        const finalJsonList = [...vendorItems, ...historicalItems];
-        try {
-          import_fs.default.writeFileSync(tPath, JSON.stringify(finalJsonList, null, 2), "utf8");
-        } catch (err) {
-          console.warn(`[SYNC TRADE] Error al escribir en ${tPath}:`, err?.message);
-        }
+      } catch (_) {
       }
-    } catch (e) {
-      console.warn("[SYNC TRADE] Error sincronizando archivo json de Trade Marketing:", e?.message);
-    }
+      const existingMap = /* @__PURE__ */ new Map();
+      const historicalItems = [];
+      existing.forEach((e) => {
+        if (!e || !e.id) return;
+        const normId = String(e.id).startsWith("DEG-") ? String(e.id) : `DEG-${e.id}`;
+        existingMap.set(normId, e);
+        if (String(e.id).startsWith("DEG-HIST-")) {
+          historicalItems.push(e);
+        }
+      });
+      const updatedVendorMap = /* @__PURE__ */ new Map();
+      if (!Array.isArray(itemOrList)) {
+        existing.forEach((e) => {
+          if (e && e.id && !String(e.id).startsWith("DEG-HIST-")) {
+            const normId = String(e.id).startsWith("DEG-") ? String(e.id) : `DEG-${e.id}`;
+            updatedVendorMap.set(normId, e);
+          }
+        });
+      }
+      for (const rawItem of items) {
+        if (!rawItem || !rawItem.id && !rawItem.degustacionId) continue;
+        const cleanId = String(rawItem.id || rawItem.degustacionId).replace(/^DEG-/, "");
+        const degId = `DEG-${cleanId}`;
+        const built = buildTradeMarketingItemServer(rawItem, existingMap.get(degId));
+        updatedVendorMap.set(degId, built);
+      }
+      const vendorItems = Array.from(updatedVendorMap.values());
+      vendorItems.sort((a, b) => {
+        const toIso = (s) => {
+          if (/^\d{2}\/\d{2}\/\d{4}$/.test(s || "")) {
+            const [d, m, y] = s.split("/");
+            return `${y}-${m}-${d}`;
+          }
+          return s || "";
+        };
+        const dA = toIso(a.date);
+        const dB = toIso(b.date);
+        if (dA !== dB) return dB.localeCompare(dA);
+        const tA = String(a.time || "").includes("09:") ? 1 : 2;
+        const tB = String(b.time || "").includes("09:") ? 1 : 2;
+        if (tA !== tB) return tA - tB;
+        return String(a.vendedor || "").localeCompare(String(b.vendedor || ""), "es");
+      });
+      const finalJsonList = [...vendorItems, ...historicalItems];
+      const tmpPath = `${localPath}.${process.pid}.${Date.now()}.tmp`;
+      await import_fs.default.promises.writeFile(tmpPath, JSON.stringify(finalJsonList, null, 2), "utf8");
+      await import_fs.default.promises.rename(tmpPath, localPath);
+    });
   }
   function deleteFromTradeMarketingJson(id) {
-    try {
+    return enqueueTradeJsonOperation(async () => {
       const cleanId = String(id).replace(/^DEG-/, "");
       const degId = `DEG-${cleanId}`;
-      const gerencia3Path = import_path.default.resolve(process.cwd(), "../codizulca-dashboard (3)/data_degustaciones.json");
-      const gerencia4Path = import_path.default.resolve(process.cwd(), "../codizulca-dashboard (4)/data_degustaciones.json");
       const localPath = import_path.default.resolve(process.cwd(), "data_degustaciones.json");
-      const targetPaths = [localPath];
-      if (import_fs.default.existsSync(import_path.default.dirname(gerencia3Path))) targetPaths.push(gerencia3Path);
-      if (import_fs.default.existsSync(import_path.default.dirname(gerencia4Path))) targetPaths.push(gerencia4Path);
-      for (const tPath of targetPaths) {
-        if (!import_fs.default.existsSync(tPath)) continue;
-        const existing = JSON.parse(import_fs.default.readFileSync(tPath, "utf8") || "[]");
-        const filtered = existing.filter((e) => e.id !== id && e.id !== cleanId && e.id !== degId);
-        import_fs.default.writeFileSync(tPath, JSON.stringify(filtered, null, 2), "utf8");
-      }
-    } catch (e) {
-      console.warn("[SYNC TRADE] Error eliminando de json Trade Marketing:", e?.message);
-    }
+      if (!import_fs.default.existsSync(localPath)) return;
+      const raw = await import_fs.default.promises.readFile(localPath, "utf8");
+      const existing = JSON.parse(raw || "[]");
+      const filtered = existing.filter((e) => e.id !== id && e.id !== cleanId && e.id !== degId);
+      const tmpPath = `${localPath}.${process.pid}.${Date.now()}.tmp`;
+      await import_fs.default.promises.writeFile(tmpPath, JSON.stringify(filtered, null, 2), "utf8");
+      await import_fs.default.promises.rename(tmpPath, localPath);
+    });
   }
   function buildGerenciaDirectPayload(rawItem) {
     const item = normalizeDegustacionRecord(rawItem);
@@ -9971,21 +10121,48 @@ async function startServer() {
     };
   }
   async function upsertSurveyAtSupabase(url, apiKey, cleanId, payload) {
-    try {
-      const searchUrl = `${url}?comments=like.*${encodeURIComponent(cleanId)}*&select=id&limit=5`;
-      const searchRes = await fetch(searchUrl, {
-        method: "GET",
-        headers: {
-          "apikey": apiKey,
-          "Authorization": `Bearer ${apiKey}`
+    if (!url || !apiKey || !cleanId) return false;
+    const lockKey = `${url}::${cleanId}`;
+    const previousLock = surveyUpsertLocks.get(lockKey) || Promise.resolve();
+    const runUpsert = async () => {
+      try {
+        const searchUrl = `${url}?comments=like.*${encodeURIComponent(cleanId)}*&select=id&limit=5`;
+        const searchRes = await fetchWithRetry(
+          searchUrl,
+          {
+            method: "GET",
+            headers: {
+              "apikey": apiKey,
+              "Authorization": `Bearer ${apiKey}`
+            }
+          },
+          { timeoutMs: 8e3, maxAttempts: 2 }
+        );
+        if (searchRes.ok) {
+          const records = await searchRes.json();
+          if (Array.isArray(records) && records.length > 0 && records[0].id) {
+            const updateUrl = `${url}?id=eq.${records[0].id}`;
+            const patchRes = await fetchWithRetry(
+              updateUrl,
+              {
+                method: "PATCH",
+                headers: {
+                  "apikey": apiKey,
+                  "Authorization": `Bearer ${apiKey}`,
+                  "Content-Type": "application/json",
+                  "Prefer": "return=representation"
+                },
+                body: JSON.stringify(payload)
+              },
+              { timeoutMs: 8e3, maxAttempts: 2 }
+            );
+            return patchRes.ok;
+          }
         }
-      });
-      if (searchRes.ok) {
-        const records = await searchRes.json();
-        if (Array.isArray(records) && records.length > 0 && records[0].id) {
-          const updateUrl = `${url}?id=eq.${records[0].id}`;
-          await fetch(updateUrl, {
-            method: "PATCH",
+        const postRes = await fetchWithRetry(
+          url,
+          {
+            method: "POST",
             headers: {
               "apikey": apiKey,
               "Authorization": `Bearer ${apiKey}`,
@@ -9993,71 +10170,104 @@ async function startServer() {
               "Prefer": "return=representation"
             },
             body: JSON.stringify(payload)
-          });
-          return;
-        }
+          },
+          { timeoutMs: 8e3, maxAttempts: 2 }
+        );
+        return postRes.ok;
+      } catch (_) {
+        return false;
       }
-      await fetch(url, {
-        method: "POST",
-        headers: {
-          "apikey": apiKey,
-          "Authorization": `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-          "Prefer": "return=representation"
-        },
-        body: JSON.stringify(payload)
-      });
-    } catch (_) {
+    };
+    const chained = previousLock.then(runUpsert, runUpsert);
+    surveyUpsertLocks.set(lockKey, chained);
+    try {
+      return await chained;
+    } finally {
+      if (surveyUpsertLocks.get(lockKey) === chained) {
+        surveyUpsertLocks.delete(lockKey);
+      }
     }
   }
   async function syncToGerenciaDirect(item, existingRemote) {
+    const startedAt = Date.now();
+    const result = {
+      localJson: false,
+      tradeMarketingWebhook: { attempted: false, ok: false, status: 0 },
+      supabaseSurveys: false,
+      uterioSurveys: false,
+      latencyMs: 0
+    };
     try {
       const norm = normalizeDegustacionRecord(item);
-      if (!norm.id || EXCLUDED_TEST_DEG_IDS.has(norm.id)) return;
-      syncToTradeMarketingJson(norm);
+      if (!norm.id || EXCLUDED_TEST_DEG_IDS.has(norm.id)) {
+        result.latencyMs = Date.now() - startedAt;
+        return result;
+      }
       const tradeItem = buildTradeMarketingItemServer(norm, existingRemote);
       const surveyPayload = buildGerenciaDirectPayload(norm);
-      await Promise.all([
-        // Enviar en vivo a https://codizulca-dashboard-4.onrender.com/api/degustaciones
-        fetch(GERENCIA_TRADE_API_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(tradeItem)
-        }).catch(() => {
-        }),
-        // Sincronizar en Supabase de Gerencia (uterioexpfweghxfbvoa)
+      const tradeHeaders = {
+        "Content-Type": "application/json",
+        "X-Idempotency-Key": `DEG-${norm.id}`
+      };
+      if (TRADE_MARKETING_API_KEY) {
+        tradeHeaders["Authorization"] = `Bearer ${TRADE_MARKETING_API_KEY}`;
+      }
+      const [jsonOk, webhookRes, uterioOk, supaSurveyOk] = await Promise.all([
+        syncToTradeMarketingJson(norm).then(() => true).catch(() => false),
+        GERENCIA_TRADE_API_URL ? (result.tradeMarketingWebhook.attempted = true, fetchWithRetry(
+          GERENCIA_TRADE_API_URL,
+          {
+            method: "POST",
+            headers: tradeHeaders,
+            body: JSON.stringify(tradeItem)
+          },
+          { timeoutMs: 8e3, maxAttempts: 2 }
+        ).then((r) => ({ ok: r.ok, status: r.status })).catch(() => ({ ok: false, status: 0 }))) : Promise.resolve({ ok: false, status: 0 }),
         upsertSurveyAtSupabase(GERENCIA_UTERIO_SURVEYS_URL, GERENCIA_UTERIO_ANON_KEY, norm.id, surveyPayload),
-        // Sincronizar en Supabase del Planificador (nudltbgyewyiklqdyujk)
         upsertSurveyAtSupabase(GERENCIA_SUPABASE_SURVEYS_URL, GERENCIA_SUPABASE_ANON_KEY, norm.id, surveyPayload)
       ]);
+      result.localJson = jsonOk;
+      result.tradeMarketingWebhook.ok = webhookRes.ok;
+      result.tradeMarketingWebhook.status = webhookRes.status;
+      result.uterioSurveys = uterioOk;
+      result.supabaseSurveys = supaSurveyOk;
     } catch (err) {
       console.warn("Failed to sync directly to Gerencia:", err);
     }
+    result.latencyMs = Date.now() - startedAt;
+    return result;
   }
   async function deleteFromGerenciaDirect(id) {
     try {
       const cleanId = String(id).replace(/^DEG-/, "");
       const degId = `DEG-${cleanId}`;
-      deleteFromTradeMarketingJson(cleanId);
+      const tradeHeaders = {};
+      if (TRADE_MARKETING_API_KEY) {
+        tradeHeaders["Authorization"] = `Bearer ${TRADE_MARKETING_API_KEY}`;
+      }
       await Promise.all([
-        fetch(`${GERENCIA_TRADE_API_URL}/${encodeURIComponent(degId)}`, { method: "DELETE" }).catch(() => {
-        }),
-        fetch(`${GERENCIA_UTERIO_SURVEYS_URL}?comments=like.*${encodeURIComponent(cleanId)}*`, {
+        deleteFromTradeMarketingJson(cleanId),
+        GERENCIA_TRADE_API_URL ? fetchWithRetry(`${GERENCIA_TRADE_API_URL}/${encodeURIComponent(degId)}`, {
+          method: "DELETE",
+          headers: tradeHeaders
+        }, { timeoutMs: 6e3, maxAttempts: 2 }).catch(() => {
+        }) : Promise.resolve(),
+        GERENCIA_UTERIO_SURVEYS_URL && GERENCIA_UTERIO_ANON_KEY ? fetchWithRetry(`${GERENCIA_UTERIO_SURVEYS_URL}?comments=like.*${encodeURIComponent(cleanId)}*`, {
           method: "DELETE",
           headers: {
             "apikey": GERENCIA_UTERIO_ANON_KEY,
             "Authorization": `Bearer ${GERENCIA_UTERIO_ANON_KEY}`
           }
-        }).catch(() => {
-        }),
-        fetch(`${GERENCIA_SUPABASE_SURVEYS_URL}?comments=like.*${encodeURIComponent(cleanId)}*`, {
+        }, { timeoutMs: 6e3, maxAttempts: 2 }).catch(() => {
+        }) : Promise.resolve(),
+        GERENCIA_SUPABASE_SURVEYS_URL && GERENCIA_SUPABASE_ANON_KEY ? fetchWithRetry(`${GERENCIA_SUPABASE_SURVEYS_URL}?comments=like.*${encodeURIComponent(cleanId)}*`, {
           method: "DELETE",
           headers: {
             "apikey": GERENCIA_SUPABASE_ANON_KEY,
             "Authorization": `Bearer ${GERENCIA_SUPABASE_ANON_KEY}`
           }
-        }).catch(() => {
-        })
+        }, { timeoutMs: 6e3, maxAttempts: 2 }).catch(() => {
+        }) : Promise.resolve()
       ]);
     } catch (err) {
       console.warn("Failed to delete from Gerencia:", err);
@@ -10065,282 +10275,337 @@ async function startServer() {
   }
   app2.post("/api/degustaciones/sync-gerencia", async (req, res) => {
     try {
-      console.log("[SYNC TRADE] Sincronizando todas las degustaciones en orden cronol\xF3gico con Trade Marketing (codizulca-dashboard-4)...");
-      const mergedDesc = await loadAllMergedDegustaciones();
-      if (supabase && mergedDesc.length > 0) {
-        const supaRows = mergedDesc.map((record) => ({
-          id: record.id,
-          cliente_codigo: record.clienteCodigo || "PDV",
-          cliente_nombre: record.clienteNombre,
-          vendedor_nombre: record.vendedorNombre || "Vendedor",
-          vendedor_id: record.vendedorId || "1",
-          vendedor_email: record.vendedorEmail || null,
-          ruta: record.ruta || "",
-          fecha: record.fecha,
-          turno: record.turno || "MA\xD1ANA",
-          hora: record.hora || "",
-          productos: Array.isArray(record.productos) ? record.productos : [],
-          kilos_estimados: Number(record.kilosEstimados) || 0,
-          personas_estimadas: Number(record.personasEstimadas) || 150,
-          requiere_promotora: Boolean(record.requierePromotora),
-          promotora_asignada: record.promotoraAsignada || "",
-          material_pop: Boolean(record.materialPop),
-          contacto_punto: record.contactoPunto || "",
-          telefono_contacto: record.telefonoContacto || "",
-          observaciones: record.observaciones || "",
-          estado: record.estado || "SOLICITADA",
-          notas_trade_marketing: record.notasTradeMarketing || "",
-          resultado: record.resultado || null,
-          created_at: record.createdAt
-        }));
-        await supabase.from("degustaciones").upsert(supaRows);
+      if (inFlightFullTradeSync) {
+        const shared = await inFlightFullTradeSync;
+        return res.json({
+          success: true,
+          coalesced: true,
+          message: "Sincronizaci\xF3n consolidada con Trade Marketing completada",
+          ...shared
+        });
       }
-      const remoteById = /* @__PURE__ */ new Map();
-      try {
-        const remRes = await fetch(GERENCIA_TRADE_API_URL);
-        if (remRes.ok) {
-          const remJson = await remRes.json();
-          if (Array.isArray(remJson)) {
-            remJson.forEach((r) => {
-              if (r && r.id) remoteById.set(String(r.id), r);
-            });
+      inFlightFullTradeSync = (async () => {
+        console.log("[SYNC TRADE] Sincronizando todas las degustaciones en orden cronol\xF3gico con Trade Marketing...");
+        const mergedDesc = await loadAllMergedDegustaciones();
+        if (supabase && mergedDesc.length > 0) {
+          const supaRows = mergedDesc.map((record) => ({
+            id: record.id,
+            cliente_codigo: record.clienteCodigo || "PDV",
+            cliente_nombre: record.clienteNombre,
+            vendedor_nombre: record.vendedorNombre || "Vendedor",
+            vendedor_id: record.vendedorId || "1",
+            vendedor_email: record.vendedorEmail || null,
+            ruta: record.ruta || "",
+            fecha: record.fecha,
+            turno: record.turno || "MA\xD1ANA",
+            hora: record.hora || "",
+            productos: Array.isArray(record.productos) ? record.productos : [],
+            kilos_estimados: Number(record.kilosEstimados) || 0,
+            personas_estimadas: Number(record.personasEstimadas) || 150,
+            requiere_promotora: Boolean(record.requierePromotora),
+            promotora_asignada: record.promotoraAsignada || "",
+            material_pop: Boolean(record.materialPop),
+            contacto_punto: record.contactoPunto || "",
+            telefono_contacto: record.telefonoContacto || "",
+            observaciones: record.observaciones || "",
+            estado: record.estado || "SOLICITADA",
+            notas_trade_marketing: record.notasTradeMarketing || "",
+            resultado: record.resultado || null,
+            created_at: record.createdAt
+          }));
+          await supabase.from("degustaciones").upsert(supaRows);
+        }
+        const remoteById = /* @__PURE__ */ new Map();
+        if (GERENCIA_TRADE_API_URL) {
+          try {
+            const remRes = await fetchWithRetry(GERENCIA_TRADE_API_URL, {}, { timeoutMs: 6e3, maxAttempts: 1 });
+            if (remRes.ok) {
+              const remJson = await remRes.json();
+              if (Array.isArray(remJson)) {
+                remJson.forEach((r) => {
+                  if (r && r.id) remoteById.set(String(r.id), r);
+                });
+              }
+            }
+          } catch (_) {
           }
         }
-      } catch (_) {
+        await syncToTradeMarketingJson(mergedDesc);
+        const orderedAsc = sortDegustacionesServer(mergedDesc, true);
+        let countSynced = 0;
+        for (const item of orderedAsc) {
+          const degId = `DEG-${item.id}`;
+          await syncToGerenciaDirect(item, remoteById.get(degId));
+          countSynced++;
+        }
+        return {
+          total: mergedDesc.length,
+          synced: countSynced,
+          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        };
+      })();
+      try {
+        const result = await inFlightFullTradeSync;
+        res.json({
+          success: true,
+          message: "Degustaciones sincronizadas y ordenadas correctamente en Trade Marketing",
+          ...result
+        });
+      } finally {
+        inFlightFullTradeSync = null;
       }
-      syncToTradeMarketingJson(mergedDesc);
-      const orderedAsc = sortDegustacionesServer(mergedDesc, true);
-      let countSynced = 0;
-      for (const item of orderedAsc) {
-        const degId = `DEG-${item.id}`;
-        await syncToGerenciaDirect(item, remoteById.get(degId));
-        countSynced++;
-      }
-      res.json({
-        success: true,
-        message: "Degustaciones sincronizadas y ordenadas correctamente en Trade Marketing",
-        total: mergedDesc.length,
-        synced: countSynced,
-        timestamp: (/* @__PURE__ */ new Date()).toISOString()
-      });
     } catch (err) {
       console.error("[SYNC TRADE] Error en /api/degustaciones/sync-gerencia:", err);
       res.status(500).json({ error: "Error sincronizando con Trade Marketing", details: err?.message });
     }
   });
   async function syncToGoogleScript(item) {
+    if (!GOOGLE_SCRIPT_WEBHOOK_URL) return;
     try {
-      await fetch(GOOGLE_SCRIPT_WEBHOOK_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "ADD_DEGUSTACION",
-          timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-          id: item.id,
-          fechaRegistro: item.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
-          vendedor: item.vendedorNombre || item.vendedor,
-          ruta: item.ruta || item.vendedorId,
-          clienteCodigo: item.clienteCodigo,
-          clienteNombre: item.clienteNombre,
-          fechaDegustacion: item.fecha || item.fechaDegustacion,
-          turno: item.turno,
-          hora: item.hora,
-          productos: Array.isArray(item.productos) ? item.productos.join(", ") : item.productos,
-          kilosEstimados: item.kilosEstimados,
-          personasEstimadas: item.personasEstimadas,
-          requierePromotora: item.requierePromotora ? "SI" : "NO",
-          materialPop: item.materialPop ? "SI" : "NO",
-          contactoPunto: item.contactoPunto || "",
-          telefonoContacto: item.telefonoContacto || "",
-          estado: item.estado || "SOLICITADA",
-          promotoraAsignada: item.promotoraAsignada || "",
-          notasTradeMarketing: item.notasTradeMarketing || "",
-          observaciones: item.observaciones || ""
-        })
-      });
+      await fetchWithRetry(
+        GOOGLE_SCRIPT_WEBHOOK_URL,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "ADD_DEGUSTACION",
+            timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+            id: item.id,
+            fechaRegistro: item.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
+            vendedor: item.vendedorNombre || item.vendedor,
+            ruta: item.ruta || item.vendedorId,
+            clienteCodigo: item.clienteCodigo,
+            clienteNombre: item.clienteNombre,
+            fechaDegustacion: item.fecha || item.fechaDegustacion,
+            turno: item.turno,
+            hora: item.hora,
+            productos: Array.isArray(item.productos) ? item.productos.join(", ") : item.productos,
+            kilosEstimados: item.kilosEstimados,
+            personasEstimadas: item.personasEstimadas,
+            requierePromotora: item.requierePromotora ? "SI" : "NO",
+            materialPop: item.materialPop ? "SI" : "NO",
+            contactoPunto: item.contactoPunto || "",
+            telefonoContacto: item.telefonoContacto || "",
+            estado: item.estado || "SOLICITADA",
+            promotoraAsignada: item.promotoraAsignada || "",
+            notasTradeMarketing: item.notasTradeMarketing || "",
+            observaciones: item.observaciones || ""
+          })
+        },
+        { timeoutMs: 8e3, maxAttempts: 2 }
+      );
     } catch (err) {
       console.warn("Failed to sync with Google Script:", err);
     }
+  }
+  function buildSupabaseDegustacionRow(record) {
+    return {
+      id: record.id,
+      cliente_codigo: record.clienteCodigo || "PDV",
+      cliente_nombre: record.clienteNombre,
+      vendedor_nombre: record.vendedorNombre || "Vendedor",
+      vendedor_id: record.vendedorId || "1",
+      vendedor_email: record.vendedorEmail || null,
+      ruta: record.ruta || "",
+      fecha: record.fecha,
+      turno: record.turno || "MA\xD1ANA",
+      hora: record.hora || "",
+      productos: Array.isArray(record.productos) ? record.productos : [],
+      kilos_estimados: Number(record.kilosEstimados) || 0,
+      personas_estimadas: Number(record.personasEstimadas) || 0,
+      requiere_promotora: Boolean(record.requierePromotora),
+      promotora_asignada: record.promotoraAsignada || "",
+      material_pop: Boolean(record.materialPop),
+      contacto_punto: record.contactoPunto || "",
+      telefono_contacto: record.telefonoContacto || "",
+      observaciones: record.observaciones || "",
+      estado: record.estado || "SOLICITADA",
+      notas_trade_marketing: record.notasTradeMarketing || "",
+      resultado: record.resultado || null,
+      created_at: record.createdAt
+    };
   }
   app2.post("/api/degustaciones", async (req, res) => {
     try {
       const item = req.body;
       if (!item || !item.clienteNombre || !item.fecha) {
-        return res.status(400).json({ error: "Faltan campos obligatorios (clienteNombre, fecha)" });
+        return res.status(400).json({ success: false, error: "Faltan campos obligatorios (clienteNombre, fecha)" });
       }
-      const id = item.id || `deg-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
-      const record = {
+      const rawHeaderKey = req.headers["x-idempotency-key"] ? String(req.headers["x-idempotency-key"]).trim() : "";
+      const id = String(item.id || rawHeaderKey || `deg-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`).trim();
+      const idempotencyKey = rawHeaderKey || String(item.idempotencyKey || id).trim();
+      const now = Date.now();
+      const cachedDone = completedDegustacionIdempotency.get(idempotencyKey);
+      if (cachedDone && cachedDone.expiresAt > now) {
+        return res.json({
+          success: true,
+          idempotentReplay: true,
+          data: cachedDone.record,
+          sync: cachedDone.sync
+        });
+      }
+      const existingFlight = inFlightDegustacionCreates.get(idempotencyKey);
+      if (existingFlight) {
+        const shared = await existingFlight;
+        return res.json({
+          success: true,
+          idempotentReplay: true,
+          data: shared.record,
+          sync: shared.sync
+        });
+      }
+      const record = normalizeDegustacionRecord({
         ...item,
         id,
         createdAt: item.createdAt || (/* @__PURE__ */ new Date()).toISOString()
-      };
-      await (0, import_firestore3.setDoc)((0, import_firestore3.doc)(db, "degustaciones", id), record);
-      if (supabase) {
-        Promise.resolve(supabase.from("degustaciones").upsert({
-          id: record.id,
-          cliente_codigo: record.clienteCodigo || "PDV",
-          cliente_nombre: record.clienteNombre,
-          vendedor_nombre: record.vendedorNombre || "Vendedor",
-          vendedor_id: record.vendedorId || "1",
-          vendedor_email: record.vendedorEmail || null,
-          ruta: record.ruta || "",
-          fecha: record.fecha,
-          turno: record.turno || "MA\xD1ANA",
-          hora: record.hora || "",
-          productos: Array.isArray(record.productos) ? record.productos : [],
-          kilos_estimados: Number(record.kilosEstimados) || 0,
-          personas_estimadas: Number(record.personasEstimadas) || 0,
-          requiere_promotora: Boolean(record.requierePromotora),
-          promotora_asignada: record.promotoraAsignada || "",
-          material_pop: Boolean(record.materialPop),
-          contacto_punto: record.contactoPunto || "",
-          telefono_contacto: record.telefonoContacto || "",
-          observaciones: record.observaciones || "",
-          estado: record.estado || "SOLICITADA",
-          notas_trade_marketing: record.notasTradeMarketing || "",
-          resultado: record.resultado || null,
-          created_at: record.createdAt
-        })).catch((err) => console.warn("[SUPABASE] Error guardando degustaci\xF3n:", err?.message));
+      });
+      const executionPromise = (async () => {
+        let supabaseDegustacionesOk = false;
+        let firestoreOk = false;
+        if (supabase) {
+          const { error: supaErr } = await supabase.from("degustaciones").upsert(buildSupabaseDegustacionRow(record), { onConflict: "id" });
+          if (supaErr) {
+            console.warn("[SUPABASE] Error en upsert de degustaci\xF3n:", supaErr.message);
+          } else {
+            supabaseDegustacionesOk = true;
+          }
+        }
+        degustacionesMemoryStore.set(record.id, record);
+        try {
+          const firestoreSafeRecord = Object.fromEntries(
+            Object.entries(record).filter(([, value]) => value !== void 0)
+          );
+          await withTimeout((0, import_firestore3.setDoc)((0, import_firestore3.doc)(db, "degustaciones", id), firestoreSafeRecord, { merge: true }), 1500, void 0);
+          firestoreOk = true;
+        } catch (_) {
+          firestoreOk = false;
+        }
+        const [directSync] = await Promise.all([
+          syncToGerenciaDirect(record),
+          syncToGoogleScript(record)
+        ]);
+        const syncSummary = {
+          supabaseDegustaciones: supabaseDegustacionesOk,
+          firestore: firestoreOk,
+          ...directSync
+        };
+        if (completedDegustacionIdempotency.size >= 5e3) {
+          const oldestKey = completedDegustacionIdempotency.keys().next().value;
+          if (oldestKey) completedDegustacionIdempotency.delete(oldestKey);
+        }
+        completedDegustacionIdempotency.set(idempotencyKey, {
+          record,
+          sync: syncSummary,
+          expiresAt: Date.now() + DEGUSTACION_IDEMPOTENCY_TTL_MS
+        });
+        return { record, sync: syncSummary };
+      })();
+      inFlightDegustacionCreates.set(idempotencyKey, executionPromise);
+      try {
+        const result = await executionPromise;
+        return res.json({
+          success: true,
+          idempotentReplay: false,
+          data: result.record,
+          sync: result.sync
+        });
+      } finally {
+        inFlightDegustacionCreates.delete(idempotencyKey);
       }
-      syncToGoogleScript(record).catch(() => {
-      });
-      syncToGerenciaDirect(record).catch(() => {
-      });
-      res.json({ success: true, data: record });
     } catch (err) {
       console.error("Error creating degustacion via API:", err);
-      res.status(500).json({ error: "Error al guardar degustacion", details: err?.message });
+      res.status(500).json({ success: false, error: "Error al guardar degustacion", details: err?.message });
     }
   });
   app2.put("/api/degustaciones/:id", async (req, res) => {
     try {
       const { id } = req.params;
-      const updates = req.body;
-      await (0, import_firestore3.setDoc)((0, import_firestore3.doc)(db, "degustaciones", id), updates, { merge: true });
-      const snap = await (0, import_firestore3.getDoc)((0, import_firestore3.doc)(db, "degustaciones", id));
-      if (snap.exists()) {
-        const full = { id, ...snap.data() };
-        if (supabase) {
-          const supaUpdate = {};
-          if (updates.clienteNombre !== void 0) supaUpdate.cliente_nombre = updates.clienteNombre;
-          if (updates.vendedorNombre !== void 0) supaUpdate.vendedor_nombre = updates.vendedorNombre;
-          if (updates.estado !== void 0) supaUpdate.estado = updates.estado;
-          if (updates.notasTradeMarketing !== void 0) supaUpdate.notas_trade_marketing = updates.notasTradeMarketing;
-          if (updates.promotoraAsignada !== void 0) supaUpdate.promotora_asignada = updates.promotoraAsignada;
-          if (updates.resultado !== void 0) supaUpdate.resultado = updates.resultado;
-          if (updates.kilosEstimados !== void 0) supaUpdate.kilos_estimados = Number(updates.kilosEstimados) || 0;
-          if (updates.personasEstimadas !== void 0) supaUpdate.personas_estimadas = Number(updates.personasEstimadas) || 0;
-          supaUpdate.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-          Promise.resolve(supabase.from("degustaciones").update(supaUpdate).eq("id", id)).catch((err) => console.warn("[SUPABASE] Error actualizando:", err?.message));
+      const updates = req.body || {};
+      let existingRecord = degustacionesMemoryStore.get(id) || null;
+      if (supabase) {
+        try {
+          const { data: supaRow } = await supabase.from("degustaciones").select("*").eq("id", id).maybeSingle();
+          if (supaRow) {
+            existingRecord = normalizeDegustacionRecord(supaRow);
+          }
+        } catch (_) {
         }
-        syncToGoogleScript(full).catch(() => {
-        });
-        syncToGerenciaDirect(full).catch(() => {
-        });
       }
-      res.json({ success: true, id, updated: updates });
+      const mergedRecord = normalizeDegustacionRecord({
+        ...existingRecord || {},
+        ...updates,
+        id
+      });
+      if (supabase) {
+        const supaUpdate = { updated_at: (/* @__PURE__ */ new Date()).toISOString() };
+        if (updates.clienteNombre !== void 0) supaUpdate.cliente_nombre = updates.clienteNombre;
+        if (updates.vendedorNombre !== void 0) supaUpdate.vendedor_nombre = updates.vendedorNombre;
+        if (updates.estado !== void 0) supaUpdate.estado = updates.estado;
+        if (updates.notasTradeMarketing !== void 0) supaUpdate.notas_trade_marketing = updates.notasTradeMarketing;
+        if (updates.promotoraAsignada !== void 0) supaUpdate.promotora_asignada = updates.promotoraAsignada;
+        if (updates.resultado !== void 0) supaUpdate.resultado = updates.resultado;
+        if (updates.kilosEstimados !== void 0) supaUpdate.kilos_estimados = Number(updates.kilosEstimados) || 0;
+        if (updates.personasEstimadas !== void 0) supaUpdate.personas_estimadas = Number(updates.personasEstimadas) || 0;
+        if (updates.observaciones !== void 0) supaUpdate.observaciones = updates.observaciones;
+        const { error: supaErr } = await supabase.from("degustaciones").update(supaUpdate).eq("id", id);
+        if (supaErr) {
+          console.warn("[SUPABASE] Error actualizando degustaci\xF3n:", supaErr.message);
+        }
+      }
+      degustacionesMemoryStore.set(id, mergedRecord);
+      completedDegustacionIdempotency.delete(id);
+      try {
+        await withTimeout((0, import_firestore3.setDoc)((0, import_firestore3.doc)(db, "degustaciones", id), updates, { merge: true }), 1500, void 0);
+      } catch (_) {
+      }
+      const syncSummary = await syncToGerenciaDirect(mergedRecord);
+      syncToGoogleScript(mergedRecord).catch(() => {
+      });
+      res.json({ success: true, id, updated: updates, data: mergedRecord, sync: syncSummary });
     } catch (err) {
       console.error("Error updating degustacion via API:", err);
-      res.status(500).json({ error: "Error al actualizar degustacion", details: err?.message });
+      res.status(500).json({ success: false, error: "Error al actualizar degustacion", details: err?.message });
     }
   });
   app2.delete("/api/degustaciones/:id", async (req, res) => {
     try {
       const { id } = req.params;
-      await (0, import_firestore3.deleteDoc)((0, import_firestore3.doc)(db, "degustaciones", id));
+      const cleanId = String(id).replace(/^DEG-/, "").trim();
+      let supabaseDeleted = false;
       if (supabase) {
-        Promise.resolve(supabase.from("degustaciones").delete().eq("id", id)).catch((err) => console.warn("[SUPABASE] Error eliminando:", err?.message));
-      }
-      deleteFromGerenciaDirect(id).catch(() => {
-      });
-      res.json({ success: true, id });
-    } catch (err) {
-      console.error("Error deleting degustacion via API:", err);
-      res.status(500).json({ error: "Error al eliminar degustacion", details: err?.message });
-    }
-  });
-  const ruteroFilePath = import_path.default.resolve(process.cwd(), "rutero_state.json");
-  let ruteroStateInMemory = {
-    asignaciones: {},
-    visitas: {}
-  };
-  try {
-    if (import_fs.default.existsSync(ruteroFilePath)) {
-      const parsedRutero = JSON.parse(import_fs.default.readFileSync(ruteroFilePath, "utf8"));
-      if (parsedRutero && typeof parsedRutero === "object") {
-        ruteroStateInMemory = {
-          asignaciones: parsedRutero.asignaciones || {},
-          visitas: parsedRutero.visitas || {}
-        };
-      }
-    }
-  } catch (err) {
-    console.warn("[RUTERO] No se pudo cargar rutero_state.json inicial:", err?.message);
-  }
-  function persistRuteroStateDisk() {
-    try {
-      import_fs.default.writeFileSync(ruteroFilePath, JSON.stringify(ruteroStateInMemory, null, 2), "utf8");
-    } catch (err) {
-      console.warn("[RUTERO] Error guardando rutero_state.json:", err?.message);
-    }
-  }
-  app2.get("/api/rutero", authenticateToken, (req, res) => {
-    try {
-      res.json({
-        success: true,
-        asignaciones: ruteroStateInMemory.asignaciones,
-        visitas: ruteroStateInMemory.visitas
-      });
-    } catch (err) {
-      res.status(500).json({ success: false, error: "Error obteniendo rutero", details: err?.message });
-    }
-  });
-  app2.post("/api/rutero/asignaciones", authenticateToken, (req, res) => {
-    try {
-      const items = Array.isArray(req.body?.asignaciones) ? req.body.asignaciones : [];
-      for (const item of items) {
-        if (item && item.clienteKey) {
-          ruteroStateInMemory.asignaciones[item.clienteKey] = {
-            ...item,
-            updatedAt: item.updatedAt || (/* @__PURE__ */ new Date()).toISOString()
-          };
+        const { error: supaErr } = await supabase.from("degustaciones").delete().eq("id", cleanId);
+        if (supaErr) {
+          console.warn("[SUPABASE] Error eliminando degustaci\xF3n:", supaErr.message);
+        } else {
+          supabaseDeleted = true;
         }
       }
-      persistRuteroStateDisk();
-      res.json({
-        success: true,
-        count: items.length
-      });
+      degustacionesMemoryStore.delete(cleanId);
+      degustacionesMemoryStore.delete(id);
+      for (const [k, v] of completedDegustacionIdempotency.entries()) {
+        if (k === id || k === cleanId || v.record?.id === cleanId) {
+          completedDegustacionIdempotency.delete(k);
+        }
+      }
+      try {
+        await withTimeout((0, import_firestore3.deleteDoc)((0, import_firestore3.doc)(db, "degustaciones", cleanId)), 1500, void 0);
+      } catch (_) {
+      }
+      await deleteFromGerenciaDirect(cleanId);
+      res.json({ success: true, id: cleanId, supabaseDeleted });
     } catch (err) {
-      res.status(500).json({ success: false, error: "Error guardando asignaciones de ruta", details: err?.message });
+      console.error("Error deleting degustacion via API:", err);
+      res.status(500).json({ success: false, error: "Error al eliminar degustacion", details: err?.message });
     }
   });
-  app2.post("/api/rutero/visitas", authenticateToken, (req, res) => {
-    try {
-      const visita = req.body?.visita;
-      if (!visita || !visita.fecha || !visita.clienteKey) {
-        return res.status(400).json({ success: false, error: "Datos de visita incompletos (fecha, clienteKey)" });
-      }
-      const visitKey = `${visita.fecha}::${visita.clienteKey}`;
-      if (visita.estado === "PENDIENTE") {
-        delete ruteroStateInMemory.visitas[visitKey];
-      } else {
-        ruteroStateInMemory.visitas[visitKey] = {
-          ...visita,
-          id: visita.id || visitKey,
-          checkInTimestamp: visita.checkInTimestamp || (/* @__PURE__ */ new Date()).toISOString()
-        };
-      }
-      persistRuteroStateDisk();
-      res.json({
-        success: true,
-        visita: ruteroStateInMemory.visitas[visitKey] || null
-      });
-    } catch (err) {
-      res.status(500).json({ success: false, error: "Error registrando visita en ruta", details: err?.message });
-    }
+  app2.all(["/api/rutero", "/api/rutero/*"], (_req, res) => {
+    return res.status(410).json({
+      success: false,
+      code: "MODULE_RETIRED",
+      error: "El m\xF3dulo Enrutador fue retirado de la aplicaci\xF3n. Los datos hist\xF3ricos permanecen intactos."
+    });
   });
-  app2.get("/api/alkosto/pedidos", authenticateToken, async (req, res) => {
+  app2.get("/api/alkosto/pedidos", authenticateToken, requireAlkostoAccess, async (req, res) => {
     try {
       if (supabase) {
         try {
@@ -10919,7 +11184,7 @@ async function startServer() {
       inFlightAlkostoSubmissions.delete(idempotencyKey);
     }
   }
-  app2.post("/api/alkosto/pedidos", authenticateToken, async (req, res) => {
+  app2.post("/api/alkosto/pedidos", authenticateToken, requireAlkostoAccess, async (req, res) => {
     try {
       const item = req.body;
       if (!item || !item.sucursalNombre && !item.sucursal_cliente && !item.sucursalCodigo) {
@@ -10943,7 +11208,7 @@ async function startServer() {
       });
     }
   });
-  app2.post("/api/alkosto/pedidos/lote", authenticateToken, async (req, res) => {
+  app2.post("/api/alkosto/pedidos/lote", authenticateToken, requireAlkostoAccess, async (req, res) => {
     try {
       const pedidosInput = Array.isArray(req.body?.pedidos) ? req.body.pedidos : Array.isArray(req.body) ? req.body : [];
       if (pedidosInput.length === 0) {
@@ -10977,7 +11242,7 @@ async function startServer() {
       res.status(500).json({ success: false, error: "Error procesando lote de pedidos", details: err?.message });
     }
   });
-  app2.post("/api/alkosto/pedidos/transmitir", authenticateToken, async (req, res) => {
+  app2.post("/api/alkosto/pedidos/transmitir", authenticateToken, requireAlkostoAccess, async (req, res) => {
     try {
       const item = req.body;
       if (!item || !item.id && !item.numeroPedido && !item.sucursalNombre && !item.sucursal_cliente) {
@@ -11003,7 +11268,7 @@ async function startServer() {
       });
     }
   });
-  app2.put("/api/alkosto/pedidos/:id", authenticateToken, async (req, res) => {
+  app2.put("/api/alkosto/pedidos/:id", authenticateToken, requireAlkostoAccess, async (req, res) => {
     try {
       const { id } = req.params;
       const updates = req.body;
@@ -11025,7 +11290,7 @@ async function startServer() {
       res.status(500).json({ error: "Error updating Alkosto order", details: err?.message });
     }
   });
-  app2.delete("/api/alkosto/pedidos/:id", authenticateToken, async (req, res) => {
+  app2.delete("/api/alkosto/pedidos/:id", authenticateToken, requireAlkostoAccess, async (req, res) => {
     try {
       const { id } = req.params;
       await (0, import_firestore3.deleteDoc)((0, import_firestore3.doc)(db, "alkosto_orders", id)).catch(() => {
@@ -11206,7 +11471,7 @@ async function startServer() {
     const num = parseFloat(cleaned);
     return isNaN(num) ? 0 : num;
   }
-  app2.post("/api/alkosto/ocr-orden", rateLimiter(10 * 6e4, 30, "OCR Orden Alkosto"), async (req, res) => {
+  app2.post("/api/alkosto/ocr-orden", authenticateToken, requireAlkostoAccess, rateLimiter(10 * 6e4, 30, "OCR Orden Alkosto"), async (req, res) => {
     req.setTimeout?.(12e4);
     res.setTimeout?.(12e4);
     let currentStage = "1-Archivo";
@@ -11493,7 +11758,7 @@ async function startServer() {
       familiaCenter: ["FC01", "FC02", "FC03", "FC04", "FC05", "FC06", "FC07"]
     }
   };
-  app2.get("/api/cadenas/sucursales", async (req, res) => {
+  app2.get("/api/cadenas/sucursales", authenticateToken, requireAlkostoAccess, async (req, res) => {
     try {
       res.json({
         success: true,
@@ -11503,7 +11768,7 @@ async function startServer() {
       res.status(500).json({ error: "Error obteniendo sucursales de cadenas" });
     }
   });
-  app2.post("/api/cadenas/sincronizar", async (req, res) => {
+  app2.post("/api/cadenas/sincronizar", authenticateToken, requireAlkostoAccess, async (req, res) => {
     try {
       await (0, import_firestore3.setDoc)((0, import_firestore3.doc)(db, "cadenas_config", "abreviaturas"), {
         ...ABREVIATURAS_CONFIG,
@@ -14586,6 +14851,7 @@ startServer().catch((err) => {
   metasPeriodoActual,
   rateLimiter,
   requireAdmin,
+  requireAlkostoAccess,
   requireSupervisorOrAdmin
 });
 //# sourceMappingURL=server.cjs.map
