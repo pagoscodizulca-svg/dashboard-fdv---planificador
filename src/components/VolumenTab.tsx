@@ -33,6 +33,10 @@ interface SkuStats {
   categoria?: string;
   meta: number;
   ejecutado: number;
+  ventaBruta: number;
+  devoluciones: number;
+  officialPct: number | null;
+  rowCount: number;
   cumplimiento: number;
   /** true cuando se muestra un mes histórico: no existe cuota guardada de meses anteriores. */
   sinCuota?: boolean;
@@ -46,70 +50,78 @@ export const VolumenTab: React.FC<Props> = ({ filteredVolumen, activeVendedorId,
   const [rubroFilter, setRubroFilter] = useState<'TODOS' | RubroCodigo>('TODOS');
   const [statusFilter, setStatusFilter] = useState<'TODOS' | 'FALTANTES' | 'CUMPLIDOS' | 'CON_VENTA' | 'SIN_VENTA'>('TODOS');
 
-  // Scaling mock data to look like the screenshot if it's less than 10k
-  const scaleFactor = 1; 
-
-  // Aggregating SKU data first so that totalMeta and totalEjecutado match the exact sum of the SKU rows
+  // Espejo Exacto 1:1 con "Volumen por SKU": conserva decimales con signo (notas de crédito negativas) y % oficial de la hoja
   const skuStats: SkuStats[] = useMemo(() => {
     const map = new Map<string, SkuStats>();
-    
-    const getArticuloName = (sku: string) => {
-       if (sku === 'SKU001') return 'JUGOS VARIOS';
-       if (sku === 'SKU002') return 'LECHE EN POLVO VENCAMPO';
-       if (sku === 'SKU003') return 'SALCHICHA VIENA ALIMEX 16 X 450 GRS';
-       if (sku === 'SKU004') return 'MORTADELA ESP. CARACAS 10X900GRS';
-       return `PRODUCTO GENÉRICO ${sku}`;
-    };
 
     filteredVolumen.forEach(v => {
       const displaySku = v.skuId || (v as any).sku || 'GENERICO';
       const m = Number(v.meta ?? (v as any).metaKg);
-      const e = Number(v.ejecutado ?? (v as any).ejecutadoKg);
-      const validMeta = isNaN(m) ? 0 : m;
-      const validEjecutado = isNaN(e) ? 0 : e;
-      
+      const e = Number(v.ventaNetaKg ?? v.ejecutado ?? (v as any).ejecutadoKg);
+      const validMeta = Number.isFinite(m) ? m : 0;
+      const validEjecutado = Number.isFinite(e) ? e : 0;
+      const validBruta = Number.isFinite(Number(v.ventaBrutaKg)) ? Number(v.ventaBrutaKg) : (validEjecutado > 0 ? validEjecutado : 0);
+      const validDev = Number.isFinite(Number(v.devolucionesKg)) ? Number(v.devolucionesKg) : (validEjecutado < 0 ? validEjecutado : 0);
+      const rawPct = v.porcentajeCumplimiento;
+      const validOfficialPct = rawPct !== undefined && rawPct !== null && Number.isFinite(Number(rawPct)) ? Number(rawPct) : null;
+
       if (!map.has(displaySku)) {
         map.set(displaySku, {
           skuId: displaySku,
-          articulo: v.articulo || getArticuloName(displaySku),
+          articulo: v.articulo || displaySku,
           categoria: String((v as any).categoria || ''),
           meta: 0,
           ejecutado: 0,
+          ventaBruta: 0,
+          devoluciones: 0,
+          officialPct: validOfficialPct,
+          rowCount: 0,
           cumplimiento: 0
         });
       }
-      
+
       const stat = map.get(displaySku)!;
-      stat.meta += validMeta;
-      stat.ejecutado += validEjecutado;
+      stat.meta = +(stat.meta + validMeta).toFixed(2);
+      stat.ejecutado = +(stat.ejecutado + validEjecutado).toFixed(2);
+      stat.ventaBruta = +(stat.ventaBruta + validBruta).toFixed(2);
+      stat.devoluciones = +(stat.devoluciones + validDev).toFixed(2);
+      stat.rowCount += 1;
+      if (stat.rowCount > 1) {
+        stat.officialPct = null;
+      } else if (validOfficialPct !== null) {
+        stat.officialPct = validOfficialPct;
+      }
     });
 
     return Array.from(map.values()).map(s => {
-      s.meta = Math.round((Number(s.meta) || 0) * scaleFactor);
-      s.ejecutado = Math.round((Number(s.ejecutado) || 0) * scaleFactor);
-      s.cumplimiento = s.meta > 0 ? (s.ejecutado / s.meta) * 100 : 0;
+      s.meta = +(Number(s.meta) || 0).toFixed(2);
+      s.ejecutado = +(Number(s.ejecutado) || 0).toFixed(2);
+      s.cumplimiento =
+        s.rowCount === 1 && s.officialPct !== null
+          ? s.officialPct
+          : (s.meta > 0 ? +((s.ejecutado / s.meta) * 100).toFixed(2) : 0);
       return s;
-    }).sort((a, b) => b.ejecutado - a.ejecutado); // Sort descending by executed
+    }).sort((a, b) => b.ejecutado - a.ejecutado);
   }, [filteredVolumen]);
 
-  const totalMeta = useMemo(() => skuStats.reduce((acc, s) => acc + s.meta, 0), [skuStats]);
-  const totalEjecutado = useMemo(() => skuStats.reduce((acc, s) => acc + s.ejecutado, 0), [skuStats]);
-  
+  const totalMeta = useMemo(() => +skuStats.reduce((acc, s) => acc + s.meta, 0).toFixed(2), [skuStats]);
+  const totalEjecutado = useMemo(() => +skuStats.reduce((acc, s) => acc + s.ejecutado, 0).toFixed(2), [skuStats]);
+
   const cumplimiento = totalMeta > 0 ? (totalEjecutado / totalMeta) * 100 : 0;
-  const faltante = Math.max(0, totalMeta - totalEjecutado);
+  const faltante = +Math.max(0, totalMeta - totalEjecutado).toFixed(2);
   const mesInfo = useMemo(() => getMesLaboralInfo(), []);
   const diasRestantes = Math.max(1, mesInfo.remainingWorkingDays || 1);
   const diasTranscurridos = Math.max(0, mesInfo.elapsedWorkingDays || 0);
   const diasTotales = Math.max(1, mesInfo.totalWorkingDays || 22);
   const avanceTiempo = mesInfo.percentage || 0;
-  
+
   // Proyeccion cierre = (Ejecutado / dias transcurridos) * dias totales
   const proyeccion = diasTranscurridos > 0 ? Math.round((totalEjecutado / diasTranscurridos) * diasTotales) : totalEjecutado;
   const ritmoRequerido = diasRestantes > 0 ? Math.round(faltante / diasRestantes) : 0;
 
   const formatNumber = (num: number | undefined | null) => {
     if (num === null || num === undefined || isNaN(Number(num))) return '0';
-    return Number(num).toLocaleString('en-US');
+    return Number(num).toLocaleString('en-US', { maximumFractionDigits: 2 });
   };
 
   // ── Historial real (ventas_historial) + filtro de fechas + selección múltiple 360° ──

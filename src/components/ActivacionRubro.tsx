@@ -149,10 +149,9 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
 
       return TARGET_CATEGORIES.map(cat => {
         const d = statsMap.get(cat) || { meta: 0, activados: 0 };
-        const clientAct = countClientActivations(cat);
         const meta = d.meta;
-        // Si el grid tiene meta o activados definidos usa el grid (incluyendo '-' = 0), si no usa el conteo real de clientes
-        const activados = (d.meta > 0 || d.activados > 0) ? d.activados : clientAct;
+        // Espejo Exacto del "Grid de Activación por Vendedor": respetar siempre las cifras oficiales de la hoja (incluyendo "-" = 0)
+        const activados = d.activados;
         const faltante = Math.max(0, meta - activados);
         const cumplimiento = meta > 0 ? (activados / meta) * 100 : 0;
         const estCierre = mesInfo.elapsedWorkingDays > 0

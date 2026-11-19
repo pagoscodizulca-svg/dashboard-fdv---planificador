@@ -224,7 +224,7 @@ export function sortDegustacionesOrdenadas(list: Degustacion[], ascending: boole
   });
 }
 
-export const DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL = 'https://script.google.com/macros/s/AKfycbx6JMUR1IubQuZ97Ics7emw_I0G9UAy-5vig4Vl8zPwW8yMBbZldvQGeGOPNiNbUmVTaQ/exec';
+export const DEFAULT_GOOGLE_SHEETS_WEBHOOK_URL = '/api/degustaciones';
 export const GOOGLE_SHEETS_WEBHOOK_STORAGE_KEY = 'codizulca_sheets_webhook_url';
 
 export function getGoogleSheetsWebhookUrl(): string {
@@ -287,10 +287,10 @@ export async function syncToGoogleSheets(degustacion: Degustacion): Promise<bool
 }
 
 export const GERENCIA_TRADE_API_URL = (import.meta as any).env?.VITE_GERENCIA_TRADE_API_URL || 'https://codizulca-dashboard-4.onrender.com/api/degustaciones';
-export const GERENCIA_UTERIO_SURVEYS_URL = 'https://uterioexpfweghxfbvoa.supabase.co/rest/v1/surveys';
-export const GERENCIA_UTERIO_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InV0ZXJpb2V4cGZ3ZWdoeGZidm9hIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc5NTg3ODYsImV4cCI6MjEwMzUzNDc4Nn0.bZnN4vrXUDlcoIaI7l39O-bU4GQp05SvJdio_cn6niI';
-export const GERENCIA_SUPABASE_SURVEYS_URL = (import.meta as any).env?.VITE_GERENCIA_SUPABASE_SURVEYS_URL || 'https://nudltbgyewyiklqdyujk.supabase.co/rest/v1/surveys';
-export const GERENCIA_SUPABASE_ANON_KEY = (import.meta as any).env?.VITE_GERENCIA_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51ZGx0Ymd5ZXd5aWtscWR5dWprIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MTgzMDA3OCwiZXhwIjoyMTA3NDA2MDc4fQ.k92vdZiuVkTzAWNK8Fq71m1Xi_MoWtpx_eRQcZTw1cA';
+export const GERENCIA_UTERIO_SURVEYS_URL = (import.meta as any).env?.VITE_GERENCIA_UTERIO_SURVEYS_URL || '';
+export const GERENCIA_UTERIO_ANON_KEY = (import.meta as any).env?.VITE_GERENCIA_UTERIO_ANON_KEY || '';
+export const GERENCIA_SUPABASE_SURVEYS_URL = (import.meta as any).env?.VITE_GERENCIA_SUPABASE_SURVEYS_URL || '';
+export const GERENCIA_SUPABASE_ANON_KEY = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || '';
 
 /**
  * Construye el objeto exacto DegustacionItem esperado por https://codizulca-dashboard-4.onrender.com/dashboard/trade
@@ -428,6 +428,7 @@ export function buildGerenciaSurveyPayload(degustacion: Degustacion) {
 }
 
 async function upsertSurveyToSupabaseEndpoint(url: string, apiKey: string, degustacionId: string, payload: any): Promise<boolean> {
+  if (!url || !apiKey) return false;
   try {
     const cleanId = String(degustacionId).replace(/^DEG-/, '');
     const searchUrl = `${url}?comments=like.*${encodeURIComponent(cleanId)}*&select=id&limit=5`;
@@ -508,20 +509,24 @@ export async function deleteFromGerenciaDashboard(id: string): Promise<boolean> 
 
     const [renderDel, uterioDel, nudltDel] = await Promise.all([
       fetch(`${GERENCIA_TRADE_API_URL}/${encodeURIComponent(degId)}`, { method: 'DELETE' }).then(r => r.ok).catch(() => false),
-      fetch(`${GERENCIA_UTERIO_SURVEYS_URL}?comments=like.*${encodeURIComponent(cleanId)}*`, {
-        method: 'DELETE',
-        headers: {
-          'apikey': GERENCIA_UTERIO_ANON_KEY,
-          'Authorization': `Bearer ${GERENCIA_UTERIO_ANON_KEY}`
-        }
-      }).then(r => r.ok).catch(() => false),
-      fetch(`${GERENCIA_SUPABASE_SURVEYS_URL}?comments=like.*${encodeURIComponent(cleanId)}*`, {
-        method: 'DELETE',
-        headers: {
-          'apikey': GERENCIA_SUPABASE_ANON_KEY,
-          'Authorization': `Bearer ${GERENCIA_SUPABASE_ANON_KEY}`
-        }
-      }).then(r => r.ok).catch(() => false)
+      GERENCIA_UTERIO_SURVEYS_URL && GERENCIA_UTERIO_ANON_KEY
+        ? fetch(`${GERENCIA_UTERIO_SURVEYS_URL}?comments=like.*${encodeURIComponent(cleanId)}*`, {
+            method: 'DELETE',
+            headers: {
+              'apikey': GERENCIA_UTERIO_ANON_KEY,
+              'Authorization': `Bearer ${GERENCIA_UTERIO_ANON_KEY}`
+            }
+          }).then(r => r.ok).catch(() => false)
+        : Promise.resolve(false),
+      GERENCIA_SUPABASE_SURVEYS_URL && GERENCIA_SUPABASE_ANON_KEY
+        ? fetch(`${GERENCIA_SUPABASE_SURVEYS_URL}?comments=like.*${encodeURIComponent(cleanId)}*`, {
+            method: 'DELETE',
+            headers: {
+              'apikey': GERENCIA_SUPABASE_ANON_KEY,
+              'Authorization': `Bearer ${GERENCIA_SUPABASE_ANON_KEY}`
+            }
+          }).then(r => r.ok).catch(() => false)
+        : Promise.resolve(false)
     ]);
 
     return renderDel || uterioDel || nudltDel;

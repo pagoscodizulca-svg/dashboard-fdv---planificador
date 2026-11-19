@@ -186,55 +186,29 @@ ALTER TABLE public.activacion_clientes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.metas_activacion ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.surveys ENABLE ROW LEVEL SECURITY;
 
--- Políticas permisivas para backend y servicio autenticado
+-- Políticas exclusivas para backend (service_role); anon/authenticated bloqueados por defecto
 DROP POLICY IF EXISTS "Permitir acceso completo a service_role" ON public.usuarios;
-CREATE POLICY "Permitir acceso completo a service_role" ON public.usuarios FOR ALL USING (true);
+CREATE POLICY "Permitir acceso completo a service_role" ON public.usuarios FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 DROP POLICY IF EXISTS "Permitir acceso completo a degustaciones" ON public.degustaciones;
-CREATE POLICY "Permitir acceso completo a degustaciones" ON public.degustaciones FOR ALL USING (true);
+CREATE POLICY "Permitir acceso completo a degustaciones" ON public.degustaciones FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 DROP POLICY IF EXISTS "Permitir acceso completo a pedidos_alkosto" ON public.pedidos_alkosto;
-CREATE POLICY "Permitir acceso completo a pedidos_alkosto" ON public.pedidos_alkosto FOR ALL USING (true);
+CREATE POLICY "Permitir acceso completo a pedidos_alkosto" ON public.pedidos_alkosto FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 DROP POLICY IF EXISTS "Permitir acceso completo a ventas_volumen" ON public.ventas_volumen;
-CREATE POLICY "Permitir acceso completo a ventas_volumen" ON public.ventas_volumen FOR ALL USING (true);
+CREATE POLICY "Permitir acceso completo a ventas_volumen" ON public.ventas_volumen FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 DROP POLICY IF EXISTS "Permitir acceso completo a activacion_clientes" ON public.activacion_clientes;
-CREATE POLICY "Permitir acceso completo a activacion_clientes" ON public.activacion_clientes FOR ALL USING (true);
+CREATE POLICY "Permitir acceso completo a activacion_clientes" ON public.activacion_clientes FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 DROP POLICY IF EXISTS "Permitir acceso completo a metas_activacion" ON public.metas_activacion;
-CREATE POLICY "Permitir acceso completo a metas_activacion" ON public.metas_activacion FOR ALL USING (true);
+CREATE POLICY "Permitir acceso completo a metas_activacion" ON public.metas_activacion FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 DROP POLICY IF EXISTS "Permitir acceso completo a surveys" ON public.surveys;
-CREATE POLICY "Permitir acceso completo a surveys" ON public.surveys FOR ALL USING (true);
+CREATE POLICY "Permitir acceso completo a surveys" ON public.surveys FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- ==============================================================
--- 10. SEED INICIAL DE USUARIOS Y FUERZA DE VENTAS
+-- 10. SEED DE USUARIOS: GESTIONADO POR EL MOTOR DE SINCRONIZACIÓN CON BCRYPT(12)
+-- (Eliminadas las contraseñas/cédulas en texto plano por auditoría de seguridad SEC-03)
 -- ==============================================================
-INSERT INTO public.usuarios (username, password_hash, role, vendor_id, nombre_completo) VALUES
-('ADMIN', '123', 'ADMIN', 'ADMIN', 'ADMINISTRADOR GENERAL'),
-('MARIA BRICEÑO', '15937615', 'VENDEDOR', '1', 'MARIA BRICEÑO'),
-('MARIANA CHACIN', '15260049', 'VENDEDOR', '2', 'MARIANA CHACIN'),
-('HERNAN PAZ', '15405797', 'VENDEDOR', '4', 'HERNAN PAZ'),
-('OSWALDO CHURION', '13754472', 'VENDEDOR', '7', 'OSWALDO CHURION'),
-('CARLOS FUENMAYOR', '18741545', 'VENDEDOR', '12', 'CARLOS FUENMAYOR'),
-('SARAH REYES', '18663070', 'VENDEDOR', '14', 'SARAH REYES'),
-('J PABLO ARAUJO - CAB/OJE', '15239697', 'VENDEDOR', '15', 'J PABLO ARAUJO - CAB/OJE'),
-('JOSE G. GONZALEZ', '13262058', 'VENDEDOR', '16', 'JOSE G. GONZALEZ'),
-('ANGELICA MORENO', '14682378', 'VENDEDOR', '21', 'ANGELICA MORENO'),
-('ADEL JARABA', '11719291', 'VENDEDOR', '22', 'ADEL JARABA'),
-('JUAN HERNANDEZ', '14658122', 'VENDEDOR', '24', 'JUAN HERNANDEZ'),
-('YOLEIDA LUGO', '10083900', 'VENDEDOR', '25', 'YOLEIDA LUGO'),
-('SAIRU VALLES', '18383237', 'VENDEDOR', '26', 'SAIRU VALLES'),
-('ELISA SOLER', '12330043', 'VENDEDOR', '28', 'ELISA SOLER'),
-('ALI PEREZ', '19117934', 'VENDEDOR', '29', 'ALI PEREZ'),
-('J PABLO ARAUJO', '15239697', 'VENDEDOR', '31', 'J PABLO ARAUJO'),
-('EDUARDO PIÑA', '11878063', 'VENDEDOR', '33', 'EDUARDO PIÑA'),
-('JOHNATAN SOTO VILLA DEL ROS', '18395226', 'VENDEDOR', '37', 'JOHNATAN SOTO VILLA DEL ROS'),
-('LEONARDO RIOS', '17925198', 'VENDEDOR', '38', 'LEONARDO RIOS'),
-('MARYERY GARCIA', '12712534', 'VENDEDOR', '39', 'MARYERY GARCIA'),
-('LUIS GUANIPA', '18700742', 'VENDEDOR', '40', 'LUIS GUANIPA'),
-('PEDRO ABREU', '12456937', 'VENDEDOR', '45', 'PEDRO ABREU'),
-('OSCAR ORTIZ', '16347637', 'VENDEDOR', '46', 'OSCAR ORTIZ'),
-('MIKELANGELO DIAZ', '20863632', 'VENDEDOR', '47', 'MIKELANGELO DIAZ')
-ON CONFLICT (username) DO NOTHING;

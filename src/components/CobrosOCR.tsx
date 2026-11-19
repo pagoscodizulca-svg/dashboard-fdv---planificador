@@ -814,10 +814,7 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
     try {
       let data: any = null;
 
-      const clientApiKey =
-        (import.meta as any).env?.VITE_GEMINI_API_KEY ||
-        (import.meta as any).env?.VITE_GOOGLE_API_KEY ||
-        '';
+      const clientApiKey = '';
 
       try {
         const res = await fetch('/api/ocr', {

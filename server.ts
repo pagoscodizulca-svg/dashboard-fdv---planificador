@@ -122,6 +122,16 @@ import {
   SheetTabMetrics,
   SheetWarning
 } from './src/services/googleSheetsParser';
+import {
+  normalizeVendorKey,
+  getCaracasYearMonth
+} from './src/utils/vendorKeyNormalizer';
+import {
+  computeBufferSha256,
+  buildHashedUsersForSupabase,
+  SyncAuditLogEntry
+} from './src/services/monthlySyncEngine';
+import { DEFAULT_VENDOR_BCRYPT_CREDENTIALS } from './src/services/defaultUserHashes';
 import { collection, doc, getDocs, setDoc, getDoc, deleteDoc } from 'firebase/firestore';
 import { createClient } from '@supabase/supabase-js';
 import jwt from 'jsonwebtoken';
@@ -136,18 +146,19 @@ if (typeof (globalThis as any).WebSocket === 'undefined') {
   }
 }
 
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://nudltbgyewyiklqdyujk.supabase.co';
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.GERENCIA_SUPABASE_ANON_KEY || process.env.VITE_GERENCIA_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51ZGx0Ymd5ZXd5aWtscWR5dWprIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MTgzMDA3OCwiZXhwIjoyMTA3NDA2MDc4fQ.k92vdZiuVkTzAWNK8Fq71m1Xi_MoWtpx_eRQcZTw1cA';
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 const supabase = (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
   ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
   : null;
 
-// Periodo (YYYY-MM) del mes en curso: las metas de cada mes se guardan bajo su propio periodo
-// para que el historial de metas se conserve y no se sobrescriba al cambiar de mes.
-export const metasPeriodoActual = (d: Date = new Date()) =>
-  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+// Periodo (YYYY-MM) del mes en curso fijado estrictamente en zona horaria America/Caracas (UTC-4)
+export const metasPeriodoActual = (d: Date = new Date()) => getCaracasYearMonth(d);
 
-const JWT_SECRET = process.env.JWT_SECRET || 'codizulca_super_secret_jwt_key_2026_fdv_secure_token_9x8y7z';
+if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
+  throw new Error('[SECURITY] JWT_SECRET es obligatorio en producción.');
+}
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
 
 // Middleware de autenticación segura vía JWT
 export function authenticateToken(req: any, res: any, next: any) {
@@ -174,6 +185,18 @@ export function requireAdmin(req: any, res: any, next: any) {
   return res.status(403).json({ success: false, error: 'Acceso no autorizado: Se requieren privilegios de Administrador' });
 }
 
+export function requireSupervisorOrAdmin(req: any, res: any, next: any) {
+  const supProfile = getSupervisorProfile(req.user?.username);
+  const role = supProfile ? 'SUPERVISOR' : String(req.user?.role || '').toUpperCase();
+  if (role === 'ADMIN' || role === 'SUPERVISOR') {
+    return next();
+  }
+  return res.status(403).json({
+    success: false,
+    error: 'Acceso restringido: Solo Administradores o Supervisores pueden disparar la sincronización global.'
+  });
+}
+
 // Control de rate limiting en memoria para evitar abusos o costos excesivos en APIs de IA
 const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
 export function rateLimiter(windowMs: number, maxRequests: number, label: string) {
@@ -198,12 +221,15 @@ export function rateLimiter(windowMs: number, maxRequests: number, label: string
 }
 
 let cachedWorkbook: any = null;
+let lastWorkbookSha256: string = '';
 let lastFetchTime = 0;
 const CACHE_TTL = 30000; // 30 seconds
 let lastSuccessfulSheetSyncAt: string = '';
 let lastSheetSource: 'live_google_sheet' | 'local_backup' | 'supabase' | 'memory' = 'memory';
 let lastSheetMetrics: Record<string, SheetTabMetrics> = {};
 let lastSheetWarnings: SheetWarning[] = [];
+let lastSheetAuditLogs: SyncAuditLogEntry[] = [];
+const lastSyncedSha256ByPeriod = new Map<string, string>();
 let cachedLocalMasterSeed: MasterClientSeed[] | null = null;
 
 function loadLocalMasterClientSeed(): MasterClientSeed[] {
@@ -281,28 +307,34 @@ async function getWorkbook(force = false) {
   const XLSX = await import('xlsx');
   const sheetId = getGoogleSheetId();
 
-  // 1. Intentar descargar en caliente desde Google Sheets con anti-caché y reintento automático
-  try {
-    const exportUrl = buildGoogleSheetExportUrl(sheetId, 'xlsx');
-    const buffer = await fetchGoogleSheetWithRetry(exportUrl, 3);
-    cachedWorkbook = XLSX.read(buffer, { type: 'array', raw: true });
-    lastFetchTime = Date.now();
-    lastSuccessfulSheetSyncAt = new Date().toISOString();
-    lastSheetSource = 'live_google_sheet';
-    const localPath = path.join(process.cwd(), 'sheet.xlsx');
+  // 1. Intentar descargar en caliente desde Google Sheets si GOOGLE_SHEET_ID está parametrizado en el servidor
+  if (sheetId) {
     try {
-      fs.writeFileSync(localPath, Buffer.from(buffer));
-    } catch (_) {}
-    return cachedWorkbook;
-  } catch (err: any) {
-    console.warn(`[SERVER] No se pudo obtener XLSX en vivo desde Google Sheets (${sheetId}):`, err?.message);
+      const exportUrl = buildGoogleSheetExportUrl(sheetId, 'xlsx');
+      const buffer = await fetchGoogleSheetWithRetry(exportUrl, 3);
+      const nodeBuf = Buffer.from(buffer);
+      lastWorkbookSha256 = computeBufferSha256(nodeBuf);
+      cachedWorkbook = XLSX.read(buffer, { type: 'array', raw: true });
+      lastFetchTime = Date.now();
+      lastSuccessfulSheetSyncAt = new Date().toISOString();
+      lastSheetSource = 'live_google_sheet';
+      const localPath = path.join(process.cwd(), 'sheet.xlsx');
+      try {
+        fs.writeFileSync(localPath, nodeBuf);
+      } catch (_) {}
+      return cachedWorkbook;
+    } catch (err: any) {
+      console.warn('[SERVER] No se pudo obtener XLSX en vivo desde Google Sheets:', err?.message);
+    }
   }
 
   // 2. Fallback a copia local de respaldo sheet.xlsx
   const localPath = path.join(process.cwd(), 'sheet.xlsx');
   if (fs.existsSync(localPath)) {
     try {
-      cachedWorkbook = XLSX.readFile(localPath);
+      const localBuf = fs.readFileSync(localPath);
+      lastWorkbookSha256 = computeBufferSha256(localBuf);
+      cachedWorkbook = XLSX.read(localBuf, { type: 'buffer', raw: true });
       lastFetchTime = Date.now();
       lastSheetSource = 'local_backup';
       if (!lastSuccessfulSheetSyncAt) {
@@ -355,53 +387,8 @@ async function startServer() {
   });
 
   // ==============================================================
-  // ENDPOINT DE AUTENTICACIÓN SEGURA
+  // ENDPOINT DE AUTENTICACIÓN SEGURA (BCRYPT EXCLUSIVO - CERO TEXTO PLANO)
   // ==============================================================
-  const VENDOR_SERVER_CREDENTIALS: Record<string, { password: string; role: 'ADMIN' | 'SUPERVISOR' | 'VENDEDOR'; vendorId: string }> = {
-    'ADMIN': { password: process.env.ADMIN_PASSWORD || '123', role: 'ADMIN', vendorId: 'ADMIN' },
-    'MARIA BRICEÑO': { password: '15937615', role: 'VENDEDOR', vendorId: '1' },
-    'MARIANA CHACIN': { password: '15260049', role: 'VENDEDOR', vendorId: '2' },
-    'MIKELANGELO DIAZ': { password: '20863632', role: 'VENDEDOR', vendorId: '3' },
-    'MIKELANGELODIAZ@GMAIL.COM': { password: '20863632', role: 'VENDEDOR', vendorId: '3' },
-    'MIKELANGELO': { password: '20863632', role: 'VENDEDOR', vendorId: '3' },
-    'MIKELANGELO DIAZ1': { password: '20863632', role: 'VENDEDOR', vendorId: '3' },
-    'MIKELANGELO DIAZ - VILLA DEL ROS': { password: '20863632', role: 'VENDEDOR', vendorId: '37' },
-    'MIKELANGELO DIAZ VILLA DEL ROS': { password: '20863632', role: 'VENDEDOR', vendorId: '37' },
-    'MIKELANGELO VILLA DEL ROS': { password: '20863632', role: 'VENDEDOR', vendorId: '37' },
-    'JOHNATAN SOTO': { password: '20863632', role: 'VENDEDOR', vendorId: '3' },
-    'JOHNATAN': { password: '20863632', role: 'VENDEDOR', vendorId: '3' },
-    'JONATHAN': { password: '20863632', role: 'VENDEDOR', vendorId: '3' },
-    'JHONATAN': { password: '20863632', role: 'VENDEDOR', vendorId: '3' },
-    'HERNAN PAZ': { password: '15405797', role: 'VENDEDOR', vendorId: '4' },
-    'OSWALDO CHURION': { password: '13754472', role: 'VENDEDOR', vendorId: '7' },
-    'CARLOS FUENMAYOR': { password: '18741545', role: 'VENDEDOR', vendorId: '12' },
-    'SARAH REYES': { password: '18663070', role: 'VENDEDOR', vendorId: '14' },
-    'J PABLO ARAUJO - CAB/OJE': { password: '15239697', role: 'VENDEDOR', vendorId: '15' },
-    'JOSE G. GONZALEZ': { password: '13262058', role: 'VENDEDOR', vendorId: '16' },
-    'FOOD SERVICE SUR': { password: '19', role: 'VENDEDOR', vendorId: '19' },
-    'JAIDER MEDINA - FOOD SERVICE NORTE': { password: '20', role: 'VENDEDOR', vendorId: '20' },
-    'JAIDER MEDINA': { password: '20', role: 'VENDEDOR', vendorId: '20' },
-    'ANGELICA MORENO': { password: '14682378', role: 'VENDEDOR', vendorId: '21' },
-    'ADEL JARABA': { password: '11719291', role: 'VENDEDOR', vendorId: '22' },
-    'JUAN HERNANDEZ': { password: '14658122', role: 'VENDEDOR', vendorId: '24' },
-    'YOLEIDA LUGO': { password: '10083900', role: 'VENDEDOR', vendorId: '25' },
-    'SAIRU VALLES': { password: '18383237', role: 'VENDEDOR', vendorId: '26' },
-    'ELISA SOLER': { password: '12330043', role: 'VENDEDOR', vendorId: '28' },
-    'ALI PEREZ': { password: '19117934', role: 'SUPERVISOR', vendorId: 'SUPERVISOR_ALI_PEREZ' },
-    'ANGEL NAVARRO': { password: '25468939', role: 'VENDEDOR', vendorId: '29' },
-    'MARIANGEL GONZALEZ': { password: '20552780', role: 'VENDEDOR', vendorId: '47' },
-    'MARIANGEL': { password: '20552780', role: 'VENDEDOR', vendorId: '47' },
-    'VICTOR CAMPOS': { password: '19944329', role: 'VENDEDOR', vendorId: '48' },
-    'J PABLO ARAUJO': { password: '15239697', role: 'VENDEDOR', vendorId: '31' },
-    'EDUARDO PIÑA': { password: '11878063', role: 'VENDEDOR', vendorId: '33' },
-    'JOHNATAN SOTO VILLA DEL ROS': { password: '18395226', role: 'VENDEDOR', vendorId: '37' },
-    'LEONARDO RIOS': { password: '17925198', role: 'VENDEDOR', vendorId: '38' },
-    'MARYERY GARCIA': { password: '12712534', role: 'VENDEDOR', vendorId: '39' },
-    'VICTORIA VARGAS': { password: process.env.VICTORIA_VARGAS_PASSWORD_HASH || '$2b$10$QzlUMUB08xzDe2HdhH7tQu9f0Pfiw9hI8bsPPGgg3ffqHV4VrVwTi', role: 'VENDEDOR', vendorId: '40' },
-    'PEDRO ABREU': { password: '12456937', role: 'VENDEDOR', vendorId: '45' },
-    'OSCAR ORTIZ': { password: '16347637', role: 'VENDEDOR', vendorId: '46' },
-  };
-
   app.post("/api/auth/login", async (req, res) => {
     try {
       const { username, password } = req.body;
@@ -412,22 +399,13 @@ async function startServer() {
       const usuarioUpper = String(username).toUpperCase().trim();
       const pwd = String(password).trim();
       const pwdClean = pwd.replace(/\D/g, '');
-      const normalizeForAuth = (s: string) => {
-        return s
-          .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .replace(/Ñ/gi, 'N')
-          .replace(/\s+/g, ' ')
-          .trim()
-          .toUpperCase();
-      };
+      const usuarioNorm = normalizeVendorKey(usuarioUpper);
 
-      const usuarioNorm = normalizeForAuth(usuarioUpper);
-      let creds = VENDOR_SERVER_CREDENTIALS[usuarioUpper];
+      let creds = DEFAULT_VENDOR_BCRYPT_CREDENTIALS[usuarioUpper];
       let matchedCanonicalKey = usuarioUpper;
       if (!creds) {
-        for (const [key, val] of Object.entries(VENDOR_SERVER_CREDENTIALS)) {
-          if (normalizeForAuth(key) === usuarioNorm) {
+        for (const [key, val] of Object.entries(DEFAULT_VENDOR_BCRYPT_CREDENTIALS)) {
+          if (normalizeVendorKey(key) === usuarioNorm) {
             creds = val;
             matchedCanonicalKey = key;
             break;
@@ -435,14 +413,23 @@ async function startServer() {
         }
       }
 
-      const isNewFalconVendor = ['ANGEL NAVARRO', 'MARIANGEL GONZALEZ', 'MARIANGEL', 'VICTOR CAMPOS'].includes(matchedCanonicalKey);
+      const verifyAgainstHash = async (candidateHash: string): Promise<boolean> => {
+        if (!candidateHash) return false;
+        if (candidateHash.startsWith('$2')) {
+          if (await bcrypt.compare(pwd, candidateHash)) return true;
+          if (pwdClean && pwdClean !== pwd && (await bcrypt.compare(pwdClean, candidateHash))) return true;
+          return false;
+        }
+        // Compatibilidad transitoria si la fila en BD aún no ha pasado por el primer hash bcrypt(12)
+        return pwd === candidateHash || (Boolean(pwdClean) && pwdClean === candidateHash);
+      };
 
       // 1. Intentar autenticación contra Supabase si la tabla existe
       if (supabase) {
         try {
           const { data: supaUser, error: supaErr } = await supabase
             .from('usuarios')
-            .select('*')
+            .select('username,password_hash,role,vendor_id,activo')
             .in('username', [usuarioUpper, matchedCanonicalKey])
             .maybeSingle();
 
@@ -450,30 +437,33 @@ async function startServer() {
             if (supaUser.activo === false) {
               return res.status(401).json({ success: false, error: 'Usuario inactivo o deshabilitado' });
             }
-            const isBcrypt = supaUser.password_hash && supaUser.password_hash.startsWith('$2');
-            let isValid = false;
-            if (isBcrypt) {
-              isValid = await bcrypt.compare(pwd, supaUser.password_hash) || await bcrypt.compare(pwdClean, supaUser.password_hash);
-            } else {
-              isValid =
-                pwd === supaUser.password_hash ||
-                pwdClean === supaUser.password_hash ||
-                (creds && (pwd === creds.password || pwdClean === creds.password)) ||
-                (matchedCanonicalKey === 'ANGEL NAVARRO' && pwdClean === '25468939') ||
-                (isNewFalconVendor && (pwdClean === '19117934' || pwd === '123' || pwdClean === String(supaUser.vendor_id || '')));
-            }
-            if (!isValid && creds && !creds.password.startsWith('$2') && (pwd === creds.password || pwdClean === creds.password)) {
-              isValid = true;
+
+            let isValid = await verifyAgainstHash(String(supaUser.password_hash || ''));
+            if (!isValid && creds) {
+              isValid = await verifyAgainstHash(creds.passwordHash);
             }
 
             if (isValid) {
+              // Auto-migrar en caliente a bcrypt(12) si el registro en BD aún estaba sin hashear
+              if (supaUser.password_hash && !String(supaUser.password_hash).startsWith('$2')) {
+                bcrypt.hash(pwdClean || pwd, 12).then((upgradedHash) => {
+                  supabase
+                    .from('usuarios')
+                    .update({ password_hash: upgradedHash, updated_at: new Date().toISOString() })
+                    .eq('username', supaUser.username)
+                    .then(() => {}, () => {});
+                }).catch(() => {});
+              }
+
               const supProfile = getSupervisorProfile(supaUser.username);
               const resolvedRole = supProfile ? 'SUPERVISOR' : supaUser.role;
+              const canonicalUser = matchedCanonicalKey || supaUser.username;
               const token = jwt.sign(
                 {
-                  username: matchedCanonicalKey || supaUser.username,
+                  username: canonicalUser,
                   role: resolvedRole,
-                  vendorId: supaUser.vendor_id
+                  vendorId: supaUser.vendor_id,
+                  vendorKey: normalizeVendorKey(canonicalUser)
                 },
                 JWT_SECRET,
                 { expiresIn: '7d' }
@@ -483,7 +473,7 @@ async function startServer() {
                 success: true,
                 token,
                 user: {
-                  username: matchedCanonicalKey || supaUser.username,
+                  username: canonicalUser,
                   role: resolvedRole,
                   vendorId: supaUser.vendor_id
                 },
@@ -493,8 +483,8 @@ async function startServer() {
               return res.status(401).json({ success: false, error: 'Contraseña incorrecta' });
             }
           }
-        } catch (e: any) {
-          // Fallback a credenciales locales
+        } catch {
+          // Fallback a hashes bcrypt locales si Supabase no responde
         }
       }
 
@@ -502,17 +492,15 @@ async function startServer() {
         return res.status(401).json({ success: false, error: 'Usuario no autorizado o no encontrado en la base de datos' });
       }
 
-      const isMikel = matchedCanonicalKey.includes('MIKELANGELO') || matchedCanonicalKey.includes('SOTO') || matchedCanonicalKey.includes('JOHNATAN');
-      const isCredsBcrypt = creds.password && creds.password.startsWith('$2');
-      const isValidPwd = isCredsBcrypt
-        ? (await bcrypt.compare(pwd, creds.password) || await bcrypt.compare(pwdClean, creds.password))
-        : (
-            pwd === creds.password ||
-            pwdClean === creds.password ||
-            (matchedCanonicalKey === 'ANGEL NAVARRO' && pwdClean === '25468939') ||
-            (isMikel && (pwdClean === '20863632' || pwdClean === '18395226')) ||
-            (isNewFalconVendor && (pwdClean === '19117934' || pwd === '123' || pwdClean === creds.vendorId))
-          );
+      // Permitir override de hash de administrador vía variable de entorno ADMIN_PASSWORD_HASH / ADMIN_PASSWORD
+      let isValidPwd = false;
+      if (matchedCanonicalKey === 'ADMIN' && process.env.ADMIN_PASSWORD_HASH) {
+        isValidPwd = await verifyAgainstHash(process.env.ADMIN_PASSWORD_HASH);
+      } else if (matchedCanonicalKey === 'ADMIN' && process.env.ADMIN_PASSWORD) {
+        isValidPwd = pwd === process.env.ADMIN_PASSWORD;
+      } else {
+        isValidPwd = await verifyAgainstHash(creds.passwordHash);
+      }
 
       if (!isValidPwd) {
         return res.status(401).json({ success: false, error: 'Contraseña incorrecta' });
@@ -522,7 +510,8 @@ async function startServer() {
         {
           username: matchedCanonicalKey,
           role: creds.role,
-          vendorId: creds.vendorId
+          vendorId: creds.vendorId,
+          vendorKey: normalizeVendorKey(matchedCanonicalKey)
         },
         JWT_SECRET,
         { expiresIn: '7d' }
@@ -538,7 +527,7 @@ async function startServer() {
         },
         source: 'local'
       });
-    } catch (err: any) {
+    } catch {
       return res.status(500).json({ success: false, error: 'Error interno en autenticación' });
     }
   });
@@ -715,16 +704,16 @@ async function startServer() {
     }
   });
 
-  const GOOGLE_SCRIPT_WEBHOOK_URL = process.env.VITE_GOOGLE_SHEETS_WEBHOOK_URL || 'https://script.google.com/macros/s/AKfycbx6JMUR1IubQuZ97Ics7emw_I0G9UAy-5vig4Vl8zPwW8yMBbZldvQGeGOPNiNbUmVTaQ/exec';
+  const GOOGLE_SCRIPT_WEBHOOK_URL = process.env.GOOGLE_SCRIPT_WEBHOOK_URL || '';
   const GERENCIA_TRADE_API_URL = process.env.GERENCIA_TRADE_API_URL || 'https://codizulca-dashboard-4.onrender.com/api/degustaciones';
-  const GERENCIA_UTERIO_SURVEYS_URL = 'https://uterioexpfweghxfbvoa.supabase.co/rest/v1/surveys';
-  const GERENCIA_UTERIO_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InV0ZXJpb2V4cGZ3ZWdoeGZidm9hIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc5NTg3ODYsImV4cCI6MjEwMzUzNDc4Nn0.bZnN4vrXUDlcoIaI7l39O-bU4GQp05SvJdio_cn6niI';
-  const GERENCIA_SUPABASE_SURVEYS_URL = process.env.GERENCIA_SUPABASE_SURVEYS_URL || process.env.VITE_GERENCIA_SUPABASE_SURVEYS_URL || 'https://nudltbgyewyiklqdyujk.supabase.co/rest/v1/surveys';
-  const GERENCIA_SUPABASE_ANON_KEY = process.env.GERENCIA_SUPABASE_ANON_KEY || process.env.VITE_GERENCIA_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im51ZGx0Ymd5ZXd5aWtscWR5dWprIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MTgzMDA3OCwiZXhwIjoyMTA3NDA2MDc4fQ.k92vdZiuVkTzAWNK8Fq71m1Xi_MoWtpx_eRQcZTw1cA';
+  const GERENCIA_UTERIO_SURVEYS_URL = process.env.GERENCIA_UTERIO_SURVEYS_URL || 'https://uterioexpfweghxfbvoa.supabase.co/rest/v1/surveys';
+  const GERENCIA_UTERIO_ANON_KEY = process.env.GERENCIA_UTERIO_ANON_KEY || '';
+  const GERENCIA_SUPABASE_SURVEYS_URL = process.env.GERENCIA_SUPABASE_SURVEYS_URL || (SUPABASE_URL ? `${SUPABASE_URL}/rest/v1/surveys` : '');
+  const GERENCIA_SUPABASE_ANON_KEY = process.env.GERENCIA_SUPABASE_ANON_KEY || SUPABASE_SERVICE_ROLE_KEY || '';
 
   // Configuración de Supabase para el Programa de Pedidos Manuales (gestor-de-pedidos-pro)
   const PEDIDOS_MANUALES_SUPABASE_URL = process.env.PEDIDOS_MANUALES_SUPABASE_URL || 'https://vxduxyrbeybhhbpdyqoc.supabase.co';
-  const PEDIDOS_MANUALES_SUPABASE_KEY = process.env.PEDIDOS_MANUALES_SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ4ZHV4eXJiZXliaGhicGR5cW9jIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEwNzUxNTgsImV4cCI6MjEwNjY1MTE1OH0.sOgUaTLZ0NhlVYSLukAysyxRzggAicjM4n-u4H8NrQ4';
+  const PEDIDOS_MANUALES_SUPABASE_KEY = process.env.PEDIDOS_MANUALES_SUPABASE_KEY || '';
 
   function buildTradeMarketingItemServer(rawItem: any, existingRemote?: any) {
     const item = normalizeDegustacionRecord(rawItem);
@@ -4035,17 +4024,11 @@ async function startServer() {
   let lastMetasParsedTime = 0;
   const PARSED_DATA_TTL = 60000; // 60 seconds
 
-  app.get("/api/usuarios", async (req, res) => {
-    try {
-      const workbook = await getWorkbook(req.query.force === 'true');
-      const XLSX = await import('xlsx');
-      const parsed = parseWorkbookFull(XLSX, workbook, { periodo: metasPeriodoActual() });
-      setNoCacheSyncHeaders(res);
-      return res.json(parsed.usuariosRows);
-    } catch (err: any) {
-      console.error("Error fetching usuarios:", err);
-      return res.status(500).json({ error: "Internal server error" });
-    }
+  app.get("/api/usuarios", (_req, res) => {
+    return res.status(403).json({
+      success: false,
+      error: "Endpoint deshabilitado por política de seguridad: prohibida la exposición de credenciales."
+    });
   });
 
   app.get("/api/client-lookup", authenticateToken, async (req: any, res: any) => {
@@ -4410,11 +4393,10 @@ async function startServer() {
       }
     }
 
-    // 2. Parsear y normalizar las 10 pestañas del Google Sheet con validación fila por fila
+    // 2. Parsear y normalizar las 10 pestañas del Google Sheet bajo el Contrato Espejo (sin mezclar ventas_historial)
     const parsed = parseWorkbookFull(XLSX, workbook, {
       periodo,
-      masterClients,
-      ventasMes: await cargarVentasMesActual()
+      masterClients
     });
 
     // 3. Actualizar cachés en memoria de inmediato para respuesta instantánea y consistente
@@ -4426,98 +4408,197 @@ async function startServer() {
     lastMetasParsedTime = Date.now();
     lastSheetMetrics = parsed.metrics;
     lastSheetWarnings = parsed.warnings;
+    lastSheetAuditLogs = parsed.auditLogs;
 
     if (parsed.warnings.length > 0) {
       console.warn(
-        `[SHEET QA] ${parsed.warnings.length} advertencia(s) en lectura fila por fila (datos incompletos/duplicados registrados sin cortar carga):`,
-        parsed.warnings.slice(0, 8)
+        `[SHEET QA] ${parsed.warnings.length} advertencia(s) y ${parsed.auditLogs.length} evento(s) de auditoría registrados sin cortar carga.`
       );
     }
 
-    // 4. Sincronizar hacia Supabase si está disponible
+    // 4. Sincronizar hacia Supabase usando la RPC atómica sync_monthly_sales_snapshot (con fallback seguro acotado al periodo)
     if (supabase) {
-      // 4a. ventas_volumen
+      const allActivacionRows = [...parsed.activacionSupabaseUpserts, ...(hadDbClients ? parsed.newSheetClientsForSupabase : parsed.newSheetClientsForSupabase)];
+      let rpcSucceeded = false;
+
       try {
-        if (parsed.volumenSupabaseRows.length > 0) {
-          await supabase.from('ventas_volumen').delete().eq('periodo', periodo);
-          for (let i = 0; i < parsed.volumenSupabaseRows.length; i += 200) {
-            const batch = parsed.volumenSupabaseRows.slice(i, i + 200);
-            const { error: insVolErr } = await supabase.from('ventas_volumen').insert(batch);
-            if (insVolErr) throw new Error(`insert lote ${i}: ${insVolErr.message}`);
-          }
+        const { data: rpcData, error: rpcErr } = await supabase.rpc('sync_monthly_sales_snapshot', {
+          p_periodo_mes: periodo,
+          p_sheet_sha256: lastWorkbookSha256 || '',
+          p_triggered_by: 'backend_sync',
+          p_metas: parsed.metasSupabaseRows,
+          p_volumen: parsed.volumenSupabaseRows,
+          p_activacion: allActivacionRows,
+          p_degustaciones: parsed.degustacionesRows.map((d) => ({
+            id: d.id,
+            cliente_codigo: d.clienteCodigo,
+            cliente_nombre: d.clienteNombre,
+            vendedor_nombre: d.vendedorNombre,
+            vendedor_id: d.vendedorId,
+            vendedor_key: d.vendedorKey,
+            ruta: d.ruta,
+            fecha: d.fecha,
+            turno: d.turno,
+            hora: d.hora,
+            productos: d.productos,
+            kilos_estimados: d.kilosEstimados,
+            personas_estimadas: d.personasEstimadas,
+            requiere_promotora: d.requierePromotora,
+            promotora_asignada: d.promotoraAsignada,
+            material_pop: d.materialPop,
+            contacto_punto: d.contactoPunto,
+            telefono_contacto: d.telefonoContacto,
+            observaciones: '',
+            estado: d.estado,
+            notas_trade_marketing: d.notasTradeMarketing
+          })),
+          p_audit_logs: parsed.auditLogs,
+          p_metrics: parsed.metrics,
+          p_allow_empty: false
+        });
+
+        if (!rpcErr && rpcData) {
+          rpcSucceeded = true;
+        } else if (rpcErr) {
+          console.warn('[SYNC RPC] sync_monthly_sales_snapshot no disponible aún (ejecuta scripts/sql/04_contrato_espejo_sync.sql):', rpcErr.message);
         }
-      } catch (vErr: any) {
-        console.warn("[SERVER] Error sincronizando ventas_volumen:", vErr?.message);
+      } catch (rpcEx: any) {
+        console.warn('[SYNC RPC] Excepción invocando sync_monthly_sales_snapshot:', rpcEx?.message);
       }
 
-      // 4b. activacion_clientes (upserts sobre cartera maestra + inserción de clientes nuevos detectados en el Sheet)
-      try {
-        const colsNuevasOk = await activacionTieneColumnasNuevas();
-        if (parsed.activacionSupabaseUpserts.length > 0) {
-          for (let i = 0; i < parsed.activacionSupabaseUpserts.length; i += 200) {
-            const batch = parsed.activacionSupabaseUpserts.slice(i, i + 200).map((row: any) => (colsNuevasOk ? row : sinColumnasNuevas(row)));
-            await supabase.from('activacion_clientes').upsert(batch, { onConflict: 'id' });
+      // Fallback acotado estrictamente a `periodo` si la migración 04 aún no fue corrida en Supabase
+      if (!rpcSucceeded) {
+        try {
+          if (parsed.volumenSupabaseRows.length > 0) {
+            const legacyVol = parsed.volumenSupabaseRows.map((r) => ({
+              periodo: r.periodo,
+              sku: r.sku,
+              articulo: r.articulo,
+              categoria: r.categoria,
+              vendedor_id: r.vendedor_id,
+              vendedor_nombre: r.vendedor_nombre,
+              meta_kg: r.meta_kg,
+              ejecutado_kg: r.venta_neta_kg,
+              zona: r.zona
+            }));
+            await supabase.from('ventas_volumen').delete().eq('periodo', periodo);
+            for (let i = 0; i < legacyVol.length; i += 200) {
+              await supabase.from('ventas_volumen').insert(legacyVol.slice(i, i + 200));
+            }
           }
+        } catch (vErr: any) {
+          console.warn('[SERVER] Error fallback ventas_volumen:', vErr?.message);
         }
-        if (hadDbClients && parsed.newSheetClientsForSupabase.length > 0) {
-          for (let i = 0; i < parsed.newSheetClientsForSupabase.length; i += 200) {
-            const batch = parsed.newSheetClientsForSupabase.slice(i, i + 200).map((row: any) => (colsNuevasOk ? row : sinColumnasNuevas(row)));
-            await supabase.from('activacion_clientes').insert(batch);
+
+        try {
+          const colsNuevasOk = await activacionTieneColumnasNuevas();
+          const stripExtra = (row: any) => {
+            const base = colsNuevasOk ? { ...row } : sinColumnasNuevas(row);
+            delete base.vendedor_key;
+            delete base.cliente_codigo_canonico;
+            return base;
+          };
+          if (parsed.activacionSupabaseUpserts.length > 0) {
+            for (let i = 0; i < parsed.activacionSupabaseUpserts.length; i += 200) {
+              const batch = parsed.activacionSupabaseUpserts.slice(i, i + 200).map(stripExtra);
+              await supabase.from('activacion_clientes').upsert(batch, { onConflict: 'id' });
+            }
           }
+          if (hadDbClients && parsed.newSheetClientsForSupabase.length > 0) {
+            for (let i = 0; i < parsed.newSheetClientsForSupabase.length; i += 200) {
+              const batch = parsed.newSheetClientsForSupabase.slice(i, i + 200).map(stripExtra);
+              await supabase.from('activacion_clientes').insert(batch);
+            }
+          }
+        } catch (cErr: any) {
+          console.warn('[SERVER] Error fallback activacion_clientes:', cErr?.message);
         }
-      } catch (cErr: any) {
-        console.warn("[SERVER] Error sincronizando activacion_clientes:", cErr?.message);
+
+        try {
+          if (parsed.metasSupabaseRows.length > 0) {
+            const legacyMetas = parsed.metasSupabaseRows.map((m) => ({
+              periodo: m.periodo,
+              vendedor_id: m.vendedor_id,
+              categoria: m.categoria,
+              meta: m.meta,
+              activados: m.activados
+            }));
+            await supabase.from('metas_activacion').delete().eq('periodo', periodo);
+            for (let i = 0; i < legacyMetas.length; i += 200) {
+              await supabase.from('metas_activacion').insert(legacyMetas.slice(i, i + 200));
+            }
+          }
+        } catch (mErr: any) {
+          console.warn('[SERVER] Error fallback metas_activacion:', mErr?.message);
+        }
       }
 
-      // 4c. metas_activacion
-      try {
-        if (parsed.metasSupabaseRows.length > 0) {
-          await supabase.from('metas_activacion').delete().eq('periodo', periodo);
-          for (let i = 0; i < parsed.metasSupabaseRows.length; i += 200) {
-            const batch = parsed.metasSupabaseRows.slice(i, i + 200);
-            const { error: insMetaErr } = await supabase.from('metas_activacion').insert(batch);
-            if (insMetaErr) throw new Error(`insert lote ${i}: ${insMetaErr.message}`);
-          }
-        }
-      } catch (mErr: any) {
-        console.warn("[SERVER] Error sincronizando metas_activacion:", mErr?.message);
+      // 4d. Sincronizar Usuarios con bcrypt(12) en background sin exponer jamás contraseñas en texto plano
+      if (parsed.usuariosRows.length > 0) {
+        buildHashedUsersForSupabase(parsed.usuariosRows, SUPERVISOR_SUMMARY_COLUMNS)
+          .then(async (hashedUsers) => {
+            if (!supabase || hashedUsers.length === 0) return;
+            const upserts = hashedUsers.map((u) => ({
+              username: u.username,
+              password_hash: u.password_hash,
+              role: u.role === 'SUPERVISOR' ? 'VENDEDOR' : u.role,
+              vendor_id: u.vendor_id,
+              nombre_completo: u.nombre_completo,
+              activo: true,
+              updated_at: new Date().toISOString()
+            }));
+            await supabase.from('usuarios').upsert(upserts, { onConflict: 'username' });
+          })
+          .catch(() => {});
       }
     }
 
+    if (lastWorkbookSha256) {
+      lastSyncedSha256ByPeriod.set(periodo, lastWorkbookSha256);
+    }
+
     return {
+      status: 'OK' as const,
       countVolumen: parsed.volumenApiRows.length,
       countActivacion: parsed.activacionApiRows.length,
       countMetas: parsed.metasApiRows.length,
+      countDegustaciones: parsed.degustacionesRows.length,
       warningsCount: parsed.warnings.length,
+      auditLogsCount: parsed.auditLogs.length,
       metrics: parsed.metrics
     };
   }
 
   let inFlightSheetsSync: Promise<{
+    status: 'OK' | 'SKIPPED_UNCHANGED';
     countVolumen: number;
     countActivacion: number;
     countMetas: number;
+    countDegustaciones?: number;
     warningsCount: number;
+    auditLogsCount?: number;
     metrics: Record<string, SheetTabMetrics>;
   }> | null = null;
   let lastFullSheetsSyncCompletedAt = 0;
 
-  async function runCoalescedSheetsSync(bypassCooldown = false) {
+  async function runCoalescedSheetsSync(forceRebuild = false, triggeredBy = 'system') {
     if (inFlightSheetsSync) {
       return inFlightSheetsSync;
     }
     if (
-      !bypassCooldown &&
+      !forceRebuild &&
       Date.now() - lastFullSheetsSyncCompletedAt < 4000 &&
       cachedVolumenParsed &&
       cachedActivacionParsed &&
       cachedMetasParsed
     ) {
       return {
+        status: 'SKIPPED_UNCHANGED' as const,
         countVolumen: cachedVolumenParsed.length,
         countActivacion: cachedActivacionParsed.length,
         countMetas: cachedMetasParsed.length,
         warningsCount: lastSheetWarnings.length,
+        auditLogsCount: lastSheetAuditLogs.length,
         metrics: lastSheetMetrics
       };
     }
@@ -4525,6 +4606,27 @@ async function startServer() {
     inFlightSheetsSync = (async () => {
       try {
         const workbook = await getWorkbook(true);
+        const periodo = metasPeriodoActual();
+        const prevHash = lastSyncedSha256ByPeriod.get(periodo);
+        if (
+          !forceRebuild &&
+          prevHash &&
+          lastWorkbookSha256 &&
+          prevHash === lastWorkbookSha256 &&
+          cachedVolumenParsed &&
+          cachedActivacionParsed &&
+          cachedMetasParsed
+        ) {
+          return {
+            status: 'SKIPPED_UNCHANGED' as const,
+            countVolumen: cachedVolumenParsed.length,
+            countActivacion: cachedActivacionParsed.length,
+            countMetas: cachedMetasParsed.length,
+            warningsCount: lastSheetWarnings.length,
+            auditLogsCount: lastSheetAuditLogs.length,
+            metrics: lastSheetMetrics
+          };
+        }
         const res = await syncWorkbookToSupabase(workbook);
         lastFullSheetsSyncCompletedAt = Date.now();
         return res;
@@ -4536,42 +4638,61 @@ async function startServer() {
     return inFlightSheetsSync;
   }
 
-  // ENDPOINT DE SINCRONIZACIÓN BAJO DEMANDA DESDE GOOGLE SHEETS (Habilitado para Vendedores, Supervisores y Admin)
-  app.post("/api/sync/sheets", authenticateToken, async (req: any, res: any) => {
-    try {
-      const sheetId = getGoogleSheetId();
-      console.log(`[SERVER] Sincronizando datos en vivo desde Google Sheets (${sheetId}) solicitado por ${req.user?.username || 'usuario'}...`);
-      const result = await runCoalescedSheetsSync(true);
-      setNoCacheSyncHeaders(res);
+  // ENDPOINT DE SINCRONIZACIÓN BAJO DEMANDA PROTEGIDO (Exclusivo para ADMIN y SUPERVISOR)
+  app.post(
+    "/api/sync/sheets",
+    authenticateToken,
+    requireSupervisorOrAdmin,
+    rateLimiter(60_000, 2, 'manual-sheets-sync'),
+    async (req: any, res: any) => {
+      try {
+        const forceRebuild = req.body?.forceRebuild === true;
+        console.log(`[SERVER] Sincronización manual solicitada por ${req.user?.username || 'supervisor/admin'} (forceRebuild=${forceRebuild})...`);
+        const result = await runCoalescedSheetsSync(forceRebuild, String(req.user?.username || 'ADMIN'));
+        setNoCacheSyncHeaders(res);
 
-      res.json({
-        success: true,
-        message: "Sincronización con Google Sheets y Supabase completada con éxito",
-        sheetId,
-        source: lastSheetSource,
-        countVolumen: result.countVolumen,
-        countActivacion: result.countActivacion,
-        countMetas: result.countMetas,
-        warningsCount: result.warningsCount,
-        timestamp: lastSuccessfulSheetSyncAt || new Date().toISOString()
-      });
-    } catch (err: any) {
-      console.error("[SERVER] Error en /api/sync/sheets:", err);
-      res.status(500).json({ success: false, error: "Error sincronizando datos de Google Sheets", details: err?.message });
+        res.json({
+          success: true,
+          status: result.status,
+          message:
+            result.status === 'SKIPPED_UNCHANGED'
+              ? 'El libro de Google Sheets no presenta cambios (SHA-256 idéntico); cero escrituras redundantes.'
+              : 'Sincronización con Google Sheets y Supabase completada con éxito',
+          source: lastSheetSource,
+          periodo: metasPeriodoActual(),
+          countVolumen: result.countVolumen,
+          countActivacion: result.countActivacion,
+          countMetas: result.countMetas,
+          countDegustaciones: result.countDegustaciones ?? 0,
+          warningsCount: result.warningsCount,
+          auditLogsCount: result.auditLogsCount ?? lastSheetAuditLogs.length,
+          timestamp: lastSuccessfulSheetSyncAt || new Date().toISOString()
+        });
+      } catch (err: any) {
+        console.error("[SERVER] Error en /api/sync/sheets:", err);
+        res.status(500).json({ success: false, error: "Error sincronizando datos de Google Sheets", details: err?.message });
+      }
     }
-  });
+  );
 
-  // ENDPOINT DE ESTADO Y AUDITORÍA CUANTITATIVA DE SINCRONIZACIÓN
+  // ENDPOINT DE ESTADO Y AUDITORÍA CUANTITATIVA DE SINCRONIZACIÓN (Sin exponer GOOGLE_SHEET_ID)
   app.get("/api/sync/status", authenticateToken, (req: any, res: any) => {
     setNoCacheSyncHeaders(res);
+    const isPrivileged = req.user?.role === 'ADMIN' || Boolean(getSupervisorProfile(req.user?.username));
     res.json({
       success: true,
-      sheetId: getGoogleSheetId(),
+      periodo: metasPeriodoActual(),
       lastSyncAt: lastSuccessfulSheetSyncAt || null,
       source: lastSheetSource,
       metrics: lastSheetMetrics,
       warningsCount: lastSheetWarnings.length,
-      warnings: lastSheetWarnings.slice(0, 50)
+      auditLogsCount: lastSheetAuditLogs.length,
+      ...(isPrivileged
+        ? {
+            warnings: lastSheetWarnings.slice(0, 50),
+            auditLogs: lastSheetAuditLogs.slice(0, 50)
+          }
+        : {})
     });
   });
 
@@ -5554,8 +5675,7 @@ async function startServer() {
     const XLSX = await import('xlsx');
     const parsed = parseWorkbookFull(XLSX, workbook, {
       periodo: metasPeriodoActual(),
-      masterClients: loadLocalMasterClientSeed(),
-      ventasMes: await cargarVentasMesActual()
+      masterClients: loadLocalMasterClientSeed()
     });
     cachedVolumenParsed = parsed.volumenApiRows;
     lastVolumenParsedTime = Date.now();
@@ -5565,6 +5685,7 @@ async function startServer() {
     lastMetasParsedTime = Date.now();
     lastSheetMetrics = parsed.metrics;
     lastSheetWarnings = parsed.warnings;
+    lastSheetAuditLogs = parsed.auditLogs;
     return parsed;
   };
 
@@ -5637,32 +5758,30 @@ async function startServer() {
       const force = req.query.force === 'true';
       const { vendorFilter, allowedAliases } = resolveDataFilter(user, req.query.vendedor);
 
+      const isPrivilegedUser = user?.role === 'ADMIN' || Boolean(getSupervisorProfile(user?.username));
+
       const filterByVendor = (list: any[]) => {
-        const nonSupervisorList = list.filter(d => !SUPERVISOR_SUMMARY_COLUMNS.has(String(d.vendedorId || '').toUpperCase().trim()));
+        const nonSupervisorList = list.filter(
+          (d) => !SUPERVISOR_SUMMARY_COLUMNS.has(normalizeVendorKey(d.vendedorKey || d.vendedorId))
+        );
         if (!vendorFilter || vendorFilter === 'ADMIN' || vendorFilter === 'TODOS') return nonSupervisorList;
-        return nonSupervisorList.filter(d => {
-          const vNombre = (d.vendedorNombre || '').toUpperCase();
-          const vId = (d.vendedorId || '').toUpperCase();
-          if (matchesVendorAlias([vendorFilter, ...allowedAliases], vId) || matchesVendorAlias([vendorFilter, ...allowedAliases], vNombre)) {
-            return true;
-          }
-          if (vendorFilter && !vendorFilter.startsWith('SUPERVISOR:') && !/^\d+$/.test(vendorFilter)) {
-            if (vNombre.includes(vendorFilter) || vId.includes(vendorFilter)) return true;
-          }
-          return allowedAliases.some(a => {
-            const aU = a.toUpperCase();
-            return vNombre.includes(aU) || vId.includes(aU) || aU.includes(vNombre) || aU.includes(vId);
-          });
+        const matchTargets = [vendorFilter, ...allowedAliases].filter(Boolean);
+        return nonSupervisorList.filter((d) => {
+          return (
+            matchesVendorAlias(matchTargets, d.vendedorKey) ||
+            matchesVendorAlias(matchTargets, d.vendedorId) ||
+            matchesVendorAlias(matchTargets, d.vendedorNombre)
+          );
         });
       };
 
-      if (force) {
-        await runCoalescedSheetsSync(false);
+      if (force && isPrivilegedUser) {
+        await runCoalescedSheetsSync(false, String(user?.username || 'SUPERVISOR'));
         setNoCacheSyncHeaders(res);
         return res.json(filterByVendor(cachedVolumenParsed || []));
       }
 
-      if (cachedVolumenParsed && (Date.now() - lastVolumenParsedTime < PARSED_DATA_TTL)) {
+      if (!force && cachedVolumenParsed && (Date.now() - lastVolumenParsedTime < PARSED_DATA_TTL)) {
         setNoCacheSyncHeaders(res, 'memory');
         return res.json(filterByVendor(cachedVolumenParsed));
       }
@@ -5682,7 +5801,18 @@ async function startServer() {
           if (Array.isArray(supaRows) && supaRows.length > 0) {
             const mapped = supaRows.map(r => {
               const metaKg = Number(r.meta_kg) || 0;
-              const ejecutadoKg = Number(r.ejecutado_kg) || 0;
+              const ventaNetaKg = r.venta_neta_kg !== undefined && r.venta_neta_kg !== null
+                ? Number(r.venta_neta_kg)
+                : Number(r.ejecutado_kg) || 0;
+              const ventaBrutaKg = r.venta_bruta_kg !== undefined && r.venta_bruta_kg !== null
+                ? Number(r.venta_bruta_kg)
+                : (ventaNetaKg > 0 ? ventaNetaKg : 0);
+              const devolucionesKg = r.devoluciones_kg !== undefined && r.devoluciones_kg !== null
+                ? Number(r.devoluciones_kg)
+                : (ventaNetaKg < 0 ? ventaNetaKg : 0);
+              const pctCumpl = r.porcentaje_cumplimiento !== undefined && r.porcentaje_cumplimiento !== null
+                ? Number(r.porcentaje_cumplimiento)
+                : null;
               return {
                 id: String(r.id),
                 sku: r.sku,
@@ -5690,13 +5820,18 @@ async function startServer() {
                 articulo: r.articulo,
                 categoria: r.categoria,
                 vendedorId: r.vendedor_id,
+                vendedorKey: r.vendedor_key || normalizeVendorKey(r.vendedor_id),
                 vendedorNombre: r.vendedor_nombre,
                 vendedorEmail: undefined,
                 cliente: r.vendedor_nombre || 'General',
                 meta: metaKg,
-                metaKg: metaKg,
-                ejecutado: ejecutadoKg,
-                ejecutadoKg: ejecutadoKg,
+                metaKg,
+                ejecutado: ventaNetaKg,
+                ejecutadoKg: ventaNetaKg,
+                ventaBrutaKg,
+                devolucionesKg,
+                ventaNetaKg,
+                porcentajeCumplimiento: pctCumpl,
                 zona: r.zona || 'General'
               };
             });
@@ -5723,31 +5858,27 @@ async function startServer() {
       const force = req.query.force === 'true';
       const { vendorFilter, allowedAliases } = resolveDataFilter(user, req.query.vendedor);
 
+      const isPrivilegedUser = user?.role === 'ADMIN' || Boolean(getSupervisorProfile(user?.username));
+
       const filterByVendor = (list: any[]) => {
         if (!vendorFilter || vendorFilter === 'ADMIN' || vendorFilter === 'TODOS') return list;
-        return list.filter(d => {
-          const vNombre = (d.vendedorNombre || '').toUpperCase();
-          const vId = (d.vendedorId || '').toUpperCase();
-          if (matchesVendorAlias([vendorFilter, ...allowedAliases], vId) || matchesVendorAlias([vendorFilter, ...allowedAliases], vNombre)) {
-            return true;
-          }
-          if (vendorFilter && !vendorFilter.startsWith('SUPERVISOR:') && !/^\d+$/.test(vendorFilter)) {
-            if (vNombre.includes(vendorFilter) || vId.includes(vendorFilter)) return true;
-          }
-          return allowedAliases.some(a => {
-            const aU = a.toUpperCase();
-            return vNombre.includes(aU) || vId.includes(aU) || aU.includes(vNombre) || aU.includes(vId);
-          });
+        const matchTargets = [vendorFilter, ...allowedAliases].filter(Boolean);
+        return list.filter((d) => {
+          return (
+            matchesVendorAlias(matchTargets, d.vendedorKey) ||
+            matchesVendorAlias(matchTargets, d.vendedorId) ||
+            matchesVendorAlias(matchTargets, d.vendedorNombre)
+          );
         });
       };
 
-      if (force) {
-        await runCoalescedSheetsSync(false);
+      if (force && isPrivilegedUser) {
+        await runCoalescedSheetsSync(false, String(user?.username || 'SUPERVISOR'));
         setNoCacheSyncHeaders(res);
         return res.json(filterByVendor(cachedActivacionParsed || []));
       }
 
-      if (cachedActivacionParsed && (Date.now() - lastActivacionParsedTime < PARSED_DATA_TTL)) {
+      if (!force && cachedActivacionParsed && (Date.now() - lastActivacionParsedTime < PARSED_DATA_TTL)) {
         setNoCacheSyncHeaders(res, 'memory');
         return res.json(filterByVendor(cachedActivacionParsed));
       }
@@ -5985,30 +6116,26 @@ async function startServer() {
       const force = req.query.force === 'true';
       const { vendorFilter, allowedAliases } = resolveDataFilter(user, req.query.vendedor);
 
+      const isPrivilegedUser = user?.role === 'ADMIN' || Boolean(getSupervisorProfile(user?.username));
+
       const filterByVendor = (list: any[]) => {
         if (!vendorFilter || vendorFilter === 'ADMIN' || vendorFilter === 'TODOS') return list;
-        return list.filter(d => {
-          const vId = (d.vendedorId || '').toUpperCase();
-          if (matchesVendorAlias([vendorFilter, ...allowedAliases], vId)) {
-            return true;
-          }
-          if (vendorFilter && !vendorFilter.startsWith('SUPERVISOR:') && !/^\d+$/.test(vendorFilter)) {
-            if (vId.includes(vendorFilter) || vendorFilter.includes(vId)) return true;
-          }
-          return allowedAliases.some(a => {
-            const aU = a.toUpperCase();
-            return vId.includes(aU) || aU.includes(vId);
-          });
+        const matchTargets = [vendorFilter, ...allowedAliases].filter(Boolean);
+        return list.filter((d) => {
+          return (
+            matchesVendorAlias(matchTargets, d.vendedorKey) ||
+            matchesVendorAlias(matchTargets, d.vendedorId)
+          );
         });
       };
 
-      if (force) {
-        await runCoalescedSheetsSync(false);
+      if (force && isPrivilegedUser) {
+        await runCoalescedSheetsSync(false, String(user?.username || 'SUPERVISOR'));
         setNoCacheSyncHeaders(res);
         return res.json(filterByVendor(cachedMetasParsed || []));
       }
 
-      if (cachedMetasParsed && (Date.now() - lastMetasParsedTime < PARSED_DATA_TTL)) {
+      if (!force && cachedMetasParsed && (Date.now() - lastMetasParsedTime < PARSED_DATA_TTL)) {
         setNoCacheSyncHeaders(res, 'memory');
         return res.json(filterByVendor(cachedMetasParsed));
       }
@@ -6019,7 +6146,9 @@ async function startServer() {
           if (!error && data && data.length > 0) {
             const mapped = data.map((r: any) => ({
               vendedorId: r.vendedor_id,
+              vendedorKey: r.vendedor_key || normalizeVendorKey(r.vendedor_id),
               categoria: r.categoria,
+              cartera: Number(r.cartera) || 0,
               meta: Number(r.meta) || 0,
               activados: Number(r.activados) || 0
             }));
@@ -6248,22 +6377,22 @@ async function startServer() {
     const serverInstance = app.listen(portToTry, "0.0.0.0", () => {
       console.log(`Server running on port ${portToTry}`);
 
-      // Auto-sincronización periódica y de inicio desde Google Sheets parametrizado (GOOGLE_SHEET_ID)
+      // Auto-sincronización híbrida con verificación SHA-256 (sin escrituras redundantes si el Sheet no cambió)
       const runAutoSync = async () => {
         try {
-          const sheetId = getGoogleSheetId();
-          console.log(`[SYNC AUTO] Sincronizando datos en vivo desde Google Sheet (${sheetId})...`);
-          const res = await runCoalescedSheetsSync(true);
-          console.log(`[SYNC AUTO] Sincronización exitosa (${lastSheetSource}). Volumen: ${res.countVolumen}, Activación: ${res.countActivacion}, Metas: ${res.countMetas}`);
+          const res = await runCoalescedSheetsSync(false, 'CRON');
+          if (res.status !== 'SKIPPED_UNCHANGED') {
+            console.log(`[SYNC AUTO] Sincronización espejo exitosa (${lastSheetSource}). Volumen: ${res.countVolumen}, Activación: ${res.countActivacion}, Metas: ${res.countMetas}`);
+          }
         } catch (err: any) {
           console.warn("[SYNC AUTO] Error en sincronización periódica desde Google Sheet:", err?.message);
         }
       };
 
-      // Disparar sincronización 3 segundos después del arranque
+      // Disparar verificación inicial 3 segundos después del arranque y luego cada 5 min con jitter (±15s)
       setTimeout(runAutoSync, 3000);
-      // Mantener sincronizado cada 5 minutos
-      setInterval(runAutoSync, 5 * 60 * 1000);
+      const jitterMs = Math.floor((Math.random() * 30 - 15) * 1000);
+      setInterval(runAutoSync, 5 * 60 * 1000 + jitterMs);
     });
 
     serverInstance.on('error', (err: any) => {

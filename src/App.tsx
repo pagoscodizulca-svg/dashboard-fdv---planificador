@@ -368,13 +368,17 @@ export default function App() {
   const handleManualSync = useCallback(async () => {
     if (isSyncing) return;
     setIsSyncing(true);
-    setSyncStatusHint('Consultando Google Sheets...');
+    setSyncStatusHint(userRole === 'VENDEDOR' ? 'Actualizando vista espejo...' : 'Consultando Google Sheets...');
     try {
-      const syncRes = await triggerSheetsSync((attempt, maxAttempts) => {
-        setSyncStatusHint(`Señal móvil inestable, reintentando (${attempt}/${maxAttempts})...`);
-      });
-      if (syncRes?.timestamp) {
-        setLastSyncAt(syncRes.timestamp);
+      if (userRole === 'ADMIN' || userRole === 'SUPERVISOR') {
+        const syncRes = await triggerSheetsSync((attempt, maxAttempts) => {
+          setSyncStatusHint(`Señal móvil inestable, reintentando (${attempt}/${maxAttempts})...`);
+        });
+        if (syncRes?.timestamp) {
+          setLastSyncAt(syncRes.timestamp);
+        }
+      } else {
+        clearSheetsCache(false);
       }
       await loadData(true, false);
       setSyncStatusHint('');
@@ -386,7 +390,7 @@ export default function App() {
     } finally {
       setIsSyncing(false);
     }
-  }, [isSyncing, loadData]);
+  }, [isSyncing, loadData, userRole]);
 
   useEffect(() => {
     (window as any).refreshData = handleManualSync;

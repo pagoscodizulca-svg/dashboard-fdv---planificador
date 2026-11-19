@@ -1,4 +1,5 @@
 import { Role } from '../types';
+import { normalizeVendorKey } from './vendorKeyNormalizer';
 
 export interface AssignedRoute {
   id: string;
@@ -475,18 +476,21 @@ export function getSupervisedAliases(supervisorUsername: string): string[] {
 
 /**
  * Compara de forma exacta y precisa si el nombre del vendedor en la hoja de cálculo
- * coincide con alguno de los alias asignados a la ruta, ignorando diferencias de espacios y guiones.
+ * coincide con alguno de los alias asignados a la ruta, usando `normalizeVendorKey` transversal.
  */
 export function matchesVendorAlias(aliases: string[], sheetVendor: string | null | undefined): boolean {
   const normSheet = normalizeVendorName(sheetVendor);
-  if (!normSheet) return false;
-  const cleanSheet = normalizeAsciiKey(normSheet);
+  const canonSheet = normalizeVendorKey(sheetVendor);
+  if (!normSheet && !canonSheet) return false;
+  const cleanSheet = normalizeAsciiKey(canonSheet || normSheet);
 
   for (const a of aliases) {
     const normA = normalizeVendorName(a);
-    if (!normA) continue;
+    const canonA = normalizeVendorKey(a);
+    if (!normA && !canonA) continue;
+    if (canonSheet && canonA && canonSheet === canonA) return true;
     if (normSheet === normA) return true;
-    const cleanA = normalizeAsciiKey(normA);
+    const cleanA = normalizeAsciiKey(canonA || normA);
     if (cleanSheet && cleanSheet === cleanA) return true;
   }
   return false;

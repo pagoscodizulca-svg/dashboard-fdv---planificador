@@ -311,7 +311,7 @@ describe('Unit & QA: Google Sheets Sync Engine & Normalizer', () => {
           }))
         : [];
 
-      const parsed = parseWorkbookFull(XLSX, wb, { periodo: '2026-10', masterClients });
+      const parsed = parseWorkbookFull(XLSX, wb, { periodo: '2026-11', masterClients });
 
       expect(parsed.volumenApiRows.length).toBeGreaterThanOrEqual(1247);
       expect(
@@ -319,7 +319,8 @@ describe('Unit & QA: Google Sheets Sync Engine & Normalizer', () => {
       ).toBeGreaterThanOrEqual(40);
       expect(parsed.metasApiRows.length).toBeGreaterThanOrEqual(125);
       expect(parsed.usuariosRows.length).toBeGreaterThanOrEqual(28);
-      expect(parsed.degustacionesRows.length).toBeGreaterThanOrEqual(132);
+      expect(parsed.degustacionesRows).toHaveLength(8);
+      expect(parsed.auditLogs.length).toBeGreaterThanOrEqual(300);
       expect(isRowCompletelyEmpty([null, '', '   '])).toBe(true);
     });
   });

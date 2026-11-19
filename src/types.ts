@@ -3,6 +3,7 @@ export type Role = 'ADMIN' | 'SUPERVISOR' | 'VENDEDOR';
 export interface VolumenData {
   id: string;
   vendedorId: string;
+  vendedorKey?: string;
   vendedorNombre?: string;
   vendedorEmail?: string;
   skuId: string;
@@ -14,6 +15,10 @@ export interface VolumenData {
   metaKg?: number;
   ejecutado: number;
   ejecutadoKg?: number;
+  ventaBrutaKg?: number;
+  devolucionesKg?: number;
+  ventaNetaKg?: number;
+  porcentajeCumplimiento?: number | null;
   zona: string;
   lat?: number;
   lng?: number;

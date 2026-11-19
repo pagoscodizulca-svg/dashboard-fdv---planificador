@@ -1979,19 +1979,8 @@ export async function parseAlkostoOrderImage(
     return clientDeterministicPdfOrder;
   }
 
-  // Respaldo directo en cascada con Gemini (1º gemini-2.5-flash -> 2º gemini-2.5-pro -> 3º gemini-2.0-flash) si existe API Key en entorno cliente
-  const clientApiKeys = [
-    (import.meta as any).env?.VITE_GEMINI_API_KEY,
-    (import.meta as any).env?.VITE_GOOGLE_API_KEY,
-    typeof process !== 'undefined' ? process.env?.GEMINI_API_KEY : '',
-    typeof process !== 'undefined' ? process.env?.GOOGLE_API_KEY : '',
-    typeof process !== 'undefined' ? process.env?.VITE_GEMINI_API_KEY : '',
-    typeof process !== 'undefined' ? process.env?.API_KEY : ''
-  ]
-    .filter(Boolean)
-    .flatMap((k) => String(k).split(','))
-    .map((k) => k.trim().replace(/^["']+|["']+$/g, '').trim())
-    .filter((k) => k.length >= 15 && k !== 'undefined' && k !== 'null');
+  // Las llaves de IA residen exclusivamente en el servidor (/api/alkosto/ocr-orden)
+  const clientApiKeys: string[] = [];
 
   if (clientApiKeys.length > 0) {
     try {
