@@ -32,6 +32,11 @@ import {
 import { AlkostoTab } from './components/AlkostoTab';
 import { subscribeDegustaciones } from './services/degustacionesService';
 import { Degustacion } from './types';
+import {
+  canAccessAlkosto,
+  isAlkostoRouteUrl,
+  ALKOSTO_ACCESS_DENIED_MESSAGE
+} from './utils/alkostoPermissions';
 
 function lazyWithRetry<T extends React.ComponentType<any>>(
   factory: () => Promise<{ default: T }>,
@@ -156,6 +161,13 @@ export default function App() {
     }
     return '';
   });
+  const [loggedInVendorId, setLoggedInVendorId] = useState<string>(() => {
+    if (isIncomingWhatsAppShare() && localStorage.getItem('dashboard_fdv_token')) {
+      return localStorage.getItem('dashboard_fdv_vendor_id') || '';
+    }
+    return '';
+  });
+  const [permissionNotice, setPermissionNotice] = useState<string | null>(null);
   const [activeVendedorId, setActiveVendedorId] = useState<string>(() => {
     if (isIncomingWhatsAppShare() && localStorage.getItem('dashboard_fdv_token')) {
       return localStorage.getItem('dashboard_fdv_active_route') || '';
@@ -251,6 +263,7 @@ export default function App() {
       } else {
         setUserRole(sessionRes.user.role);
         setLoggedInVendor(sessionRes.user.username);
+        setLoggedInVendorId(String(sessionRes.user.vendorId ?? ''));
         if (sessionRes.user.role === 'ADMIN') {
           setActiveVendedorId(localStorage.getItem('dashboard_fdv_active_route') || 'ADMIN');
         } else if (sessionRes.user.role === 'SUPERVISOR') {
@@ -546,11 +559,29 @@ export default function App() {
       }
       
       if (data?.token && data?.user) {
+        setLoggedInVendorId(String(data.user.vendorId ?? ''));
         saveAuthSession(data.token, data.user, initialRoute);
       }
+      setPermissionNotice(null);
       clearSheetsCache();
       if (pendingWhatsAppShare || isIncomingWhatsAppShare()) {
         setActiveTab('COBROS_OCR');
+      } else if (isAlkostoRouteUrl()) {
+        const allowedAlkostoOnLogin = canAccessAlkosto({
+          username: data?.user?.username || usuarioUpper,
+          role,
+          vendorId: data?.user?.vendorId,
+          route: initialRoute
+        });
+        if (allowedAlkostoOnLogin) {
+          setActiveTab('ALKOSTO');
+        } else {
+          try {
+            window.history.replaceState(null, '', '/');
+          } catch {}
+          setActiveTab('ACTIVACION_RUBRO');
+          setPermissionNotice(ALKOSTO_ACCESS_DENIED_MESSAGE);
+        }
       }
       setIsLoggedIn(true);
 
@@ -580,7 +611,9 @@ export default function App() {
     setLoginError('');
     setUserRole('VENDEDOR');
     setLoggedInVendor('');
+    setLoggedInVendorId('');
     setActiveVendedorId('');
+    setPermissionNotice(null);
     setVolumenData([]);
     setActivacionData([]);
     setMetasActivacion([]);
@@ -799,21 +832,54 @@ export default function App() {
     return Array.from(map.values());
   }, [userRole, activeVendedorId, loggedInVendor, activacionData, volumenData]);
 
-  // Restricción estricta: Alkosto SOLO visible y accesible para Sairú Valles (Cuentas claves 2 - SV)
-  const isSairuValles = useMemo(() => {
-    const vendorNorm = (loggedInVendor || '').toUpperCase();
-    return (
-      vendorNorm.includes('SAIRU') ||
-      vendorNorm.includes('VALLES') ||
-      vendorNorm.includes('CUENTAS CLAVES 2') ||
-      vendorNorm.includes('CUENTAS CLAVE 2')
-    );
-  }, [loggedInVendor]);
+  // Restricción multicapa (Defensa en Profundidad): Alkosto denegado explícitamente a Sairu Valles
+  // y habilitado únicamente para perfiles autorizados (ADMIN / SUPERVISOR).
+  const hasAlkostoAccess = useMemo(() => {
+    return canAccessAlkosto({
+      username: loggedInVendor,
+      role: userRole,
+      vendorId: loggedInVendorId,
+      route: activeVendedorId
+    });
+  }, [loggedInVendor, userRole, loggedInVendorId, activeVendedorId]);
+
+  // Guardia de ruta y estado: impide acceso por URL directa (#alkosto, /alkosto, ?tab=ALKOSTO) o estado
+  useEffect(() => {
+    if (!isLoggedIn) return;
+
+    const enforceAlkostoRouteGuard = () => {
+      if (isAlkostoRouteUrl()) {
+        if (!hasAlkostoAccess) {
+          try {
+            window.history.replaceState(null, '', '/');
+          } catch {}
+          setActiveTab('ACTIVACION_RUBRO');
+          setPermissionNotice(ALKOSTO_ACCESS_DENIED_MESSAGE);
+        } else {
+          setActiveTab('ALKOSTO');
+        }
+      }
+    };
+
+    enforceAlkostoRouteGuard();
+    window.addEventListener('hashchange', enforceAlkostoRouteGuard);
+    window.addEventListener('popstate', enforceAlkostoRouteGuard);
+    return () => {
+      window.removeEventListener('hashchange', enforceAlkostoRouteGuard);
+      window.removeEventListener('popstate', enforceAlkostoRouteGuard);
+    };
+  }, [isLoggedIn, hasAlkostoAccess]);
 
   // Si cambia de usuario o rol y la pestaña activa no le corresponde, regresar a ACTIVACION_RUBRO
   useEffect(() => {
-    if (activeTab === 'ALKOSTO' && !isSairuValles) {
+    if (activeTab === 'ALKOSTO' && !hasAlkostoAccess) {
+      try {
+        if (isAlkostoRouteUrl()) {
+          window.history.replaceState(null, '', '/');
+        }
+      } catch {}
       setActiveTab('ACTIVACION_RUBRO');
+      setPermissionNotice(ALKOSTO_ACCESS_DENIED_MESSAGE);
     }
     if (activeTab === 'TRAZABILIDAD' && userRole !== 'ADMIN') {
       setActiveTab('ACTIVACION_RUBRO');
@@ -821,7 +887,7 @@ export default function App() {
     if (activeTab === 'MAESTRA' && userRole !== 'ADMIN') {
       setActiveTab('ACTIVACION_RUBRO');
     }
-  }, [activeTab, isSairuValles, userRole]);
+  }, [activeTab, hasAlkostoAccess, userRole]);
 
   if (!isLoggedIn) {
     return (
@@ -938,7 +1004,7 @@ export default function App() {
       label: 'Degustaciones', 
       icon: Sparkles 
     },
-    ...(isSairuValles ? [{ id: 'ALKOSTO' as TabId, label: 'ALKOSTO', icon: ShoppingCart }] : []),
+    ...(hasAlkostoAccess ? [{ id: 'ALKOSTO' as TabId, label: 'ALKOSTO', icon: ShoppingCart }] : []),
     ...(userRole === 'ADMIN' ? [{ id: 'TRAZABILIDAD' as TabId, label: 'Trazabilidad', icon: Activity }] : []),
     ...(userRole === 'ADMIN' ? [{ id: 'MAESTRA' as TabId, label: 'Actualizar Maestra', icon: Database }] : []),
   ];
@@ -1115,6 +1181,25 @@ export default function App() {
       </header>
 
       <main className="max-w-7xl mx-auto space-y-6">
+        {permissionNotice && (
+          <div
+            role="alert"
+            data-testid="permission-denied-banner"
+            className="flex items-center justify-between gap-3 bg-red-950/60 border border-red-800/80 text-red-200 px-4 py-3 rounded-xl text-xs sm:text-sm font-sans shadow-lg"
+          >
+            <div className="flex items-center gap-2.5">
+              <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
+              <span>{permissionNotice}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPermissionNotice(null)}
+              className="text-red-300 hover:text-white text-xs font-bold uppercase tracking-wider px-2 py-1 rounded-lg hover:bg-red-900/50 transition-colors cursor-pointer shrink-0"
+            >
+              Cerrar
+            </button>
+          </div>
+        )}
         <Suspense fallback={<div className="h-20 bg-neutral-900/40 border border-neutral-800/80 rounded-2xl animate-pulse" />}>
           {activeTab !== 'COBROS_OCR' && (
             <RecorridoMes
@@ -1177,12 +1262,24 @@ export default function App() {
                 vendedorName={userRole === 'ADMIN' ? (activeVendedorId === 'ADMIN' ? 'GERENCIA TRADE MARKETING' : activeVendedorDisplayName) : (currentVendorProfile?.displayName || loggedInVendor)}
                 activeVendedorId={activeVendedorId}
                 clientesAsignados={clientesParaDegustaciones}
-                onNavigateToTab={(tab) => setActiveTab(tab as TabId)}
+                onNavigateToTab={(tab) => {
+                  const candidate = String(tab || '').toUpperCase();
+                  if (candidate === 'RUTERO' || candidate === 'ENRUTADOR') {
+                    setActiveTab('ACTIVACION_RUBRO');
+                    return;
+                  }
+                  if (candidate === 'ALKOSTO' && !hasAlkostoAccess) {
+                    setActiveTab('ACTIVACION_RUBRO');
+                    setPermissionNotice(ALKOSTO_ACCESS_DENIED_MESSAGE);
+                    return;
+                  }
+                  setActiveTab(candidate as TabId);
+                }}
               />
             )}
-            {activeTab === 'ALKOSTO' && isSairuValles && (
+            {activeTab === 'ALKOSTO' && hasAlkostoAccess && (
               <AlkostoTab 
-                vendedoraNombre={currentVendorProfile?.displayName || loggedInVendor || 'SAIRU VALLES'}
+                vendedoraNombre={currentVendorProfile?.displayName || loggedInVendor || 'ADMIN'}
                 userRole={userRole}
               />
             )}

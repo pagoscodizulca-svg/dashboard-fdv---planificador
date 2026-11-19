@@ -9,8 +9,20 @@ import {
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { AlkostoOrder, EstadoPedidoAlkosto, AlkostoOrderItem, ParsedOrdenCompraAlkosto } from '../types';
-import { getAuthHeaders } from './authService';
+import { getAuthHeaders, getStoredAuthIdentity } from './authService';
+import { canAccessAlkosto, ALKOSTO_ACCESS_DENIED_MESSAGE } from '../utils/alkostoPermissions';
 import { PRODUCTOS_CODIZULCA, matchProductoCodizulca, toSafeNumber, hasPrimaryNounConflict, isBrandOrPresentationToken } from './productosCodizulca';
+
+function assertClientAlkostoAuthorized(): void {
+  const stored = getStoredAuthIdentity();
+  if (stored && !canAccessAlkosto(stored)) {
+    const err = new Error(ALKOSTO_ACCESS_DENIED_MESSAGE);
+    (err as any).status = 403;
+    (err as any).statusCode = 403;
+    (err as any).code = 'ALKOSTO_FORBIDDEN';
+    throw err;
+  }
+}
 
 export const ALKOSTO_COLLECTION = 'alkosto_orders';
 const STORAGE_KEY = 'dashboard_fdv_alkosto_orders_cache';
@@ -80,6 +92,7 @@ export function detectCadenaFromTagOrName(value: string): 'ALKOSTO' | 'FAMILIA_C
 }
 
 export async function syncCadenasConfigToFirestore(): Promise<void> {
+  assertClientAlkostoAuthorized();
   try {
     const configDoc = {
       alkosto: SUCURSALES_ALKOSTO,
@@ -961,6 +974,11 @@ export function calcularSiguienteCorrelativo(pedidos: AlkostoOrder[]): string {
 }
 
 export function subscribeAlkostoOrders(callback: (orders: AlkostoOrder[]) => void): () => void {
+  const stored = getStoredAuthIdentity();
+  if (stored && !canAccessAlkosto(stored)) {
+    callback([]);
+    return () => {};
+  }
   // Emitir caché local de inmediato
   const cached = getLocalCache();
   callback(cached);
@@ -1041,6 +1059,7 @@ export async function saveAlkostoOrder(
   order: AlkostoOrder,
   options: { skipBackendSync?: boolean } = {}
 ): Promise<AlkostoOrder> {
+  assertClientAlkostoAuthorized();
   const current = getLocalCache();
 
   // Si aún no tiene correlativo, proponer uno local preliminar (el servidor asignará el definitivo atómicamente)
@@ -1222,6 +1241,7 @@ export function validarPedidoAlkostoAntesDeEnviar(
 export async function transmitirPedidoAlkosto(
   order: AlkostoOrder
 ): Promise<{ success: boolean; id: string; message: string; data?: any; attempts?: number }> {
+  assertClientAlkostoAuthorized();
   const validacion = validarPedidoAlkostoAntesDeEnviar(order);
   if (!validacion.valido || !validacion.pedidoSanitizado) {
     throw new Error(`Validación previa fallida: ${validacion.errores.join(' ')}`);
@@ -1547,6 +1567,7 @@ export async function enviarPedidoAlkostoTransaccional(
   indiceActual: number,
   totalLote: number
 ): Promise<AlkostoOrder> {
+  assertClientAlkostoAuthorized();
   const validacion = validarPedidoAlkostoAntesDeEnviar(pedidoInput);
   if (!validacion.valido || !validacion.pedidoSanitizado) {
     throw new Error(`Validación previa fallida: ${validacion.errores.join(' ')}`);
@@ -1728,6 +1749,7 @@ export async function enviarLotePedidosAlkosto(
 }
 
 export async function updateAlkostoOrderStatus(id: string, nuevoEstado: EstadoPedidoAlkosto): Promise<void> {
+  assertClientAlkostoAuthorized();
   const current = getLocalCache();
   const idx = current.findIndex(o => o.id === id);
   const isEnviado = nuevoEstado === 'ENVIADO';
@@ -1775,6 +1797,7 @@ export async function updateAlkostoOrderStatus(id: string, nuevoEstado: EstadoPe
 }
 
 export async function updateAlkostoOrderObservacion(id: string, nuevaObservacion: string): Promise<void> {
+  assertClientAlkostoAuthorized();
   const current = getLocalCache();
   const idx = current.findIndex(o => o.id === id);
   if (idx >= 0) {
@@ -1795,6 +1818,7 @@ export async function updateAlkostoOrderObservacion(id: string, nuevaObservacion
 }
 
 export async function deleteAlkostoOrder(id: string): Promise<void> {
+  assertClientAlkostoAuthorized();
   const current = getLocalCache().filter(o => o.id !== id);
   setLocalCache(current);
 
@@ -1811,6 +1835,7 @@ export async function parseAlkostoOrderImage(
   mimeType: string = 'image/jpeg',
   fileName?: string
 ): Promise<ParsedOrdenCompraAlkosto> {
+  assertClientAlkostoAuthorized();
   const parserMod = await import('./alkostoOcParser');
   const readerResult = String(imageBase64 || '').trim();
   const base64Data = (readerResult.includes(',') ? readerResult.split(',')[1] : readerResult)

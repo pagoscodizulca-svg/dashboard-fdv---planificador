@@ -132,6 +132,7 @@ import {
   SyncAuditLogEntry
 } from './src/services/monthlySyncEngine';
 import { DEFAULT_VENDOR_BCRYPT_CREDENTIALS } from './src/services/defaultUserHashes';
+import { canAccessAlkosto, ALKOSTO_ACCESS_DENIED_MESSAGE } from './src/utils/alkostoPermissions';
 import { collection, doc, getDocs, setDoc, getDoc, deleteDoc } from 'firebase/firestore';
 import { createClient } from '@supabase/supabase-js';
 import jwt from 'jsonwebtoken';
@@ -195,6 +196,37 @@ export function requireSupervisorOrAdmin(req: any, res: any, next: any) {
     success: false,
     error: 'Acceso restringido: Solo Administradores o Supervisores pueden disparar la sincronización global.'
   });
+}
+
+export function requireAlkostoAccess(req: any, res: any, next: any) {
+  const user = req.user;
+  if (!user) {
+    return res.status(401).json({
+      success: false,
+      code: 'AUTH_REQUIRED',
+      error: 'Token de autenticación requerido'
+    });
+  }
+
+  const allowed = canAccessAlkosto({
+    username: user.username,
+    role: user.role,
+    vendorId: user.vendorId,
+    vendorKey: user.vendorKey
+  });
+
+  if (!allowed) {
+    console.warn(
+      `[SECURITY][ALKOSTO] 403 Forbidden - usuario="${String(user.username || 'unknown')}" vendorId="${String(user.vendorId ?? '')}" endpoint="${req.method} ${req.originalUrl}"`
+    );
+    return res.status(403).json({
+      success: false,
+      code: 'ALKOSTO_FORBIDDEN',
+      error: ALKOSTO_ACCESS_DENIED_MESSAGE
+    });
+  }
+
+  return next();
 }
 
 // Control de rate limiting en memoria para evitar abusos o costos excesivos en APIs de IA
@@ -1295,9 +1327,9 @@ async function startServer() {
   });
 
   // ==============================================================
-  // ENDPOINTS DE PEDIDOS ALKOSTO (CUENTAS CLAVE 2 - SAIRÚ VALLES)
+  // ENDPOINTS DE PEDIDOS ALKOSTO (RESTRINGIDOS A PERFILES AUTORIZADOS - SAIRU VALLES DENEGADA)
   // ==============================================================
-  app.get("/api/alkosto/pedidos", authenticateToken, async (req: any, res: any) => {
+  app.get("/api/alkosto/pedidos", authenticateToken, requireAlkostoAccess, async (req: any, res: any) => {
     try {
       if (supabase) {
         try {
@@ -2059,7 +2091,7 @@ async function startServer() {
     }
   }
 
-  app.post("/api/alkosto/pedidos", authenticateToken, async (req: any, res: any) => {
+  app.post("/api/alkosto/pedidos", authenticateToken, requireAlkostoAccess, async (req: any, res: any) => {
     try {
       const item = req.body;
       if (!item || (!item.sucursalNombre && !item.sucursal_cliente && !item.sucursalCodigo)) {
@@ -2085,7 +2117,7 @@ async function startServer() {
   });
 
   // Endpoint transaccional de lote secuencial (N pedidos de una Orden de Compra)
-  app.post("/api/alkosto/pedidos/lote", authenticateToken, async (req: any, res: any) => {
+  app.post("/api/alkosto/pedidos/lote", authenticateToken, requireAlkostoAccess, async (req: any, res: any) => {
     try {
       const pedidosInput = Array.isArray(req.body?.pedidos) ? req.body.pedidos : Array.isArray(req.body) ? req.body : [];
       if (pedidosInput.length === 0) {
@@ -2123,7 +2155,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/alkosto/pedidos/transmitir", authenticateToken, async (req: any, res: any) => {
+  app.post("/api/alkosto/pedidos/transmitir", authenticateToken, requireAlkostoAccess, async (req: any, res: any) => {
     try {
       const item = req.body;
       if (!item || (!item.id && !item.numeroPedido && !item.sucursalNombre && !item.sucursal_cliente)) {
@@ -2150,7 +2182,7 @@ async function startServer() {
     }
   });
 
-  app.put("/api/alkosto/pedidos/:id", authenticateToken, async (req: any, res: any) => {
+  app.put("/api/alkosto/pedidos/:id", authenticateToken, requireAlkostoAccess, async (req: any, res: any) => {
     try {
       const { id } = req.params;
       const updates = req.body;
@@ -2177,7 +2209,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/alkosto/pedidos/:id", authenticateToken, async (req: any, res: any) => {
+  app.delete("/api/alkosto/pedidos/:id", authenticateToken, requireAlkostoAccess, async (req: any, res: any) => {
     try {
       const { id } = req.params;
       await deleteDoc(doc(db, 'alkosto_orders', id)).catch(() => {});
@@ -2384,9 +2416,8 @@ async function startServer() {
   }
 
   // LECTOR OCR INTELIGENTE Y DETERMINISTA DE ÓRDENES DE COMPRA ALKOSTO Y FAMILIA CENTER
-  // Nota: Se utiliza rateLimiter sin bloqueo por JWT expirado (igual que /api/cadenas/sucursales)
-  // para evitar que una sesión antigua en caché impida procesar la Orden de Compra en campo.
-  app.post("/api/alkosto/ocr-orden", rateLimiter(10 * 60000, 30, 'OCR Orden Alkosto'), async (req: any, res: any) => {
+  // Protegido con JWT + política de autorización Alkosto (403 Forbidden para perfiles no autorizados / Sairu Valles)
+  app.post("/api/alkosto/ocr-orden", authenticateToken, requireAlkostoAccess, rateLimiter(10 * 60000, 30, 'OCR Orden Alkosto'), async (req: any, res: any) => {
     req.setTimeout?.(120000);
     res.setTimeout?.(120000);
     let currentStage: AlkostoOcrStage = "1-Archivo";
@@ -2729,7 +2760,7 @@ async function startServer() {
     }
   };
 
-  app.get("/api/cadenas/sucursales", async (req, res) => {
+  app.get("/api/cadenas/sucursales", authenticateToken, requireAlkostoAccess, async (req, res) => {
     try {
       res.json({
         success: true,
@@ -2740,7 +2771,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/cadenas/sincronizar", async (req, res) => {
+  app.post("/api/cadenas/sincronizar", authenticateToken, requireAlkostoAccess, async (req, res) => {
     try {
       await setDoc(doc(db, 'cadenas_config', 'abreviaturas'), {
         ...ABREVIATURAS_CONFIG,

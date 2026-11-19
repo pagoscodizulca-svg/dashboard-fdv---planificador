@@ -22,9 +22,9 @@ service cloud.firestore {
       allow write: if isAuthenticated();
     }
 
-    // Reglas para Pedidos Alkosto y Familia Center
+    // Reglas para Pedidos Alkosto y Familia Center (restringido: no lectura pública anónima)
     match /alkosto_orders/{orderId} {
-      allow read: if true;
+      allow read: if isAuthenticated();
       allow create: if isAuthenticated()
         && request.resource.data.keys().hasAll(['sucursalCodigo', 'fechaPedido', 'estado']);
       allow update: if isAuthenticated();
@@ -33,7 +33,7 @@ service cloud.firestore {
 
     // Reglas para Configuración de Sucursales y Cadenas
     match /cadenas_config/{configId} {
-      allow read: if true;
+      allow read: if isAuthenticated();
       allow write: if isAuthenticated();
     }
 

@@ -13,7 +13,7 @@ describe('Integration: API Server Routes & Authentication Flow', () => {
     let found = false;
     for (const port of [3005]) {
       try {
-        const res = await fetch(`http://localhost:${port}/api/cadenas/sucursales`);
+        const res = await fetch(`http://localhost:${port}/api/health`);
         if (res.ok && (res.headers.get('content-type') || '').includes('application/json')) {
           baseUrl = `http://localhost:${port}`;
           found = true;
@@ -152,6 +152,60 @@ describe('Integration: API Server Routes & Authentication Flow', () => {
     });
   });
 
+  describe('Retired Enrutador Module & Alkosto Least-Privilege Security (Sairu Valles 403 vs Authorized ADMIN 200)', () => {
+    it('GET/POST /api/rutero* should return 410 Gone after Enrutador removal', async () => {
+      const [getRes, postRes] = await Promise.all([
+        fetch(`${baseUrl}/api/rutero`, { headers: { Authorization: `Bearer ${adminToken}` } }),
+        fetch(`${baseUrl}/api/rutero/visitas`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+          body: JSON.stringify({})
+        })
+      ]);
+      expect(getRes.status).toBe(410);
+      expect(postRes.status).toBe(410);
+      const getBody = await getRes.json();
+      expect(getBody.code).toBe('MODULE_RETIRED');
+    });
+
+    it('should return 403 Forbidden for SAIRU VALLES across ALL Alkosto and cadenas endpoints', async () => {
+      const sairuHeaders = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${vendorToken}`
+      };
+
+      const responses = await Promise.all([
+        fetch(`${baseUrl}/api/alkosto/pedidos`, { headers: sairuHeaders }),
+        fetch(`${baseUrl}/api/alkosto/pedidos`, { method: 'POST', headers: sairuHeaders, body: JSON.stringify({ sucursalNombre: 'Alkosto 1' }) }),
+        fetch(`${baseUrl}/api/alkosto/pedidos/lote`, { method: 'POST', headers: sairuHeaders, body: JSON.stringify({ pedidos: [] }) }),
+        fetch(`${baseUrl}/api/alkosto/pedidos/transmitir`, { method: 'POST', headers: sairuHeaders, body: JSON.stringify({ id: 'test-blocked' }) }),
+        fetch(`${baseUrl}/api/alkosto/pedidos/test-blocked`, { method: 'PUT', headers: sairuHeaders, body: JSON.stringify({ status: 'PENDIENTE' }) }),
+        fetch(`${baseUrl}/api/alkosto/pedidos/test-blocked`, { method: 'DELETE', headers: sairuHeaders }),
+        fetch(`${baseUrl}/api/alkosto/ocr-orden`, { method: 'POST', headers: sairuHeaders, body: JSON.stringify({}) }),
+        fetch(`${baseUrl}/api/cadenas/sucursales`, { headers: sairuHeaders }),
+        fetch(`${baseUrl}/api/cadenas/sincronizar`, { method: 'POST', headers: sairuHeaders })
+      ]);
+
+      for (const res of responses) {
+        expect(res.status).toBe(403);
+        const body = await res.json();
+        expect(body.success).toBe(false);
+        expect(body.code).toBe('ALKOSTO_FORBIDDEN');
+      }
+    });
+
+    it('should allow authorized ADMIN profile to read /api/alkosto/pedidos and /api/cadenas/sucursales', async () => {
+      const [ordersRes, cadenasRes] = await Promise.all([
+        fetch(`${baseUrl}/api/alkosto/pedidos`, { headers: { Authorization: `Bearer ${adminToken}` } }),
+        fetch(`${baseUrl}/api/cadenas/sucursales`, { headers: { Authorization: `Bearer ${adminToken}` } })
+      ]);
+      expect(ordersRes.status).toBe(200);
+      expect(cadenasRes.status).toBe(200);
+      const cadenasBody = await cadenasRes.json();
+      expect(cadenasBody.success).toBe(true);
+    });
+  });
+
   describe('POST /api/alkosto/pedidos/transmitir', () => {
     it('should return 401 when called without authentication token', async () => {
       const res = await fetch(`${baseUrl}/api/alkosto/pedidos/transmitir`, {
@@ -162,12 +216,12 @@ describe('Integration: API Server Routes & Authentication Flow', () => {
       expect(res.status).toBe(401);
     });
 
-    it('should return 400 when order payload is missing or invalid', async () => {
+    it('should return 400 when order payload is missing or invalid (authorized ADMIN)', async () => {
       const res = await fetch(`${baseUrl}/api/alkosto/pedidos/transmitir`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${vendorToken}`
+          Authorization: `Bearer ${adminToken}`
         },
         body: JSON.stringify({})
       });
@@ -177,13 +231,13 @@ describe('Integration: API Server Routes & Authentication Flow', () => {
       expect(data.error).toContain('Datos de pedido requeridos');
     });
 
-    it('should return 400 when order has zero valid products with quantity > 0', async () => {
+    it('should return 400 when order has zero valid products with quantity > 0 (authorized ADMIN)', async () => {
       const emptyItemsOrder = {
         id: `test-int-empty-${Date.now()}`,
         numeroPedido: '9999',
         sucursalCodigo: '7498',
         sucursalNombre: 'Alkosto 1 san Felipe',
-        vendedora: 'Sairu Valles',
+        vendedora: 'ADMIN',
         items: [
           {
             sku: '1496',
@@ -199,7 +253,7 @@ describe('Integration: API Server Routes & Authentication Flow', () => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${vendorToken}`
+          Authorization: `Bearer ${adminToken}`
         },
         body: JSON.stringify(emptyItemsOrder)
       });
@@ -209,7 +263,7 @@ describe('Integration: API Server Routes & Authentication Flow', () => {
       expect(data.error).toMatch(/Validación previa/i);
     });
 
-    it('should successfully homologate, confirm real DB id, enforce idempotency and clean up test order', async () => {
+    it('should successfully homologate, confirm real DB id, enforce idempotency and clean up test order (authorized ADMIN)', async () => {
       const testId = `test-int-${Date.now()}`;
       const testOrder = {
         id: testId,
@@ -254,7 +308,7 @@ describe('Integration: API Server Routes & Authentication Flow', () => {
             headers: {
               'Content-Type': 'application/json',
               'X-Idempotency-Key': testId,
-              Authorization: `Bearer ${vendorToken}`
+              Authorization: `Bearer ${adminToken}`
             },
             body: JSON.stringify(testOrder)
           }),
@@ -263,7 +317,7 @@ describe('Integration: API Server Routes & Authentication Flow', () => {
             headers: {
               'Content-Type': 'application/json',
               'X-Idempotency-Key': testId,
-              Authorization: `Bearer ${vendorToken}`
+              Authorization: `Bearer ${adminToken}`
             },
             body: JSON.stringify(testOrder)
           })
@@ -291,7 +345,7 @@ describe('Integration: API Server Routes & Authentication Flow', () => {
         // Limpiar el pedido de prueba de las bases de datos local y Sala de Espera
         await fetch(`${baseUrl}/api/alkosto/pedidos/${encodeURIComponent(testId)}`, {
           method: 'DELETE',
-          headers: { Authorization: `Bearer ${vendorToken}` }
+          headers: { Authorization: `Bearer ${adminToken}` }
         }).catch(() => {});
       }
     });
@@ -314,19 +368,28 @@ describe('Integration: API Server Routes & Authentication Flow', () => {
       return Buffer.concat([header, compressed, footer]).toString('base64');
     }
 
-    it('should return 400 when imageBase64 is missing', async () => {
+    it('should return 401 when unauthenticated', async () => {
+      const res = await fetch(`${baseUrl}/api/alkosto/ocr-orden`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      expect(res.status).toBe(401);
+    });
+
+    it('should return 400 when imageBase64 is missing (authorized ADMIN)', async () => {
       const res = await fetch(`${baseUrl}/api/alkosto/ocr-orden`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${vendorToken}`
+          Authorization: `Bearer ${adminToken}`
         },
         body: JSON.stringify({})
       });
       expect(res.status).toBe(400);
     });
 
-    it('should extract 100% exact structured JSON (ordenNro, SKUs, unidades CJ/UND/KG y tiendas) from a real OC document', async () => {
+    it('should extract 100% exact structured JSON (ordenNro, SKUs, unidades CJ/UND/KG y tiendas) from a real OC document (authorized ADMIN)', async () => {
       const ocLines = [
         'ALKOSTO DONDE COMPRAR ES GANAR, C.A. - SEDE: AKOP',
         'RIF: J-413243580',
@@ -352,7 +415,7 @@ describe('Integration: API Server Routes & Authentication Flow', () => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${vendorToken}`
+          Authorization: `Bearer ${adminToken}`
         },
         body: JSON.stringify({
           imageBase64: pdfBase64,
