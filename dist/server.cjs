@@ -10009,6 +10009,11 @@ var cachedWorkbook = null;
 var lastWorkbookSha256 = "";
 var lastFetchTime = 0;
 var CACHE_TTL = 3e4;
+var SHEETS_AUTO_SYNC_INTERVAL_MS = (() => {
+  const parsed = Number(process.env.SHEETS_SYNC_INTERVAL_MS);
+  if (Number.isFinite(parsed) && parsed >= 3e4) return Math.round(parsed);
+  return 6e4;
+})();
 var lastSuccessfulSheetSyncAt = "";
 var lastSheetSource = "memory";
 var lastSheetMetrics = {};
@@ -13339,7 +13344,7 @@ async function startServer() {
   let lastActivacionParsedTime = 0;
   let cachedMetasParsed = null;
   let lastMetasParsedTime = 0;
-  const PARSED_DATA_TTL = 6e4;
+  const PARSED_DATA_TTL = 5e4;
   app2.get("/api/usuarios", (_req, res) => {
     return res.status(403).json({
       success: false,
@@ -13831,6 +13836,7 @@ async function startServer() {
         const periodo = metasPeriodoActual();
         const prevHash = lastSyncedSha256ByPeriod.get(periodo);
         if (!forceRebuild && prevHash && lastWorkbookSha256 && prevHash === lastWorkbookSha256 && cachedVolumenParsed && cachedActivacionParsed && cachedMetasParsed) {
+          lastFullSheetsSyncCompletedAt = Date.now();
           return {
             status: "SKIPPED_UNCHANGED",
             countVolumen: cachedVolumenParsed.length,
@@ -13889,6 +13895,7 @@ async function startServer() {
       periodo: metasPeriodoActual(),
       lastSyncAt: lastSuccessfulSheetSyncAt || null,
       source: lastSheetSource,
+      syncIntervalSeconds: Math.round(SHEETS_AUTO_SYNC_INTERVAL_MS / 1e3),
       metrics: lastSheetMetrics,
       dataQuality: lastSheetDataQuality,
       warningsCount: lastSheetWarnings.length,
@@ -15428,6 +15435,7 @@ async function startServer() {
   const tryListen = (portToTry) => {
     const serverInstance = app2.listen(portToTry, "0.0.0.0", () => {
       console.log(`Server running on port ${portToTry}`);
+      let autoSyncTimer = null;
       const runAutoSync = async () => {
         try {
           const res = await runCoalescedSheetsSync(false, "CRON");
@@ -15436,11 +15444,17 @@ async function startServer() {
           }
         } catch (err) {
           console.warn("[SYNC AUTO] Error en sincronizaci\xF3n peri\xF3dica desde Google Sheet:", err?.message);
+        } finally {
+          autoSyncTimer = setTimeout(runAutoSync, SHEETS_AUTO_SYNC_INTERVAL_MS);
+          if (typeof autoSyncTimer?.unref === "function") {
+            autoSyncTimer.unref();
+          }
         }
       };
-      setTimeout(runAutoSync, 3e3);
-      const jitterMs = Math.floor((Math.random() * 30 - 15) * 1e3);
-      setInterval(runAutoSync, 5 * 60 * 1e3 + jitterMs);
+      autoSyncTimer = setTimeout(runAutoSync, 3e3);
+      if (typeof autoSyncTimer?.unref === "function") {
+        autoSyncTimer.unref();
+      }
     });
     serverInstance.on("error", (err) => {
       if (err.code === "EADDRINUSE") {
