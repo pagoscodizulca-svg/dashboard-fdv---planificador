@@ -1,6 +1,7 @@
-import React, { useEffect, useState, useMemo, useCallback, Suspense, lazy } from 'react';
+import React, { useEffect, useState, useMemo, useCallback, useRef, Suspense, lazy } from 'react';
 import { Role, VolumenData, ActivacionData } from './types';
 import {
+  DEFAULT_SHEETS_CACHE_TTL_MS,
   fetchVolumenData,
   fetchActivacionData,
   fetchMetasActivacion,
@@ -353,6 +354,8 @@ export default function App() {
     return () => window.removeEventListener('fdv-sheets-sync-meta', onSyncMeta);
   }, []);
 
+  const loadAbortRef = useRef<AbortController | null>(null);
+
   const loadData = useCallback(async (force = false, showLoader = false) => {
     if (!localStorage.getItem('dashboard_fdv_token')) {
       setLoading(false);
@@ -360,14 +363,21 @@ export default function App() {
       return;
     }
 
+    // Cancelar cualquier petición previa en vuelo para evitar condiciones de carrera
+    if (loadAbortRef.current) {
+      loadAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    loadAbortRef.current = controller;
+
     const targetVendor = userRole === 'ADMIN'
       ? undefined
       : userRole === 'SUPERVISOR'
       ? `SUPERVISOR:${loggedInVendor}`
       : (loggedInVendor || undefined);
 
-    // Estrategia Stale-While-Revalidate (SWR):
-    // 1. Pintar al instante desde caché local (0 ms) para que el vendedor trabaje sin espera
+    // Estrategia Stale-While-Revalidate (SWR) con TTL real de sesión:
+    // 1. Pintar al instante desde caché vigente (0 ms) para que el vendedor trabaje sin espera
     const swrSnapshot = getCachedSheetsSnapshot(targetVendor);
     if (swrSnapshot.hasCache) {
       setVolumenData((prev) => (prev.length === 0 ? swrSnapshot.volumen : prev));
@@ -380,26 +390,37 @@ export default function App() {
       setLoading(true);
     }
 
-    // 2. Revalidar en segundo plano contra Google Sheets / Servidor y refrescar vista apenas lleguen cambios
+    // 2. Revalidar contra Google Sheets / Servidor con deduplicación in-flight y AbortSignal
     setIsSyncing(true);
     try {
       const [vol, act, metas] = await Promise.all([
-        fetchVolumenData(force, targetVendor),
-        fetchActivacionData(force, targetVendor),
-        fetchMetasActivacion(force, targetVendor)
+        fetchVolumenData({ forceRefresh: force, vendorId: targetVendor, signal: controller.signal }),
+        fetchActivacionData({ forceRefresh: force, vendorId: targetVendor, signal: controller.signal }),
+        fetchMetasActivacion({ forceRefresh: force, vendorId: targetVendor, signal: controller.signal })
       ]);
+      if (controller.signal.aborted) return;
       setVolumenData(vol);
       setActivacionData(act);
       setMetasActivacion(metas);
       const latestMeta = getLastSyncMetadata();
       setLastSyncAt(latestMeta.lastSyncAt || new Date().toISOString());
-    } catch (err) {
-      console.error("Error al sincronizar datos automáticamente", err);
+    } catch (err: any) {
+      if (err?.name !== 'AbortError') {
+        console.warn("Error al sincronizar datos automáticamente:", err?.message || 'error');
+      }
     } finally {
-      setLoading(false);
-      setIsSyncing(false);
+      if (loadAbortRef.current === controller) {
+        setLoading(false);
+        setIsSyncing(false);
+      }
     }
   }, [userRole, loggedInVendor]);
+
+  useEffect(() => {
+    return () => {
+      loadAbortRef.current?.abort();
+    };
+  }, []);
 
   // Failsafe: nunca permitir que un loader bloquee la pantalla por más de 3 segundos
   useEffect(() => {
@@ -442,10 +463,11 @@ export default function App() {
     (window as any).refreshData = handleManualSync;
   }, [handleManualSync]);
 
-  // Cargar datos al estar autenticado y mantener sincronizado cada 60s
+  // Cargar datos al estar autenticado y mantener sincronizado con el TTL de 5 minutos
   useEffect(() => {
     if (!isLoggedIn) return;
-    fetch('/api/catalog/vendors')
+    const catalogController = new AbortController();
+    fetch('/api/catalog/vendors', { signal: catalogController.signal })
       .then((res) => (res.ok ? res.json() : null))
       .then((cat) => {
         if (cat && Array.isArray(cat.vendedores)) {
@@ -454,7 +476,7 @@ export default function App() {
         if (cat?.syncedAt) {
           const prevSync = localStorage.getItem('fdv_master_catalog_sync_version');
           if (prevSync && prevSync !== cat.syncedAt) {
-            clearSheetsCache();
+            clearSheetsCache(true);
             loadData(true, false);
           }
           localStorage.setItem('fdv_master_catalog_sync_version', String(cat.syncedAt));
@@ -465,33 +487,38 @@ export default function App() {
     loadData(false, false);
     const syncInterval = setInterval(() => {
       loadData(false, false);
-    }, 60000);
-    return () => clearInterval(syncInterval);
+    }, DEFAULT_SHEETS_CACHE_TTL_MS);
+    return () => {
+      catalogController.abort();
+      clearInterval(syncInterval);
+    };
   }, [isLoggedIn, loadData]);
 
-  // Suscripción degustaciones y sesión Supabase
+  // Suscripción a degustaciones ESTRICTAMENTE tras iniciar sesión (evita llamadas no autenticadas en pantalla de login)
   useEffect(() => {
+    if (!isLoggedIn) {
+      setDegustacionesList([]);
+      return;
+    }
     const unsubscribeDeg = subscribeDegustaciones((data) => {
       setDegustacionesList(data);
     });
-
-    if (hasValidSupabaseConfig) {
-      supabase.auth.getSession().then(({ data: { session } }) => {
-        setSession(session);
-      }).catch(err => {
-        console.error("Supabase session error:", err);
-      });
-      const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-        setSession(session);
-      });
-      return () => {
-        subscription?.unsubscribe();
-        unsubscribeDeg();
-      };
-    }
-
     return () => {
       unsubscribeDeg();
+    };
+  }, [isLoggedIn]);
+
+  // Sesión de autenticación Supabase
+  useEffect(() => {
+    if (!hasValidSupabaseConfig) return;
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+    }).catch(() => {});
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
+    return () => {
+      subscription?.unsubscribe();
     };
   }, []);
 
@@ -637,9 +664,14 @@ export default function App() {
       ];
 
       Object.values(SUPERVISOR_PROFILES).forEach(sup => {
+        const assignedNames = sup.supervisedVendors.map((vk) => VENDOR_PROFILES[vk]?.displayName || vk);
+        const summaryLabel =
+          assignedNames.length <= 3
+            ? assignedNames.join(', ')
+            : `${assignedNames.length} vendedores asignados`;
         adminOptions.push({
           value: `SUPERVISOR:${sup.canonicalUsername}`,
-          label: `👥 Supervisor: ${sup.displayName} (Ángel Navarro, Mariangel González, Víctor Campos)`
+          label: `👥 Supervisor: ${sup.displayName} (${summaryLabel})`
         });
       });
 
@@ -720,7 +752,9 @@ export default function App() {
       if (activeVendedorId.startsWith('SUPERVISOR:')) {
         const rawSup = activeVendedorId.replace('SUPERVISOR:', '');
         const supProf = getSupervisorProfile(rawSup);
-        return supProf ? `SUPERVISOR: ${supProf.displayName} (ZONA FALCÓN / PARAGUANÁ)` : rawSup;
+        return supProf
+          ? `SUPERVISOR: ${supProf.displayName} (${supProf.supervisedVendors.length} VENDEDORES)`
+          : rawSup;
       }
       if (activeVendedorId.startsWith('CONSOLIDATED:')) {
         const rawTarget = activeVendedorId.replace('CONSOLIDATED:', '');

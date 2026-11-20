@@ -123,6 +123,14 @@ import {
   SheetWarning
 } from './src/services/googleSheetsParser';
 import {
+  validateGoogleSheetsUrl,
+  isClientActiveInAnyFocusProduct
+} from './src/config/sheetsConfig';
+import {
+  parseSafeNumber,
+  type DataQualitySnapshot
+} from './src/utils/safeNumber';
+import {
   normalizeVendorKey,
   getCaracasYearMonth
 } from './src/utils/vendorKeyNormalizer';
@@ -261,6 +269,8 @@ let lastSheetSource: 'live_google_sheet' | 'local_backup' | 'supabase' | 'memory
 let lastSheetMetrics: Record<string, SheetTabMetrics> = {};
 let lastSheetWarnings: SheetWarning[] = [];
 let lastSheetAuditLogs: SyncAuditLogEntry[] = [];
+let lastSheetDataQuality: DataQualitySnapshot | null = null;
+let lastLiveProductMaps: Record<string, Map<string, number>> | null = null;
 const lastSyncedSha256ByPeriod = new Map<string, string>();
 let cachedLocalMasterSeed: MasterClientSeed[] | null = null;
 
@@ -302,12 +312,13 @@ function setNoCacheSyncHeaders(res: any, source?: string) {
 }
 
 async function fetchGoogleSheetWithRetry(url: string, maxAttempts = 3): Promise<ArrayBuffer> {
+  const safeUrl = validateGoogleSheetsUrl(url);
   let lastError: any = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15000);
     try {
-      const fetchRes = await fetch(url, {
+      const fetchRes = await fetch(safeUrl, {
         signal: controller.signal,
         headers: {
           'Cache-Control': 'no-cache, no-store, must-revalidate',
@@ -4215,18 +4226,25 @@ async function startServer() {
   app.get("/api/bcv-rate", handleBcvRateRequest);
   app.get("/api/tasa-bcv", handleBcvRateRequest);
 
-  app.get("/api/sheets-structure", async (req, res) => {
+  app.get("/api/sheets-structure", authenticateToken, requireAdmin, async (req: any, res: any) => {
     try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-         return res.status(401).json({ error: "Missing or invalid Authorization header" });
+      const googleToken = String(req.headers['x-google-access-token'] || '').trim();
+      if (!googleToken) {
+        return res.status(400).json({ error: "Header x-google-access-token requerido para inspección de Google Sheets API." });
       }
-      const token = authHeader.split(' ')[1];
       const spreadsheetId = getGoogleSheetId();
+      if (!spreadsheetId) {
+        return res.status(400).json({ error: "GOOGLE_SHEET_ID no está configurado o es inválido." });
+      }
 
-      const metaRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}`, {
+      const metaUrl = new URL(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}`);
+      if (metaUrl.origin !== 'https://sheets.googleapis.com') {
+        return res.status(403).json({ error: "URL fuera de allowlist de Google Sheets API." });
+      }
+
+      const metaRes = await fetch(metaUrl.toString(), {
         headers: {
-          'Authorization': `Bearer ${token}`
+          'Authorization': `Bearer ${googleToken}`
         }
       });
 
@@ -4235,32 +4253,37 @@ async function startServer() {
       }
 
       const metaData = await metaRes.json();
-      const sheets = metaData.sheets.map((s: any) => ({
-         title: s.properties.title,
-         sheetId: s.properties.sheetId
-      }));
+      const sheets = Array.isArray(metaData?.sheets)
+        ? metaData.sheets.map((s: any) => ({
+            title: String(s?.properties?.title || ''),
+            sheetId: s?.properties?.sheetId
+          }))
+        : [];
 
-      // Ahora que tenemos los nombres, podemos obtener el contenido de cada hoja (primeras filas)
-      // Para saber qué hay en cada una
-      const result: Record<string, any> = { sheets: sheets };
-      
+      const summary: Array<{ title: string; sheetId: any; previewRowsCount: number; headers: unknown[] }> = [];
       for (const sheet of sheets) {
-         const dataRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/'${sheet.title}'!A1:Z100`, {
-            headers: { 'Authorization': `Bearer ${token}` }
-         });
-         if (dataRes.ok) {
-            const data = await dataRes.json();
-            result[sheet.title] = data.values || [];
-         }
+        const rangeEncoded = encodeURIComponent(`'${sheet.title.replace(/'/g, "''")}'!A1:Z5`);
+        const valuesUrl = new URL(
+          `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${rangeEncoded}`
+        );
+        const dataRes = await fetch(valuesUrl.toString(), {
+          headers: { 'Authorization': `Bearer ${googleToken}` }
+        });
+        if (dataRes.ok) {
+          const data = await dataRes.json();
+          const vals = Array.isArray(data?.values) ? data.values : [];
+          summary.push({
+            title: sheet.title,
+            sheetId: sheet.sheetId,
+            previewRowsCount: vals.length,
+            headers: Array.isArray(vals[0]) ? vals[0] : []
+          });
+        }
       }
 
-      // IMPORTANTE: Guardarlo en disco local para que el agente (yo) pueda leerlo
-      fs.writeFileSync(path.join(process.cwd(), 'sheets_dump.json'), JSON.stringify(result, null, 2));
-
-      return res.json({ success: true, message: "Data guardada en sheets_dump.json" });
-
+      return res.json({ success: true, sheets: summary });
     } catch (err: any) {
-      console.error("Structure lookup error:", err);
+      console.error("Structure lookup error:", err?.message || 'unknown');
       return res.status(500).json({ error: "Internal server error" });
     }
   });
@@ -4658,6 +4681,8 @@ async function startServer() {
     lastSheetMetrics = parsed.metrics;
     lastSheetWarnings = parsed.warnings;
     lastSheetAuditLogs = parsed.auditLogs;
+    lastSheetDataQuality = parsed.dataQuality || null;
+    lastLiveProductMaps = parsed.productMaps;
 
     if (parsed.warnings.length > 0) {
       console.warn(
@@ -4934,6 +4959,7 @@ async function startServer() {
       lastSyncAt: lastSuccessfulSheetSyncAt || null,
       source: lastSheetSource,
       metrics: lastSheetMetrics,
+      dataQuality: lastSheetDataQuality,
       warningsCount: lastSheetWarnings.length,
       auditLogsCount: lastSheetAuditLogs.length,
       ...(isPrivileged
@@ -5919,22 +5945,33 @@ async function startServer() {
     } catch (e) { histFail(res, e); }
   });
 
-  const hydrateParsedCachesFromWorkbookFallback = async () => {
+  const hydrateParsedCachesFromWorkbookFallback = async (
+    scope: 'all' | 'volumen' | 'activacion' | 'metas' = 'all'
+  ) => {
     const workbook = await getWorkbook(false);
     const XLSX = await import('xlsx');
     const parsed = parseWorkbookFull(XLSX, workbook, {
       periodo: metasPeriodoActual(),
       masterClients: loadLocalMasterClientSeed()
     });
-    cachedVolumenParsed = parsed.volumenApiRows;
-    lastVolumenParsedTime = Date.now();
-    cachedActivacionParsed = parsed.activacionApiRows;
-    lastActivacionParsedTime = Date.now();
-    cachedMetasParsed = parsed.metasApiRows;
-    lastMetasParsedTime = Date.now();
+    const updateAll = scope === 'all' || lastSheetSource === 'live_google_sheet';
+    if (updateAll || scope === 'volumen') {
+      cachedVolumenParsed = parsed.volumenApiRows;
+      lastVolumenParsedTime = Date.now();
+    }
+    if (updateAll || scope === 'activacion') {
+      cachedActivacionParsed = parsed.activacionApiRows;
+      lastActivacionParsedTime = Date.now();
+    }
+    if (updateAll || scope === 'metas') {
+      cachedMetasParsed = parsed.metasApiRows;
+      lastMetasParsedTime = Date.now();
+    }
     lastSheetMetrics = parsed.metrics;
     lastSheetWarnings = parsed.warnings;
     lastSheetAuditLogs = parsed.auditLogs;
+    lastSheetDataQuality = parsed.dataQuality || null;
+    lastLiveProductMaps = parsed.productMaps;
     return parsed;
   };
 
@@ -6049,18 +6086,18 @@ async function startServer() {
           }
           if (Array.isArray(supaRows) && supaRows.length > 0) {
             const mapped = supaRows.map(r => {
-              const metaKg = Number(r.meta_kg) || 0;
+              const metaKg = parseSafeNumber(r.meta_kg, 0);
               const ventaNetaKg = r.venta_neta_kg !== undefined && r.venta_neta_kg !== null
-                ? Number(r.venta_neta_kg)
-                : Number(r.ejecutado_kg) || 0;
+                ? parseSafeNumber(r.venta_neta_kg, 0)
+                : parseSafeNumber(r.ejecutado_kg, 0);
               const ventaBrutaKg = r.venta_bruta_kg !== undefined && r.venta_bruta_kg !== null
-                ? Number(r.venta_bruta_kg)
+                ? parseSafeNumber(r.venta_bruta_kg, 0)
                 : (ventaNetaKg > 0 ? ventaNetaKg : 0);
               const devolucionesKg = r.devoluciones_kg !== undefined && r.devoluciones_kg !== null
-                ? Number(r.devoluciones_kg)
+                ? parseSafeNumber(r.devoluciones_kg, 0)
                 : (ventaNetaKg < 0 ? ventaNetaKg : 0);
               const pctCumpl = r.porcentaje_cumplimiento !== undefined && r.porcentaje_cumplimiento !== null
-                ? Number(r.porcentaje_cumplimiento)
+                ? parseSafeNumber(r.porcentaje_cumplimiento, Number.NaN)
                 : null;
               return {
                 id: String(r.id),
@@ -6080,7 +6117,7 @@ async function startServer() {
                 ventaBrutaKg,
                 devolucionesKg,
                 ventaNetaKg,
-                porcentajeCumplimiento: pctCumpl,
+                porcentajeCumplimiento: pctCumpl !== null && Number.isFinite(pctCumpl) ? pctCumpl : null,
                 zona: r.zona || 'General'
               };
             });
@@ -6092,7 +6129,7 @@ async function startServer() {
         } catch (e) {}
       }
 
-      const parsed = await hydrateParsedCachesFromWorkbookFallback();
+      const parsed = await hydrateParsedCachesFromWorkbookFallback('volumen');
       setNoCacheSyncHeaders(res);
       res.json(filterByVendor(parsed.volumenApiRows));
     } catch (err: any) {
@@ -6132,13 +6169,18 @@ async function startServer() {
         return res.json(filterByVendor(cachedActivacionParsed));
       }
 
-      if (supabase && (await activacionTieneColumnasNuevas())) {
+      if (supabase) {
         try {
+          const colsNuevasOk = await activacionTieneColumnasNuevas();
           let supaRows: any[] = [];
           let from = 0;
           const pageSize = 1000;
           while (from < 10000) {
-            const { data, error } = await supabase.from('activacion_clientes').select('*').range(from, from + pageSize - 1);
+            const { data, error } = await supabase
+              .from('activacion_clientes')
+              .select('*')
+              .order('id', { ascending: true })
+              .range(from, from + pageSize - 1);
             if (error || !data || data.length === 0) break;
             supaRows.push(...data);
             if (data.length < pageSize) break;
@@ -6157,33 +6199,56 @@ async function startServer() {
               }
               const cid = String(r.cliente_codigo || '').replace(/#\d+$/, '').trim();
               if (!cid) continue;
+              const canonicalCid = cid.replace(/^0+/, '') || '0';
               const vNorm = normalizeVendorName(r.vendedor_nombre || r.vendedor_id);
+              const vKey = r.vendedor_key || normalizeVendorKey(r.vendedor_nombre || r.vendedor_id);
               const compKey = `${vNorm}::${cid}`;
-              const hasAceite = Boolean(r.has_aceite) || (Number(r.cajas_aceite) || 0) > 0;
-              const hasAzucar = Boolean(r.has_azucar) || (Number(r.cajas_azucar) || 0) > 0;
-              const hasPollo = Boolean(r.has_pollo) || (Number(r.cajas_pollo) || 0) > 0;
-              const hasAsturias = Boolean(r.has_estandar_asturias) || (Number(r.cajas_estandar_asturias) || 0) > 0;
-              const hasSalpicao = Boolean(r.has_mortadela_salpicao) || (Number(r.cajas_mortadela_salpicao) || 0) > 0;
-                const hasLeche = Boolean(r.has_leche_vencampo) || (Number(r.cajas_leche_vencampo) || 0) > 0;
-                const hasMortAst = Boolean(r.has_mortadela_asturias) || (Number(r.cajas_mortadela_asturias) || 0) > 0;
-                const hasSalpNuevo = Boolean(r.has_salpicao) || (Number(r.cajas_salpicao) || 0) > 0;
+
+              const liveLecheCajas = !colsNuevasOk && lastLiveProductMaps?.LECHE_VENCAMPO
+                ? (lastLiveProductMaps.LECHE_VENCAMPO.get(canonicalCid) ?? lastLiveProductMaps.LECHE_VENCAMPO.get(cid) ?? 0)
+                : 0;
+              const liveMortAstCajas = !colsNuevasOk && lastLiveProductMaps?.MORTADELA_ASTURIAS
+                ? (lastLiveProductMaps.MORTADELA_ASTURIAS.get(canonicalCid) ?? lastLiveProductMaps.MORTADELA_ASTURIAS.get(cid) ?? 0)
+                : 0;
+              const liveSalpNuevoCajas = !colsNuevasOk && lastLiveProductMaps?.SALPICAO
+                ? (lastLiveProductMaps.SALPICAO.get(canonicalCid) ?? lastLiveProductMaps.SALPICAO.get(cid) ?? 0)
+                : 0;
+
+              const cAceite = parseSafeNumber(r.cajas_aceite, 0);
+              const cAzucar = parseSafeNumber(r.cajas_azucar, 0);
+              const cPollo = parseSafeNumber(r.cajas_pollo, 0);
+              const cAsturias = parseSafeNumber(r.cajas_estandar_asturias, 0);
+              const cSalpicao = parseSafeNumber(r.cajas_mortadela_salpicao, 0);
+              const cLeche = colsNuevasOk ? parseSafeNumber(r.cajas_leche_vencampo, 0) : liveLecheCajas;
+              const cMortAst = colsNuevasOk ? parseSafeNumber(r.cajas_mortadela_asturias, 0) : liveMortAstCajas;
+              const cSalpNuevo = colsNuevasOk ? parseSafeNumber(r.cajas_salpicao, 0) : liveSalpNuevoCajas;
+
+              const hasAceite = Boolean(r.has_aceite) || cAceite > 0;
+              const hasAzucar = Boolean(r.has_azucar) || cAzucar > 0;
+              const hasPollo = Boolean(r.has_pollo) || cPollo > 0;
+              const hasAsturias = Boolean(r.has_estandar_asturias) || cAsturias > 0;
+              const hasSalpicao = Boolean(r.has_mortadela_salpicao) || cSalpicao > 0;
+              const hasLeche = (colsNuevasOk && Boolean(r.has_leche_vencampo)) || cLeche > 0;
+              const hasMortAst = (colsNuevasOk && Boolean(r.has_mortadela_asturias)) || cMortAst > 0;
+              const hasSalpNuevo = (colsNuevasOk && Boolean(r.has_salpicao)) || cSalpNuevo > 0;
 
               if (!byClientMap.has(compKey)) {
-                byClientMap.set(compKey, {
+                const entry = {
                   id: cid,
                   cliente: r.cliente_nombre,
                   vendedorId: r.vendedor_id,
+                  vendedorKey: vKey,
                   vendedorNombre: r.vendedor_nombre,
-                  status: (hasAzucar || hasLeche || hasPollo || hasAsturias || hasSalpicao || r.status === 'ACTIVO') ? 'ACTIVO' : 'INACTIVO',
+                  status: 'INACTIVO' as 'ACTIVO' | 'INACTIVO',
                   cajas: {
-                    ACEITE: Number(r.cajas_aceite) || 0,
-                    AZUCAR: Number(r.cajas_azucar) || 0,
-                    POLLO: Number(r.cajas_pollo) || 0,
-                    ESTANDAR_ASTURIAS: Number(r.cajas_estandar_asturias) || 0,
-                    MORTADELA_SALPICAO: Number(r.cajas_mortadela_salpicao) || 0,
-                    LECHE_VENCAMPO: Number(r.cajas_leche_vencampo) || 0,
-                    MORTADELA_ASTURIAS: Number(r.cajas_mortadela_asturias) || 0,
-                    SALPICAO: Number(r.cajas_salpicao) || 0
+                    ACEITE: cAceite,
+                    AZUCAR: cAzucar,
+                    POLLO: cPollo,
+                    ESTANDAR_ASTURIAS: cAsturias,
+                    MORTADELA_SALPICAO: cSalpicao,
+                    LECHE_VENCAMPO: cLeche,
+                    MORTADELA_ASTURIAS: cMortAst,
+                    SALPICAO: cSalpNuevo
                   },
                   cats: {
                     ACEITE: hasAceite,
@@ -6198,7 +6263,9 @@ async function startServer() {
                     ENTERO: hasAsturias,
                     LIGEROS: hasSalpicao
                   }
-                });
+                };
+                entry.status = (isClientActiveInAnyFocusProduct(entry) || r.status === 'ACTIVO') ? 'ACTIVO' : 'INACTIVO';
+                byClientMap.set(compKey, entry);
               } else {
                 const prev = byClientMap.get(compKey);
                 prev.cats.ACEITE = prev.cats.ACEITE || hasAceite;
@@ -6212,15 +6279,15 @@ async function startServer() {
                 prev.cats.ARROZ = prev.cats.POLLO;
                 prev.cats.ENTERO = prev.cats.ESTANDAR_ASTURIAS;
                 prev.cats.LIGEROS = prev.cats.MORTADELA_SALPICAO;
-                prev.cajas.ACEITE = Math.max(prev.cajas.ACEITE, Number(r.cajas_aceite) || 0);
-                prev.cajas.AZUCAR = Math.max(prev.cajas.AZUCAR, Number(r.cajas_azucar) || 0);
-                prev.cajas.POLLO = Math.max(prev.cajas.POLLO, Number(r.cajas_pollo) || 0);
-                prev.cajas.ESTANDAR_ASTURIAS = Math.max(prev.cajas.ESTANDAR_ASTURIAS, Number(r.cajas_estandar_asturias) || 0);
-                prev.cajas.MORTADELA_SALPICAO = Math.max(prev.cajas.MORTADELA_SALPICAO, Number(r.cajas_mortadela_salpicao) || 0);
-                prev.cajas.LECHE_VENCAMPO = Math.max(prev.cajas.LECHE_VENCAMPO || 0, Number(r.cajas_leche_vencampo) || 0);
-                prev.cajas.MORTADELA_ASTURIAS = Math.max(prev.cajas.MORTADELA_ASTURIAS || 0, Number(r.cajas_mortadela_asturias) || 0);
-                prev.cajas.SALPICAO = Math.max(prev.cajas.SALPICAO || 0, Number(r.cajas_salpicao) || 0);
-                if (prev.cats.AZUCAR || prev.cats.LECHE_VENCAMPO || prev.cats.POLLO || prev.cats.ESTANDAR_ASTURIAS || prev.cats.MORTADELA_SALPICAO) {
+                prev.cajas.ACEITE = Math.max(prev.cajas.ACEITE, cAceite);
+                prev.cajas.AZUCAR = Math.max(prev.cajas.AZUCAR, cAzucar);
+                prev.cajas.POLLO = Math.max(prev.cajas.POLLO, cPollo);
+                prev.cajas.ESTANDAR_ASTURIAS = Math.max(prev.cajas.ESTANDAR_ASTURIAS, cAsturias);
+                prev.cajas.MORTADELA_SALPICAO = Math.max(prev.cajas.MORTADELA_SALPICAO, cSalpicao);
+                prev.cajas.LECHE_VENCAMPO = Math.max(prev.cajas.LECHE_VENCAMPO || 0, cLeche);
+                prev.cajas.MORTADELA_ASTURIAS = Math.max(prev.cajas.MORTADELA_ASTURIAS || 0, cMortAst);
+                prev.cajas.SALPICAO = Math.max(prev.cajas.SALPICAO || 0, cSalpNuevo);
+                if (isClientActiveInAnyFocusProduct(prev)) {
                   prev.status = 'ACTIVO';
                 }
               }
@@ -6234,7 +6301,7 @@ async function startServer() {
         } catch (e) {}
       }
 
-      const parsed = await hydrateParsedCachesFromWorkbookFallback();
+      const parsed = await hydrateParsedCachesFromWorkbookFallback('activacion');
       setNoCacheSyncHeaders(res);
       res.json(filterByVendor(parsed.activacionApiRows));
     } catch (err) {
@@ -6397,9 +6464,9 @@ async function startServer() {
               vendedorId: r.vendedor_id,
               vendedorKey: r.vendedor_key || normalizeVendorKey(r.vendedor_id),
               categoria: r.categoria,
-              cartera: Number(r.cartera) || 0,
-              meta: Number(r.meta) || 0,
-              activados: Number(r.activados) || 0
+              cartera: Math.round(parseSafeNumber(r.cartera, 0)),
+              meta: Math.round(parseSafeNumber(r.meta, 0)),
+              activados: Math.round(parseSafeNumber(r.activados, 0))
             }));
             cachedMetasParsed = mapped;
             lastMetasParsedTime = Date.now();
@@ -6409,7 +6476,7 @@ async function startServer() {
         } catch (e) {}
       }
 
-      const parsed = await hydrateParsedCachesFromWorkbookFallback();
+      const parsed = await hydrateParsedCachesFromWorkbookFallback('metas');
       setNoCacheSyncHeaders(res);
       res.json(filterByVendor(parsed.metasApiRows));
     } catch(err) {

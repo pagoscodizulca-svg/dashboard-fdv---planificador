@@ -1,13 +1,15 @@
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { VolumenData, ActivacionData } from '../types';
 import { getMesLaboralInfo } from '../utils/calendar';
-import { Search, Users, CalendarDays, Target, ShieldAlert, XCircle, CheckCircle2, TriangleAlert, User, LayoutList, FileText, Grip, Zap, Activity, CheckSquare, Square, X, Filter } from 'lucide-react';
+import { Search, Users, CalendarDays, Target, ShieldAlert, XCircle, CheckCircle2, TriangleAlert, User, LayoutList, FileText, Grip, Zap, Activity, CheckSquare, Square, X, Filter, ChevronLeft, ChevronRight } from 'lucide-react';
 import { RUBROS_ACTIVACION, RUBRO_LABEL, RubroCodigo, categoriaARubroCodigo } from '../lib/rubros';
 import { Rubro360Panel } from './Rubro360Panel';
 import { getRubroTheme } from './RubroDashboard360';
 import { toggleClienteRubro } from '../services/googleSheetsService';
+import { FOCUS_PRODUCT_ALIASES } from '../config/sheetsConfig';
+import { parseSafeNumber } from '../utils/safeNumber';
 
 const normSearch = (val: string) =>
   String(val || '')
@@ -48,8 +50,28 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
   const [rubroFilterMode, setRubroFilterMode] = useState<'ACTIVOS' | 'FALTANTES'>('ACTIVOS');
   const [statusFilter, setStatusFilter] = useState<'TODOS' | 'ACTIVOS' | 'FALTANTES' | 'FALTAN_RUBROS' | 'CINCO_RUBROS'>('TODOS');
   const [manualOverrides, setManualOverrides] = useState<ManualRubrosMap>(() => loadManualRubros());
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState<50 | 100 | 200>(50);
+  const [isMobileViewport, setIsMobileViewport] = useState<boolean>(() =>
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(max-width: 767px)').matches
+      : false
+  );
   const dashboard360Ref = useRef<HTMLDivElement | null>(null);
   const clientTableRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const mq = window.matchMedia('(max-width: 767px)');
+    const onChange = (ev: MediaQueryListEvent) => setIsMobileViewport(ev.matches);
+    setIsMobileViewport(mq.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchTerm, statusFilter, selectedRubros, rubroFilterMode, viewMode, activeVendedorId, pageSize]);
 
   const handleSelectMetricFilter = (
     nextStatus: 'TODOS' | 'ACTIVOS' | 'FALTANTES' | 'FALTAN_RUBROS' | 'CINCO_RUBROS',
@@ -128,11 +150,10 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
       const existing = clientMap.get(key);
       const rubros = existing ? existing.rubrosComprados : new Set<string>();
 
-      // Rubros activos del mes (src/lib/rubros.ts). `rubros` guarda códigos canónicos de rubro.
-      const aliasCats: Record<string, string[]> = { AZUCAR: ['AZÚCAR'], ESTANDAR_ASTURIAS: ['ENTERO'], SALPICAO: ['LIGEROS'] };
+      // Rubros activos del mes y alias unificados (src/config/sheetsConfig.ts)
       for (const r of RUBROS_ACTIVACION) {
-        const claves = [r, ...(aliasCats[r] || [])];
-        if (claves.some((k) => Boolean(a.cats?.[k])) || (Number(a.cajas?.[r]) || 0) > 0) rubros.add(r);
+        const claves = FOCUS_PRODUCT_ALIASES[r] || [r];
+        if (claves.some((k) => Boolean(a.cats?.[k])) || parseSafeNumber(a.cajas?.[r], 0) > 0) rubros.add(r);
       }
 
       // Aplicar activaciones manuales del vendedor si existen
@@ -144,11 +165,11 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
         }
       }
 
-      const isActivo = rubros.size > 0 || (!ov && a.status === 'ACTIVO' && Boolean(existing?.isActivo));
+      const isActivo = rubros.size > 0;
       clientMap.set(key, {
         id: a.id ? String(a.id).replace(/^[#\s]+/, '').trim() : key,
         name: a.cliente || existing?.name || '',
-        isActivo: rubros.size > 0,
+        isActivo,
         rubrosComprados: rubros
       });
     });
@@ -291,6 +312,35 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
         return true;
       });
   }, [clientList, searchTerm, viewMode, selectedRubros, rubroFilterMode, statusFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(displayedClients.length / pageSize));
+  const safePage = Math.min(currentPage, totalPages);
+  const pageStartIdx = (safePage - 1) * pageSize;
+  const pageEndIdx = Math.min(displayedClients.length, pageStartIdx + pageSize);
+
+  const paginatedClients = useMemo(
+    () => displayedClients.slice(pageStartIdx, pageEndIdx),
+    [displayedClients, pageStartIdx, pageEndIdx]
+  );
+
+  const displayedSummary = useMemo(() => {
+    let activosCount = 0;
+    let faltanCount = 0;
+    const byRubro: Record<string, number> = {};
+    for (const r of RUBROS_ACTIVACION) byRubro[r] = 0;
+    for (const c of displayedClients) {
+      if (c.cobertura > 0) activosCount++;
+      else faltanCount++;
+      for (const r of RUBROS_ACTIVACION) {
+        if (c.flags[r]) byRubro[r]++;
+      }
+    }
+    const pct = displayedClients.length > 0 ? (activosCount / displayedClients.length) * 100 : 0;
+    return { activosCount, faltanCount, byRubro, pct };
+  }, [displayedClients]);
+
+  const shouldRenderDesktopTable = viewMode !== 'tarjetas' && !isMobileViewport;
+  const shouldRenderCards = viewMode === 'tarjetas' || isMobileViewport;
   
   const generarPDF = () => {
     const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
@@ -1106,8 +1156,61 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
            </div>
          )}
 
-         {/* Desktop View: Table */}
-         {viewMode !== 'tarjetas' && (<div className="hidden md:block overflow-x-auto">
+         {/* Barra de paginación controlada (elimina congelamiento DOM con miles de clientes) */}
+         {displayedClients.length > 0 && (
+           <div className="px-4 py-2.5 bg-[#0f0f0f] border-b border-neutral-800 flex flex-wrap items-center justify-between gap-3 text-xs font-sans">
+             <div className="text-neutral-400">
+               Mostrando{' '}
+               <span className="font-mono font-bold text-white">{pageStartIdx + 1}</span>
+               {'–'}
+               <span className="font-mono font-bold text-white">{pageEndIdx}</span>
+               {' '}de{' '}
+               <span className="font-mono font-bold text-emerald-400">{displayedClients.length.toLocaleString('es-VE')}</span>
+               {' '}clientes
+             </div>
+             <div className="flex flex-wrap items-center gap-2">
+               <label className="inline-flex items-center gap-1.5 text-neutral-400">
+                 <span>Por página:</span>
+                 <select
+                   aria-label="Clientes por página"
+                   value={pageSize}
+                   onChange={(e) => setPageSize(Number(e.target.value) as 50 | 100 | 200)}
+                   className="bg-neutral-900 border border-neutral-700 text-white rounded px-2 py-1 text-xs font-mono focus:outline-none focus:border-red-500"
+                 >
+                   <option value={50}>50</option>
+                   <option value={100}>100</option>
+                   <option value={200}>200</option>
+                 </select>
+               </label>
+               <div className="inline-flex items-center gap-1">
+                 <button
+                   type="button"
+                   disabled={safePage <= 1}
+                   onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                   className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-neutral-700 bg-neutral-900 text-neutral-200 hover:bg-neutral-800 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                 >
+                   <ChevronLeft className="w-3.5 h-3.5" />
+                   <span>Anterior</span>
+                 </button>
+                 <span className="px-2.5 py-1 font-mono text-neutral-300">
+                   Pág. <strong className="text-white">{safePage}</strong> / {totalPages}
+                 </span>
+                 <button
+                   type="button"
+                   disabled={safePage >= totalPages}
+                   onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                   className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-neutral-700 bg-neutral-900 text-neutral-200 hover:bg-neutral-800 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                 >
+                   <span>Siguiente</span>
+                   <ChevronRight className="w-3.5 h-3.5" />
+                 </button>
+               </div>
+             </div>
+           </div>
+         )}
+
+         {/* Desktop View: Table (renderizado condicional estricto por viewport + paginado) */}
+         {shouldRenderDesktopTable && (<div className="overflow-x-auto">
            <table className="w-full text-left border-collapse min-w-[1000px]">
               <thead>
                  <tr className="bg-[#b90000] text-[10px] font-sans text-white uppercase tracking-wider">
@@ -1146,7 +1249,7 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
                  </tr>
               </thead>
               <tbody className="text-xs font-mono">
-                {displayedClients.length === 0 ? (
+                {paginatedClients.length === 0 ? (
                   <tr>
                     <td colSpan={9} className="p-8 text-center bg-[#0d0d0d] text-neutral-400 font-sans">
                       <Users className="w-8 h-8 mx-auto text-neutral-600 mb-2" />
@@ -1157,7 +1260,7 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
                     </td>
                   </tr>
                 ) : (
-                  displayedClients.map((client, idx) => {
+                  paginatedClients.map((client, idx) => {
                     const bgClass = idx % 2 === 0 ? 'bg-[#141414]' : 'bg-[#0a0a0a]';
                     const getCell = (has: boolean, rCode: RubroCodigo) => has ? (
                        <td
@@ -1237,28 +1340,28 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
                     </td>
                     <td className="p-3 text-center border-r border-neutral-800 font-sans text-[11px]">
                       <div className="flex flex-col items-center leading-tight">
-                        <span className="text-emerald-400">Activos: {displayedClients.filter(c => c.cobertura > 0).length}</span>
-                        <span className="text-red-400">Faltan: {displayedClients.filter(c => c.cobertura === 0).length}</span>
+                        <span className="text-emerald-400">Activos: {displayedSummary.activosCount}</span>
+                        <span className="text-red-400">Faltan: {displayedSummary.faltanCount}</span>
                       </div>
                     </td>
                     {RUBROS_ACTIVACION.map((rCode) => (
-                      <td key={rCode} className="p-3 text-center text-emerald-400 border-r border-neutral-800">{displayedClients.filter(c => c.flags[rCode]).length}</td>
+                      <td key={rCode} className="p-3 text-center text-emerald-400 border-r border-neutral-800">{displayedSummary.byRubro[rCode] || 0}</td>
                     ))}
                     <td className="p-3 text-center text-amber-400">
-                      {((displayedClients.filter(c => c.cobertura > 0).length / displayedClients.length) * 100).toFixed(1)}%
+                      {displayedSummary.pct.toFixed(1)}%
                     </td>
                   </tr>
                 )}
               </tbody>
            </table>
          </div>)}
-         {/* Mobile View: Cards */}
-         <div className={`flex flex-col p-3 gap-3 bg-neutral-950 ${viewMode !== 'tarjetas' ? 'md:hidden' : 'md:grid md:grid-cols-2 lg:grid-cols-3'}`}>
-            <div className="text-[10px] font-sans text-neutral-400 uppercase tracking-wider mb-1 px-1">
+         {/* Mobile / Card View (renderizado condicional estricto + paginado) */}
+         {shouldRenderCards && (<div className={`flex flex-col p-3 gap-3 bg-neutral-950 ${viewMode === 'tarjetas' ? 'md:grid md:grid-cols-2 lg:grid-cols-3' : ''}`}>
+            <div className="col-span-full text-[10px] font-sans text-neutral-400 uppercase tracking-wider mb-1 px-1">
               Desglose por Cliente (Toca los rubros del cliente para activarlos en <span className="text-emerald-400 font-bold">verde</span>)
             </div>
             
-            {displayedClients.length === 0 ? (
+            {paginatedClients.length === 0 ? (
               <div className="col-span-full p-8 text-center bg-neutral-900/40 border border-neutral-800 rounded-xl text-neutral-400">
                 <Users className="w-8 h-8 mx-auto text-neutral-600 mb-2" />
                 <div className="text-white font-bold text-sm">No se encontraron clientes</div>
@@ -1267,7 +1370,7 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
                 </div>
               </div>
             ) : (
-              displayedClients.map((client) => {
+              paginatedClients.map((client) => {
                const badgeColor = client.cobertura > 0
                  ? 'border-emerald-300 bg-emerald-600 text-white shadow-[0_0_12px_rgba(16,185,129,0.45)]'
                  : 'border-red-900/50 bg-red-950/40 text-red-400';
@@ -1349,7 +1452,7 @@ export const ActivacionClientes: React.FC<Props> = ({ filteredVolumen, filteredA
                );
               })
             )}
-         </div>
+         </div>)}
       </div>
 
     </div>

@@ -9,6 +9,7 @@ import { HistVolumenRow, fetchHistVolumen } from '../services/historialService';
 import { SerieVolumen, construirSerie, sumarSerie } from '../lib/volumenHistorial';
 import { MonthFilter, PeriodoMes, mesKey, resolverSeleccionMeses } from './MonthFilter';
 import { VolumenDashboard360 } from './VolumenDashboard360';
+import { calculateCompliancePct, parseSafeNumber, roundToDecimals, sumDecimalExact } from '../utils/safeNumber';
 
 const normSearch = (val: string) =>
   String(val || '')
@@ -56,14 +57,23 @@ export const VolumenTab: React.FC<Props> = ({ filteredVolumen, activeVendedorId,
 
     filteredVolumen.forEach(v => {
       const displaySku = v.skuId || (v as any).sku || 'GENERICO';
-      const m = Number(v.meta ?? (v as any).metaKg);
-      const e = Number(v.ventaNetaKg ?? v.ejecutado ?? (v as any).ejecutadoKg);
-      const validMeta = Number.isFinite(m) ? m : 0;
-      const validEjecutado = Number.isFinite(e) ? e : 0;
-      const validBruta = Number.isFinite(Number(v.ventaBrutaKg)) ? Number(v.ventaBrutaKg) : (validEjecutado > 0 ? validEjecutado : 0);
-      const validDev = Number.isFinite(Number(v.devolucionesKg)) ? Number(v.devolucionesKg) : (validEjecutado < 0 ? validEjecutado : 0);
+      const validMeta = parseSafeNumber(v.meta ?? (v as any).metaKg, 0);
+      const validEjecutado = parseSafeNumber(v.ventaNetaKg ?? v.ejecutado ?? (v as any).ejecutadoKg, 0);
+      const validBruta =
+        v.ventaBrutaKg !== undefined && v.ventaBrutaKg !== null
+          ? parseSafeNumber(v.ventaBrutaKg, 0)
+          : validEjecutado > 0
+            ? validEjecutado
+            : 0;
+      const validDev =
+        v.devolucionesKg !== undefined && v.devolucionesKg !== null
+          ? parseSafeNumber(v.devolucionesKg, 0)
+          : validEjecutado < 0
+            ? validEjecutado
+            : 0;
       const rawPct = v.porcentajeCumplimiento;
-      const validOfficialPct = rawPct !== undefined && rawPct !== null && Number.isFinite(Number(rawPct)) ? Number(rawPct) : null;
+      const parsedPct = rawPct !== undefined && rawPct !== null ? parseSafeNumber(rawPct, Number.NaN) : Number.NaN;
+      const validOfficialPct = Number.isFinite(parsedPct) ? parsedPct : null;
 
       if (!map.has(displaySku)) {
         map.set(displaySku, {
@@ -81,10 +91,10 @@ export const VolumenTab: React.FC<Props> = ({ filteredVolumen, activeVendedorId,
       }
 
       const stat = map.get(displaySku)!;
-      stat.meta = +(stat.meta + validMeta).toFixed(2);
-      stat.ejecutado = +(stat.ejecutado + validEjecutado).toFixed(2);
-      stat.ventaBruta = +(stat.ventaBruta + validBruta).toFixed(2);
-      stat.devoluciones = +(stat.devoluciones + validDev).toFixed(2);
+      stat.meta = sumDecimalExact([stat.meta, validMeta], 2);
+      stat.ejecutado = sumDecimalExact([stat.ejecutado, validEjecutado], 2);
+      stat.ventaBruta = sumDecimalExact([stat.ventaBruta, validBruta], 2);
+      stat.devoluciones = sumDecimalExact([stat.devoluciones, validDev], 2);
       stat.rowCount += 1;
       if (stat.rowCount > 1) {
         stat.officialPct = null;
@@ -94,21 +104,21 @@ export const VolumenTab: React.FC<Props> = ({ filteredVolumen, activeVendedorId,
     });
 
     return Array.from(map.values()).map(s => {
-      s.meta = +(Number(s.meta) || 0).toFixed(2);
-      s.ejecutado = +(Number(s.ejecutado) || 0).toFixed(2);
+      s.meta = roundToDecimals(s.meta, 2);
+      s.ejecutado = roundToDecimals(s.ejecutado, 2);
       s.cumplimiento =
         s.rowCount === 1 && s.officialPct !== null
           ? s.officialPct
-          : (s.meta > 0 ? +((s.ejecutado / s.meta) * 100).toFixed(2) : 0);
+          : calculateCompliancePct(s.ejecutado, s.meta, 2);
       return s;
     }).sort((a, b) => b.ejecutado - a.ejecutado);
   }, [filteredVolumen]);
 
-  const totalMeta = useMemo(() => +skuStats.reduce((acc, s) => acc + s.meta, 0).toFixed(2), [skuStats]);
-  const totalEjecutado = useMemo(() => +skuStats.reduce((acc, s) => acc + s.ejecutado, 0).toFixed(2), [skuStats]);
+  const totalMeta = useMemo(() => sumDecimalExact(skuStats.map((s) => s.meta), 2), [skuStats]);
+  const totalEjecutado = useMemo(() => sumDecimalExact(skuStats.map((s) => s.ejecutado), 2), [skuStats]);
 
-  const cumplimiento = totalMeta > 0 ? (totalEjecutado / totalMeta) * 100 : 0;
-  const faltante = +Math.max(0, totalMeta - totalEjecutado).toFixed(2);
+  const cumplimiento = calculateCompliancePct(totalEjecutado, totalMeta, 2);
+  const faltante = roundToDecimals(Math.max(0, totalMeta - totalEjecutado), 2);
   const mesInfo = useMemo(() => getMesLaboralInfo(), []);
   const diasRestantes = Math.max(1, mesInfo.remainingWorkingDays || 1);
   const diasTranscurridos = Math.max(0, mesInfo.elapsedWorkingDays || 0);
@@ -130,10 +140,11 @@ export const VolumenTab: React.FC<Props> = ({ filteredVolumen, activeVendedorId,
   const [histLoading, setHistLoading] = useState(true);
   const [histError, setHistError] = useState<string | null>(null);
   useEffect(() => {
+    const controller = new AbortController();
     let alive = true;
     setHistLoading(true);
     setHistError(null);
-    fetchHistVolumen(vendedorHist)
+    fetchHistVolumen(vendedorHist, { signal: controller.signal })
       .then((r) => {
         if (alive) {
           setHistRows(r.rows || []);
@@ -141,13 +152,14 @@ export const VolumenTab: React.FC<Props> = ({ filteredVolumen, activeVendedorId,
         }
       })
       .catch((e: any) => {
-        if (alive) {
+        if (alive && e?.name !== 'AbortError') {
           setHistError(e?.message || 'No se pudo consultar el historial de ventas');
           setHistLoading(false);
         }
       });
     return () => {
       alive = false;
+      controller.abort();
     };
   }, [vendedorHist]);
 
@@ -181,7 +193,10 @@ export const VolumenTab: React.FC<Props> = ({ filteredVolumen, activeVendedorId,
       .sort((a, b) => b.ejecutado - a.ejecutado);
   }, [skuStats, seriesMap, useHist, mesesHist, showActual]);
 
-  const totalMostrado = viewStats.reduce((a, st) => a + (st.sinHist ? 0 : st.ejecutado), 0);
+  const totalMostrado = useMemo(
+    () => sumDecimalExact(viewStats.map((st) => (st.sinHist ? 0 : st.ejecutado)), 2),
+    [viewStats]
+  );
   const etiquetaMeses = periodosHist
     .filter((p) => mesesHist.includes(mesKey(p)))
     .map((p) => `${MESES_CORTO[p.mes]} ${String(p.ano).slice(-2)}`)
@@ -277,15 +292,14 @@ export const VolumenTab: React.FC<Props> = ({ filteredVolumen, activeVendedorId,
     viewMode === 'focus';
 
   const filteredMetaTotal = useMemo(
-    () => filteredSkuStats.reduce((acc, s) => acc + (s.sinCuota ? 0 : s.meta), 0),
+    () => sumDecimalExact(filteredSkuStats.map((s) => (s.sinCuota ? 0 : s.meta)), 2),
     [filteredSkuStats]
   );
   const filteredEjecutadoTotal = useMemo(
-    () => filteredSkuStats.reduce((acc, s) => acc + (s.sinHist ? 0 : s.ejecutado), 0),
+    () => sumDecimalExact(filteredSkuStats.map((s) => (s.sinHist ? 0 : s.ejecutado)), 2),
     [filteredSkuStats]
   );
-  const filteredCumplimiento =
-    filteredMetaTotal > 0 ? (filteredEjecutadoTotal / filteredMetaTotal) * 100 : 0;
+  const filteredCumplimiento = calculateCompliancePct(filteredEjecutadoTotal, filteredMetaTotal, 2);
 
   const allFilteredSelected =
     filteredSkuStats.length > 0 && filteredSkuStats.every((st) => selectedCodes.includes(st.skuId));

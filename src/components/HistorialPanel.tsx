@@ -5,6 +5,7 @@ import {
   HistorialError, HistVolumenRow, HistRubroMes, HistClienteRow, HistClienteDetalle, HistPeriodo
 } from '../services/historialService';
 import { RUBROS_CLAVE, RUBRO_LABEL, RubroCodigo } from '../lib/rubros';
+import { parseSafeNumber, sumDecimalExact } from '../utils/safeNumber';
 
 export type HistVista = 'volumen' | 'rubros' | 'clientes';
 
@@ -20,8 +21,7 @@ const MES_LARGO = ['', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'J
 const pkey = (ano: number, mes: number) => `${ano}-${String(mes).padStart(2, '0')}`;
 const plabel = (ano: number, mes: number) => `${MES[mes]} ${String(ano).slice(2)}`;
 const fmt = (n: number | undefined | null, d = 0) => {
-  const val = Number(n);
-  if (isNaN(val)) return '0';
+  const val = parseSafeNumber(n, 0);
   return val.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
 };
 
@@ -95,13 +95,13 @@ const VistaVolumen: React.FC<{ vendedor?: string }> = ({ vendedor }) => {
         )
       )
         return;
-      const val = r[metric];
+      const val = parseSafeNumber(r[metric], 0);
       const k = pkey(r.ano, r.mes);
       let f = by.get(r.sku);
       if (!f) { f = { sku: r.sku, articulo: r.articulo, rubro: r.rubro, v: {}, total: 0 }; by.set(r.sku, f); }
-      f.v[k] = (f.v[k] || 0) + val;
-      f.total += val;
-      totales[k] = (totales[k] || 0) + val;
+      f.v[k] = sumDecimalExact([f.v[k] || 0, val], 2);
+      f.total = sumDecimalExact([f.total, val], 2);
+      totales[k] = sumDecimalExact([totales[k] || 0, val], 2);
     });
     return { periodos, filas: [...by.values()].sort((a, b) => b.total - a.total), totales };
   }, [data, metric, rubro, q]);

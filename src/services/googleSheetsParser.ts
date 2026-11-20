@@ -3,46 +3,48 @@ import { clasificarRubro, clasificarRubroServerLabel, RUBROS_ACTIVOS_CONFIG, typ
 import { SUPERVISOR_SUMMARY_COLUMNS, normalizeVendorName } from '../utils/vendorRoutes';
 import { normalizeVendorKey, resolveCanonicalRouteKey } from '../utils/vendorKeyNormalizer';
 import type { SyncAuditLogEntry } from './monthlySyncEngine';
+import {
+  DataQualityTracker,
+  type DataQualitySnapshot,
+  isBlankOrDashMarker,
+  isSheetErrorMarker,
+  isValidNumericCell,
+  parseSafeNumber,
+  parseSafePercentage,
+  roundToDecimals,
+  sanitizeSheetText,
+  sumDecimalExact
+} from '../utils/safeNumber';
+import {
+  DEFAULT_GOOGLE_SHEET_ID,
+  GRID_CATEGORY_HEADER_KEYWORDS,
+  buildValidatedGoogleSheetUrl,
+  getGoogleSheetId,
+  isClientActiveInAnyFocusProduct,
+  isSummaryOrHeaderLabel,
+  isValidActivacionRecord,
+  isValidMetaRecord,
+  isValidVolumenRecord,
+  sanitizeGoogleSheetId
+} from '../config/sheetsConfig';
 
-export const DEFAULT_GOOGLE_SHEET_ID = '';
-
-/**
- * Limpia y valida el ID del Google Sheet desde variables de entorno,
- * removiendo corchetes angulares `<...>`, comillas, espacios o extrayendo el ID si se pegó una URL completa.
- */
-export function sanitizeGoogleSheetId(raw?: string | null): string {
-  if (!raw) return DEFAULT_GOOGLE_SHEET_ID;
-  const cleaned = String(raw).trim().replace(/^['"<]+|['">]+$/g, '').trim();
-  if (!cleaned || /PEGA_AQUI/i.test(cleaned)) {
-    return DEFAULT_GOOGLE_SHEET_ID;
-  }
-  const urlMatch = cleaned.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
-  if (urlMatch && urlMatch[1]) {
-    return urlMatch[1];
-  }
-  return cleaned;
-}
-
-/**
- * Obtiene el GOOGLE_SHEET_ID parametrizado exclusivamente en variables de entorno del servidor.
- */
-export function getGoogleSheetId(envOverride?: Record<string, string | undefined>): string {
-  const procEnv = typeof process !== 'undefined' && process.env ? process.env : {};
-  const raw = envOverride?.GOOGLE_SHEET_ID || procEnv.GOOGLE_SHEET_ID || '';
-  return sanitizeGoogleSheetId(raw);
-}
+export { DEFAULT_GOOGLE_SHEET_ID, sanitizeGoogleSheetId, getGoogleSheetId };
 
 /**
- * Construye la URL de exportación directa de Google Sheets con parámetro anti-caché limpio.
+ * Construye la URL de exportación directa de Google Sheets validada contra la allowlist OWASP
+ * (`https://docs.google.com/spreadsheets/`) con parámetro anti-caché limpio.
  */
 export function buildGoogleSheetExportUrl(
   sheetId?: string | null,
   format: 'xlsx' | 'csv' = 'xlsx',
   gid?: string | number
 ): string {
-  const id = sanitizeGoogleSheetId(sheetId || getGoogleSheetId());
-  const gidParam = gid !== undefined && gid !== null && String(gid).trim() !== '' ? `&gid=${encodeURIComponent(String(gid))}` : '';
-  return `https://docs.google.com/spreadsheets/d/${id}/export?format=${format}${gidParam}&_cb=${Date.now()}`;
+  return buildValidatedGoogleSheetUrl({
+    sheetId,
+    format,
+    gid,
+    cacheBust: true
+  });
 }
 
 /**
@@ -163,96 +165,20 @@ export function normalizeClientCode(raw: unknown): { rawClean: string; canonical
  * Detecta si una celda representa un marcador explícito de vacío/guion/error de Excel (sin ser texto basura arbitrario).
  */
 function isBlankOrZeroMarker(raw: unknown): boolean {
-  if (raw === null || raw === undefined) return true;
-  const s = String(raw).replace(/\u00A0/g, ' ').trim();
-  if (!s) return true;
-  return (
-    /^[-–—]+$/.test(s) ||
-    /^(n\/?a|#n\/?d|#n\/?a|#value!|#ref!|#div\/0!|null|undefined|sin\s*dato)$/i.test(s)
-  );
+  return isBlankOrDashMarker(raw) || isSheetErrorMarker(raw);
 }
 
 /**
- * Verifica si un valor crudo contiene un número válido reconocible (incluyendo negativos y formatos locales).
- */
-function isValidNumericCell(raw: unknown): boolean {
-  if (typeof raw === 'number') return Number.isFinite(raw);
-  if (raw === null || raw === undefined || typeof raw === 'boolean') return false;
-  const s = String(raw).replace(/\u00A0/g, ' ').trim();
-  if (!s || isBlankOrZeroMarker(s)) return false;
-  // Debe contener al menos un dígito y solo caracteres numéricos/contables válidos
-  if (!/\d/.test(s)) return false;
-  const stripped = s
-    .replace(/^\((.*)\)$/, '$1')
-    .replace(/[$\u20AC\u00A3%+\-\s]/g, '')
-    .replace(/\b(bs\.?|usd|kg|kgs|cj|cajas|und)\b/gi, '')
-    .trim();
-  return /^\d+([.,]\d+)*$/.test(stripped);
-}
-
-/**
- * Convierte números con formato local (`1.000,50`), anglosajón (`1,000.50`), decimales con coma (`0,75`),
+ * Convierte números con formato local (`1.000,50`, `1.250`), anglosajón (`1,000.50`), decimales con coma (`0,75`),
  * contables `(1.200,00)` o celdas con guion `"-"` / `"#N/D"` de forma 100% segura sin devolver jamás `NaN`.
  */
-export function parseLocaleNumber(raw: unknown, fallback = 0): number {
-  if (typeof raw === 'number') {
-    return Number.isFinite(raw) ? raw : fallback;
-  }
-  if (raw === null || raw === undefined || typeof raw === 'boolean') {
-    return fallback;
-  }
-
-  let s = String(raw).replace(/\u00A0/g, ' ').trim();
-  if (!s || isBlankOrZeroMarker(s)) return fallback;
-
-  let isNegative = false;
-  if (/^\(.*\)$/.test(s)) {
-    isNegative = true;
-    s = s.slice(1, -1).trim();
-  }
-
-  s = s.replace(/[$\u20AC\u00A3%]/g, '').replace(/\b(bs\.?|usd|kg|kgs|cj|cajas|und)\b/gi, '').replace(/\s+/g, '');
-  if (s.startsWith('-')) {
-    isNegative = !isNegative;
-    s = s.slice(1);
-  } else if (s.startsWith('+')) {
-    s = s.slice(1);
-  }
-
-  if (!s || /^[-–—]+$/.test(s)) return fallback;
-
-  const lastComma = s.lastIndexOf(',');
-  const lastDot = s.lastIndexOf('.');
-
-  if (lastComma !== -1 && lastDot !== -1) {
-    if (lastComma > lastDot) {
-      s = s.replace(/\./g, '').replace(',', '.');
-    } else {
-      s = s.replace(/,/g, '');
-    }
-  } else if (lastComma !== -1) {
-    const commaCount = (s.match(/,/g) || []).length;
-    if (commaCount > 1) {
-      s = s.replace(/,/g, '');
-    } else {
-      const [intPart, fracPart] = s.split(',');
-      if (intPart === '0' || fracPart.length !== 3) {
-        s = `${intPart}.${fracPart}`;
-      } else {
-        s = `${intPart}${fracPart}`;
-      }
-    }
-  } else if (lastDot !== -1) {
-    const dotCount = (s.match(/\./g) || []).length;
-    if (dotCount > 1) {
-      s = s.replace(/\./g, '');
-    }
-  }
-
-  const parsed = Number(s);
-  if (!Number.isFinite(parsed)) return fallback;
-  const result = isNegative ? -parsed : parsed;
-  return Object.is(result, -0) ? 0 : result;
+export function parseLocaleNumber(
+  raw: unknown,
+  fallback = 0,
+  tracker?: DataQualityTracker,
+  context?: string
+): number {
+  return parseSafeNumber(raw, { fallback, tracker, context });
 }
 
 /**
@@ -475,6 +401,7 @@ export interface ParsedWorkbookResult {
   metrics: Record<string, SheetTabMetrics>;
   warnings: SheetWarning[];
   auditLogs: SyncAuditLogEntry[];
+  dataQuality?: DataQualitySnapshot;
 }
 
 function isSupervisorSummaryHeader(vendorRaw: string): boolean {
@@ -576,21 +503,94 @@ function extractSheetRows(XLSX: any, sheet: any): any[][] {
   });
 }
 
-function parseOfficialSheetPercentage(rawPct: unknown): number | null {
-  if (rawPct === null || rawPct === undefined) return null;
-  if (typeof rawPct === 'number') {
-    if (!Number.isFinite(rawPct)) return null;
-    const val = +(rawPct * 100).toFixed(4);
-    return Object.is(val, -0) ? 0 : val;
+/**
+ * Devuelve un mapa `startCol -> endColExclusive` de las celdas combinadas (`!merges`)
+ * horizontales sobre una fila específica (ej. fila 0 de encabezados de vendedor o rubro foco).
+ */
+function getMergedHeaderSpansForRow(sheet: any, targetRow: number): Map<number, number> {
+  const spans = new Map<number, number>();
+  const merges = Array.isArray(sheet?.['!merges']) ? sheet['!merges'] : [];
+  for (const m of merges) {
+    if (
+      m &&
+      m.s &&
+      m.e &&
+      typeof m.s.r === 'number' &&
+      typeof m.e.r === 'number' &&
+      typeof m.s.c === 'number' &&
+      typeof m.e.c === 'number' &&
+      m.s.r <= targetRow &&
+      m.e.r >= targetRow &&
+      m.e.c >= m.s.c
+    ) {
+      spans.set(m.s.c, m.e.c + 1);
+    }
   }
-  const s = String(rawPct).replace(/\u00A0/g, ' ').trim();
-  if (!s || isBlankOrZeroMarker(s) || !isValidNumericCell(s)) return null;
-  if (s.includes('%')) {
-    const val = +parseLocaleNumber(s, 0).toFixed(4);
-    return Object.is(val, -0) ? 0 : val;
+  return spans;
+}
+
+/**
+ * Propaga los textos de encabezados combinados (`!merges`) sobre la fila 0 para consultas por columna.
+ */
+function expandMergedRowValues(sheet: any, rowValues: unknown[], targetRow: number): unknown[] {
+  const expanded = Array.isArray(rowValues) ? rowValues.slice() : [];
+  const merges = Array.isArray(sheet?.['!merges']) ? sheet['!merges'] : [];
+  for (const m of merges) {
+    if (
+      m &&
+      m.s &&
+      m.e &&
+      typeof m.s.r === 'number' &&
+      typeof m.e.r === 'number' &&
+      typeof m.s.c === 'number' &&
+      typeof m.e.c === 'number' &&
+      m.s.r <= targetRow &&
+      m.e.r >= targetRow
+    ) {
+      const anchor = expanded[m.s.c];
+      if (anchor !== null && anchor !== undefined && String(anchor).trim() !== '') {
+        for (let c = m.s.c + 1; c <= m.e.c; c++) {
+          if (expanded[c] === null || expanded[c] === undefined || String(expanded[c]).trim() === '') {
+            expanded[c] = anchor;
+          }
+        }
+      }
+    }
   }
-  const val = +(parseLocaleNumber(s, 0) * 100).toFixed(4);
-  return Object.is(val, -0) ? 0 : val;
+  return expanded;
+}
+
+function sheetCellHasPercentageFormat(XLSX: any, sheet: any, rowIdx: number, colIdx: number): boolean {
+  if (!sheet || !XLSX?.utils?.encode_cell || rowIdx < 0 || colIdx < 0) return false;
+  try {
+    const addr = XLSX.utils.encode_cell({ r: rowIdx, c: colIdx });
+    const cell = sheet[addr];
+    if (!cell) return false;
+    if (typeof cell.z === 'string' && cell.z.includes('%')) return true;
+    if (typeof cell.w === 'string' && cell.w.includes('%')) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function parseOfficialSheetPercentage(
+  rawPct: unknown,
+  options: {
+    hasPercentFormat?: boolean;
+    referenceRatio?: number;
+    tracker?: DataQualityTracker;
+    context?: string;
+  } = {}
+): number | null {
+  const { hasPercentFormat = false, referenceRatio, tracker, context } = options;
+  return parseSafePercentage(rawPct, {
+    scale: hasPercentFormat ? 'ratio_0_1' : 'auto',
+    referenceRatio,
+    decimals: 4,
+    tracker,
+    context
+  });
 }
 
 /**
@@ -609,9 +609,10 @@ export function parseWorkbookFull(
   const warnings: SheetWarning[] = [];
   const auditLogs: SyncAuditLogEntry[] = [];
   const metrics: Record<string, SheetTabMetrics> = {};
+  const qualityTracker = new DataQualityTracker(50);
 
   // ============================================================================
-  // 1. VOLUMEN POR SKU (Bloques de 3 cols, resta algebraica de negativos, % oficial y colisiones)
+  // 1. VOLUMEN POR SKU (Bloques resilientes con !merges, resta algebraica, % seguro y exclusión de totales)
   // ============================================================================
   const volumenSupabaseRows: ParsedWorkbookResult['volumenSupabaseRows'] = [];
   const volumenApiRows: VolumenData[] = [];
@@ -632,7 +633,12 @@ export function parseWorkbookFull(
     if (rows.length >= 2) {
       const header0 = rows[0] || [];
       const header1 = rows[1] || [];
-      const maxHeaderCols = Math.max(header0.length, header1.length);
+      const row0MergeSpans = getMergedHeaderSpansForRow(volResolved.sheet, 0);
+      const maxHeaderCols = Math.max(
+        header0.length,
+        header1.length,
+        ...Array.from(row0MergeSpans.values(), (end) => end)
+      );
 
       const baseCols = mapHeaderColumns(
         header1,
@@ -657,7 +663,7 @@ export function parseWorkbookFull(
       for (let c = 0; c < maxHeaderCols; c++) {
         if (c === baseCols.sku || c === baseCols.articulo) continue;
         const h0 = header0[c];
-        if (h0 !== null && h0 !== undefined && String(h0).trim() !== '') {
+        if (h0 !== null && h0 !== undefined && sanitizeSheetText(h0) !== '') {
           headerStarts.push(c);
         }
       }
@@ -665,8 +671,10 @@ export function parseWorkbookFull(
       const supervisorOccurrences = new Map<string, number>();
       for (let bIdx = 0; bIdx < headerStarts.length; bIdx++) {
         const startCol = headerStarts[bIdx];
-        const endCol = bIdx + 1 < headerStarts.length ? headerStarts[bIdx + 1] : Math.min(startCol + 3, maxHeaderCols);
-        const rawVendorName = String(header0[startCol] || '').replace(/\s+/g, ' ').trim();
+        const mergedEnd = row0MergeSpans.get(startCol);
+        const nextStart = bIdx + 1 < headerStarts.length ? headerStarts[bIdx + 1] : Math.min(startCol + 3, maxHeaderCols);
+        const endCol = mergedEnd && mergedEnd > startCol ? Math.min(mergedEnd, nextStart) : nextStart;
+        const rawVendorName = sanitizeSheetText(header0[startCol]);
         if (!rawVendorName) continue;
 
         const vendorKey = normalizeVendorKey(rawVendorName);
@@ -686,12 +694,26 @@ export function parseWorkbookFull(
           continue;
         }
 
+        if (isSummaryOrHeaderLabel(rawVendorName)) {
+          auditLogs.push({
+            severity: 'INFO',
+            sheet_name: volResolved.sheetName,
+            row_number: 1,
+            event_code: 'SUMMARY_COLUMN_SKIPPED',
+            vendor_key: vendorKey,
+            entity_key: `COL_${startCol}`,
+            message: `Columna resumen "${rawVendorName}" en col ${startCol} excluida para evitar doble conteo.`,
+            payload: { startCol, rawVendorName }
+          });
+          continue;
+        }
+
         let cuotaCol = startCol;
-        let ejecutadoCol = startCol + 1;
+        let ejecutadoCol = startCol + 1 < endCol ? startCol + 1 : startCol;
         let pctCol = startCol + 2 < endCol ? startCol + 2 : -1;
 
         for (let subC = startCol; subC < endCol; subC++) {
-          const rawSub = String(header1[subC] ?? '').trim();
+          const rawSub = sanitizeSheetText(header1[subC]);
           const subNorm = normalizeHeaderKey(rawSub);
           if (subNorm === 'cuota' || subNorm === 'cuota_kg' || subNorm === 'meta' || subNorm === 'meta_kg') {
             cuotaCol = subC;
@@ -723,7 +745,7 @@ export function parseWorkbookFull(
         });
       }
 
-      // Pre-identificar filas válidas de SKU para evaluar colisiones deterministas entre bloques repetidos
+      // Pre-identificar filas válidas de SKU excluyendo totales, subtotales, promedios y encabezados repetidos
       interface ValidSkuRow {
         rowIdx: number;
         sku: string;
@@ -741,8 +763,25 @@ export function parseWorkbookFull(
 
         const rawSku = row[baseCols.sku];
         const rawArticulo = row[baseCols.articulo];
-        const sku = rawSku !== null && rawSku !== undefined ? String(rawSku).trim() : '';
-        const articulo = rawArticulo !== null && rawArticulo !== undefined ? String(rawArticulo).trim() : '';
+        const sku = sanitizeSheetText(rawSku);
+        const articulo = sanitizeSheetText(rawArticulo);
+
+        if (
+          isSummaryOrHeaderLabel(sku, ['COD', 'CODIGO', 'SKU', 'ID ARTICULO', 'COD ARTICULO']) ||
+          (!sku && isSummaryOrHeaderLabel(articulo, ['ARTICULO', 'PRODUCTO', 'DESCRIPCION', 'NOMBRE'])) ||
+          (!/^\d+$/.test(sku) && isSummaryOrHeaderLabel(articulo, ['ARTICULO', 'PRODUCTO', 'DESCRIPCION', 'NOMBRE']))
+        ) {
+          tabMetric.summaryRowsSkipped++;
+          auditLogs.push({
+            severity: 'INFO',
+            sheet_name: volResolved.sheetName,
+            row_number: r + 1,
+            event_code: 'SUMMARY_OR_REPEATED_HEADER_SKIPPED',
+            entity_key: sku || articulo || `ROW_${r + 1}`,
+            message: `Fila resumen o encabezado repetido ("${sku || articulo}") excluida en "${volResolved.sheetName}".`
+          });
+          continue;
+        }
 
         if (!sku) {
           if (!articulo) {
@@ -827,8 +866,8 @@ export function parseWorkbookFull(
             });
           } else {
             const candHasData = candVec.some(([m, k]) => m !== 0 || k !== 0);
-            const keptNetKg = +primaryVec.reduce((a, [, k]) => a + k, 0).toFixed(2);
-            const collidedNetKg = +candVec.reduce((a, [, k]) => a + k, 0).toFixed(2);
+            const keptNetKg = sumDecimalExact(primaryVec.map(([, k]) => k), 2);
+            const collidedNetKg = sumDecimalExact(candVec.map(([, k]) => k), 2);
             if (!primaryHasData && candHasData) {
               primary = candidate;
               primaryVec = candVec;
@@ -855,7 +894,7 @@ export function parseWorkbookFull(
         vendorBlocks.push(primary);
       }
 
-      // Acumulador algebraico por (vendorKey, sku) para consolidar si un SKU aparece más de una vez
+      // Acumulador algebraico exacto por (vendorKey, sku) para consolidar si un SKU aparece más de una vez
       const supaVolMap = new Map<string, ParsedWorkbookResult['volumenSupabaseRows'][number]>();
       const apiVolMap = new Map<string, VolumenData>();
       let idCounter = 1;
@@ -863,9 +902,24 @@ export function parseWorkbookFull(
       for (const skuRow of validSkuRows) {
         const row = rows[skuRow.rowIdx];
         for (const block of vendorBlocks) {
-          const metaKg = +parseLocaleNumber(row[block.cuotaCol], 0).toFixed(2);
-          const ventaKg = +parseLocaleNumber(row[block.ejecutadoCol], 0).toFixed(2);
-          const pctVal = block.pctCol >= 0 ? parseOfficialSheetPercentage(row[block.pctCol]) : null;
+          const cellCtx = `${volResolved.sheetName}:R${skuRow.rowIdx + 1}:${block.vendorKey}`;
+          const metaKg = roundToDecimals(
+            parseLocaleNumber(row[block.cuotaCol], 0, qualityTracker, `${cellCtx}:meta`),
+            2
+          );
+          const ventaKg = roundToDecimals(
+            parseLocaleNumber(row[block.ejecutadoCol], 0, qualityTracker, `${cellCtx}:venta`),
+            2
+          );
+          const pctVal =
+            block.pctCol >= 0
+              ? parseOfficialSheetPercentage(row[block.pctCol], {
+                  hasPercentFormat: sheetCellHasPercentageFormat(XLSX, volResolved.sheet, skuRow.rowIdx, block.pctCol),
+                  referenceRatio: metaKg > 0 ? ventaKg / metaKg : undefined,
+                  tracker: qualityTracker,
+                  context: `${cellCtx}:pct`
+                })
+              : null;
 
           // Retener cualquier SKU con cuota != 0 o venta != 0 (INCLUYENDO notas de crédito / devoluciones negativas)
           if (metaKg !== 0 || ventaKg !== 0) {
@@ -895,21 +949,21 @@ export function parseWorkbookFull(
                 zona: 'General'
               });
             } else {
-              existingSupa.meta_kg = +(existingSupa.meta_kg + metaKg).toFixed(2);
-              existingSupa.venta_bruta_kg = +(existingSupa.venta_bruta_kg + brutaDelta).toFixed(2);
-              existingSupa.devoluciones_kg = +(existingSupa.devoluciones_kg + devDelta).toFixed(2);
-              existingSupa.venta_neta_kg = +(existingSupa.venta_neta_kg + ventaKg).toFixed(2);
+              existingSupa.meta_kg = sumDecimalExact([existingSupa.meta_kg, metaKg], 2);
+              existingSupa.venta_bruta_kg = sumDecimalExact([existingSupa.venta_bruta_kg, brutaDelta], 2);
+              existingSupa.devoluciones_kg = sumDecimalExact([existingSupa.devoluciones_kg, devDelta], 2);
+              existingSupa.venta_neta_kg = sumDecimalExact([existingSupa.venta_neta_kg, ventaKg], 2);
               existingSupa.ejecutado_kg = existingSupa.venta_neta_kg;
               existingSupa.porcentaje_cumplimiento =
                 existingSupa.meta_kg > 0
-                  ? +((existingSupa.venta_neta_kg / existingSupa.meta_kg) * 100).toFixed(4)
+                  ? roundToDecimals((existingSupa.venta_neta_kg / existingSupa.meta_kg) * 100, 4)
                   : pctVal;
             }
 
             const display = formatVolumenVendorDisplay(block.rawVendorName);
             const existingApi = apiVolMap.get(mapKey);
             if (!existingApi) {
-              apiVolMap.set(mapKey, {
+              const candidateApi: VolumenData = {
                 id: String(idCounter++),
                 vendedorId: display.finalVendedorId,
                 vendedorKey: block.vendorKey,
@@ -931,19 +985,22 @@ export function parseWorkbookFull(
                 zona: 'General',
                 lat: 10.6427,
                 lng: -71.6125
-              });
+              };
+              if (isValidVolumenRecord(candidateApi)) {
+                apiVolMap.set(mapKey, candidateApi);
+              }
             } else {
-              const nextMeta = +(existingApi.meta + metaKg).toFixed(2);
-              const nextNeta = +(existingApi.ejecutado + ventaKg).toFixed(2);
+              const nextMeta = sumDecimalExact([existingApi.meta, metaKg], 2);
+              const nextNeta = sumDecimalExact([existingApi.ejecutado, ventaKg], 2);
               existingApi.meta = nextMeta;
               existingApi.metaKg = nextMeta;
               existingApi.ejecutado = nextNeta;
               existingApi.ejecutadoKg = nextNeta;
-              existingApi.ventaBrutaKg = +((existingApi.ventaBrutaKg || 0) + brutaDelta).toFixed(2);
-              existingApi.devolucionesKg = +((existingApi.devolucionesKg || 0) + devDelta).toFixed(2);
+              existingApi.ventaBrutaKg = sumDecimalExact([existingApi.ventaBrutaKg || 0, brutaDelta], 2);
+              existingApi.devolucionesKg = sumDecimalExact([existingApi.devolucionesKg || 0, devDelta], 2);
               existingApi.ventaNetaKg = nextNeta;
               existingApi.porcentajeCumplimiento =
-                nextMeta > 0 ? +((nextNeta / nextMeta) * 100).toFixed(4) : pctVal;
+                nextMeta > 0 ? roundToDecimals((nextNeta / nextMeta) * 100, 4) : pctVal;
             }
           }
         }
@@ -1003,10 +1060,27 @@ export function parseWorkbookFull(
           continue;
         }
 
-        const { rawClean, canonical } = normalizeClientCode(row[cols.codigo]);
+        const rawCodeText = sanitizeSheetText(row[cols.codigo]);
+        const cliStr = sanitizeSheetText(row[cols.cliente]);
+        if (
+          isSummaryOrHeaderLabel(rawCodeText, ['ID CLIENTE', 'CODIGO', 'COD CLIENTE', 'CLIENTE CODIGO', 'ID', 'COD']) ||
+          (!rawCodeText && isSummaryOrHeaderLabel(cliStr, ['CLIENTE', 'RAZON SOCIAL', 'NOMBRE CLIENTE', 'NOMBRE']))
+        ) {
+          tabMetric.summaryRowsSkipped++;
+          auditLogs.push({
+            severity: 'INFO',
+            sheet_name: resolved.sheetName,
+            row_number: r + 1,
+            event_code: 'SUMMARY_OR_REPEATED_HEADER_SKIPPED',
+            entity_key: rawCodeText || cliStr || `ROW_${r + 1}`,
+            message: `Fila resumen o encabezado repetido ("${rawCodeText || cliStr}") excluida en "${resolved.sheetName}".`
+          });
+          continue;
+        }
+
+        const { rawClean, canonical } = normalizeClientCode(rawCodeText);
         if (!canonical) {
           // Ignorar silenciosamente filas donde solo hay un texto residual (como 'fx') fuera de Id Cliente/Cliente
-          const cliStr = String(row[cols.cliente] ?? '').trim();
           const rawCj = row[cols.cajas];
           if (!cliStr && (rawCj === null || rawCj === undefined || String(rawCj).trim() === '')) {
             tabMetric.emptyRowsSkipped++;
@@ -1033,10 +1107,11 @@ export function parseWorkbookFull(
         let cajas = 0;
         if (rawCajasCell !== null && rawCajasCell !== undefined && String(rawCajasCell).trim() !== '') {
           if (!isBlankOrZeroMarker(rawCajasCell) && !isValidNumericCell(rawCajasCell)) {
+            qualityTracker.recordIssue('invalid_text', rawCajasCell, `${resolved.sheetName}:R${r + 1}:cajas`);
             warnings.push({
               sheet: resolved.sheetName,
               row: r + 1,
-              reason: `Texto residual no numérico "${String(rawCajasCell).trim()}" ignorado en columna Cajas (Id Cliente=${rawClean})`
+              reason: `Texto residual no numérico "${sanitizeSheetText(rawCajasCell)}" ignorado en columna Cajas (Id Cliente=${rawClean})`
             });
             auditLogs.push({
               severity: 'WARN',
@@ -1044,12 +1119,12 @@ export function parseWorkbookFull(
               row_number: r + 1,
               event_code: 'RESIDUAL_TEXT_IN_CAJAS',
               entity_key: canonical,
-              message: `Texto residual "${String(rawCajasCell).trim()}" ignorado en columna Cajas de "${resolved.sheetName}".`,
-              payload: { rawCajas: String(rawCajasCell), clientCode: rawClean }
+              message: `Texto residual "${sanitizeSheetText(rawCajasCell)}" ignorado en columna Cajas de "${resolved.sheetName}".`,
+              payload: { rawCajas: sanitizeSheetText(rawCajasCell), clientCode: rawClean }
             });
             cajas = 0;
           } else {
-            cajas = parseLocaleNumber(rawCajasCell, 0);
+            cajas = parseLocaleNumber(rawCajasCell, 0, qualityTracker, `${resolved.sheetName}:R${r + 1}:cajas`);
           }
         }
 
@@ -1071,7 +1146,7 @@ export function parseWorkbookFull(
         }
 
         tabMetric.validRecordsRead++;
-        const nextTotal = +((clientMap.get(canonical) || 0) + cajas).toFixed(2);
+        const nextTotal = sumDecimalExact([clientMap.get(canonical) || 0, cajas], 2);
         clientMap.set(canonical, nextTotal);
         if (rawClean && rawClean !== canonical) {
           clientMap.set(rawClean, nextTotal);
@@ -1201,9 +1276,28 @@ export function parseWorkbookFull(
           continue;
         }
 
-        const { rawClean, canonical } = normalizeClientCode(row[cols.codigo]);
-        const razonSocial = String(row[cols.razonSocial] ?? '').trim();
-        const rawVendor = String(row[cols.vendedor] ?? '').replace(/\s+/g, ' ').trim();
+        const rawCodeText = sanitizeSheetText(row[cols.codigo]);
+        const razonSocial = sanitizeSheetText(row[cols.razonSocial]);
+        const rawVendor = sanitizeSheetText(row[cols.vendedor]);
+
+        if (
+          isSummaryOrHeaderLabel(rawCodeText, ['CODIGO', 'ID CLIENTE', 'CLIENTE CODIGO', 'COD', 'ID']) ||
+          isSummaryOrHeaderLabel(rawVendor, ['VENDEDOR', 'RUTA', 'EJECUTIVO', 'VENDEDOR NOMBRE']) ||
+          (!rawCodeText && isSummaryOrHeaderLabel(razonSocial, ['RAZON SOCIAL', 'CLIENTE', 'NOMBRE CLIENTE']))
+        ) {
+          tabMetric.summaryRowsSkipped++;
+          auditLogs.push({
+            severity: 'INFO',
+            sheet_name: actResolved.sheetName,
+            row_number: r + 1,
+            event_code: 'SUMMARY_OR_REPEATED_HEADER_SKIPPED',
+            entity_key: rawCodeText || razonSocial || rawVendor || `ROW_${r + 1}`,
+            message: `Fila resumen o encabezado repetido ("${rawCodeText || razonSocial || rawVendor}") excluida en "${actResolved.sheetName}".`
+          });
+          continue;
+        }
+
+        const { rawClean, canonical } = normalizeClientCode(rawCodeText);
 
         if (!canonical || !rawVendor) {
           tabMetric.incompleteRowsLogged++;
@@ -1478,14 +1572,14 @@ export function parseWorkbookFull(
         : c.vendedorNombre;
     const displayEmail = isJohnatanOrMikel ? 'Mikelangelodiaz@gmail.com' : undefined;
 
-    activacionApiRows.push({
+    const candidateActRow = {
       id: String(c.codigo),
       vendedorId: c.vendedorId,
       vendedorKey: c.vendedorKey,
       vendedorNombre: displayVendedorNombre,
       vendedorEmail: displayEmail,
-      cliente: c.razonSocial,
-      status: isActivo ? 'ACTIVO' : 'INACTIVO',
+      cliente: sanitizeSheetText(c.razonSocial),
+      status: isActivo ? ('ACTIVO' as const) : ('INACTIVO' as const),
       cats: {
         ACEITE: hasAceite,
         AZUCAR: hasAzucar,
@@ -1509,11 +1603,15 @@ export function parseWorkbookFull(
         MORTADELA_ASTURIAS: cMortAst,
         SALPICAO: cSalpNuevo
       }
-    });
+    };
+    candidateActRow.status = isClientActiveInAnyFocusProduct(candidateActRow) ? 'ACTIVO' : 'INACTIVO';
+    if (isValidActivacionRecord(candidateActRow)) {
+      activacionApiRows.push(candidateActRow);
+    }
   }
 
   // ============================================================================
-  // 4. GRID DE ACTIVACIÓN POR VENDEDOR (Espejo exacto desde Fila 1; ignora etiquetas obsoletas de Fila 2)
+  // 4. GRID DE ACTIVACIÓN POR VENDEDOR (Espejo exacto desde Fila 1 + !merges; excluye TOTAL/SUBTOTAL/encabezados repetidos)
   // ============================================================================
   const metasSupabaseRows: ParsedWorkbookResult['metasSupabaseRows'] = [];
   const metasApiRows: ParsedWorkbookResult['metasApiRows'] = [];
@@ -1536,7 +1634,10 @@ export function parseWorkbookFull(
     };
 
     if (rows.length >= 2) {
-      const h0 = (rows[0] || []).map(normalizeHeaderKey);
+      const gridMergeSpans = getMergedHeaderSpansForRow(gridResolved.sheet, 0);
+      const expandedRow0 = expandMergedRowValues(gridResolved.sheet, rows[0] || [], 0);
+      const h0Raw = (rows[0] || []).map(normalizeHeaderKey);
+      const h0Expanded = expandedRow0.map(normalizeHeaderKey);
       const h1 = (rows[1] || []).map(normalizeHeaderKey);
 
       const vendorCol = h1.findIndex((h) => h === 'vendedor' || h === 'ruta' || h === 'ejecutivo');
@@ -1544,33 +1645,45 @@ export function parseWorkbookFull(
       const resolvedVendorCol = vendorCol !== -1 ? vendorCol : 0;
       const resolvedCarteraCol = carteraCol !== -1 ? carteraCol : 1;
 
-      // Localizar los 5 productos foco EXCLUSIVAMENTE desde la Fila 1 (rows[0]),
-      // ignorando por completo las etiquetas obsoletas de la Fila 2 ("Meta Aceite ", "Meta azucar").
+      // Localizar los 5 productos foco EXCLUSIVAMENTE desde la Fila 1 (rows[0] + !merges),
+      // ignorando las etiquetas obsoletas de la Fila 2 ("Meta Aceite ", "Meta azucar"),
+      // y resolviendo subcolumnas Meta / Activados dentro del rango combinado aunque cambie el orden.
       const findCategoryColsFromRow1 = (
         catKeywords: string[],
         fallbackMeta: number,
         fallbackAct: number
       ): { metaIdx: number; actIdx: number } => {
-        for (let c = 0; c < h0.length; c++) {
-          const cell0 = h0[c] || '';
+        const searchArr = h0Raw.some(Boolean) ? h0Raw : h0Expanded;
+        for (let c = 0; c < searchArr.length; c++) {
+          const cell0 = searchArr[c] || '';
           if (cell0 && catKeywords.some((kw) => cell0 === kw || cell0.includes(kw))) {
-            return { metaIdx: c, actIdx: c + 1 };
+            const spanEnd = gridMergeSpans.get(c) || c + 2;
+            let metaIdx = c;
+            let actIdx = c + 1;
+            for (let subC = c; subC < spanEnd; subC++) {
+              const sub = h1[subC] || '';
+              if (sub.includes('meta') || sub.includes('cuota') || sub.includes('objetivo')) {
+                metaIdx = subC;
+              } else if (sub.includes('activado') || sub.includes('ejecutado') || sub.includes('real') || sub.includes('logro')) {
+                actIdx = subC;
+              }
+            }
+            if (metaIdx === actIdx) {
+              actIdx = metaIdx === c ? c + 1 : c;
+            }
+            return { metaIdx, actIdx };
           }
         }
         return { metaIdx: fallbackMeta, actIdx: fallbackAct };
       };
 
-      const GRID_KEYWORDS: Record<string, { kw: string[]; fallbackMeta: number; fallbackAct: number }> = {
-        AZUCAR: { kw: ['azucar'], fallbackMeta: 2, fallbackAct: 3 },
-        LECHE_VENCAMPO: { kw: ['leche_vencampo', 'leche_en_polvo_vencampo', 'leche'], fallbackMeta: 4, fallbackAct: 5 },
-        POLLO: { kw: ['pollo'], fallbackMeta: 6, fallbackAct: 7 },
-        ESTANDAR_ASTURIAS: { kw: ['estandar_y_superior_asturias', 'estandar', 'superior'], fallbackMeta: 8, fallbackAct: 9 },
-        MORTADELA_SALPICAO: { kw: ['mortadela_salpicao_y_asturias', 'mortadela_salpicao', 'mortadela', 'salpicao'], fallbackMeta: 10, fallbackAct: 11 }
-      };
-
       const catDefs = RUBROS_ACTIVOS_CONFIG.map((r) => {
-        const g = GRID_KEYWORDS[r.codigo] || { kw: [normalizeHeaderKey(r.categoriaServidor)], fallbackMeta: -1, fallbackAct: -1 };
-        return { name: r.categoriaServidor, ...findCategoryColsFromRow1(g.kw, g.fallbackMeta, g.fallbackAct) };
+        const g = GRID_CATEGORY_HEADER_KEYWORDS[r.codigo as keyof typeof GRID_CATEGORY_HEADER_KEYWORDS] || {
+          keywords: [normalizeHeaderKey(r.categoriaServidor)],
+          fallbackMeta: -1,
+          fallbackAct: -1
+        };
+        return { name: r.categoriaServidor, ...findCategoryColsFromRow1(g.keywords, g.fallbackMeta, g.fallbackAct) };
       });
 
       const sumByCat = new Map<string, { meta: number; activados: number }>();
@@ -1584,31 +1697,62 @@ export function parseWorkbookFull(
         }
 
         const rawVendor = row[resolvedVendorCol];
-        const rawVName = rawVendor !== null && rawVendor !== undefined ? String(rawVendor).replace(/\s+/g, ' ').trim() : '';
+        const rawVName = sanitizeSheetText(rawVendor);
+        const isRepeatedHeader = rawVName
+          ? ['vendedor', 'ruta', 'ejecutivo', 'vendedor_nombre'].includes(normalizeHeaderKey(rawVName))
+          : false;
+        const isLabeledSummary = rawVName ? isSummaryOrHeaderLabel(rawVName) : false;
 
-        if (!rawVName) {
-          // Fila final de sumatoria sin nombre de vendedor: excluir de metas_activacion y auditar contra SUM(filas)
+        if (isRepeatedHeader) {
           tabMetric.summaryRowsSkipped++;
-          for (const cDef of catDefs) {
-            const footerMeta = Math.round(parseLocaleNumber(row[cDef.metaIdx], 0));
-            const footerAct = Math.round(parseLocaleNumber(row[cDef.actIdx], 0));
-            const computed = sumByCat.get(cDef.name)!;
-            if (footerMeta !== computed.meta || footerAct !== computed.activados) {
-              auditLogs.push({
-                severity: 'WARN',
-                sheet_name: gridResolved.sheetName,
-                row_number: r + 1,
-                event_code: 'GRID_FOOTER_MISMATCH',
-                entity_key: cDef.name,
-                message: `Descuadre en fila total del Grid para "${cDef.name}": fila=${footerMeta}/${footerAct} vs suma=${computed.meta}/${computed.activados}.`,
-                payload: {
-                  categoria: cDef.name,
-                  footerMeta,
-                  computedMeta: computed.meta,
-                  footerActivados: footerAct,
-                  computedActivados: computed.activados
-                }
-              });
+          auditLogs.push({
+            severity: 'INFO',
+            sheet_name: gridResolved.sheetName,
+            row_number: r + 1,
+            event_code: 'SUMMARY_OR_REPEATED_HEADER_SKIPPED',
+            entity_key: rawVName,
+            message: `Encabezado repetido ("${rawVName}") excluido en "${gridResolved.sheetName}".`
+          });
+          continue;
+        }
+
+        if (!rawVName || isLabeledSummary) {
+          // Fila final o etiquetada de sumatoria/promedio (TOTAL, SUBTOTAL, TOTAL GENERAL, PROMEDIO o en blanco):
+          // excluir de metas_activacion y auditar totales contra SUM(filas)
+          tabMetric.summaryRowsSkipped++;
+          const isPromedio = /PROMEDIO|MEDIA/i.test(rawVName);
+          if (isLabeledSummary) {
+            auditLogs.push({
+              severity: 'INFO',
+              sheet_name: gridResolved.sheetName,
+              row_number: r + 1,
+              event_code: 'SUMMARY_OR_REPEATED_HEADER_SKIPPED',
+              entity_key: rawVName,
+              message: `Fila resumen etiquetada ("${rawVName}") excluida en "${gridResolved.sheetName}" para evitar doble conteo.`
+            });
+          }
+          if (!isPromedio) {
+            for (const cDef of catDefs) {
+              const footerMeta = Math.round(parseLocaleNumber(row[cDef.metaIdx], 0));
+              const footerAct = Math.round(parseLocaleNumber(row[cDef.actIdx], 0));
+              const computed = sumByCat.get(cDef.name)!;
+              if (footerMeta !== computed.meta || footerAct !== computed.activados) {
+                auditLogs.push({
+                  severity: 'WARN',
+                  sheet_name: gridResolved.sheetName,
+                  row_number: r + 1,
+                  event_code: 'GRID_FOOTER_MISMATCH',
+                  entity_key: cDef.name,
+                  message: `Descuadre en fila total del Grid para "${cDef.name}": fila=${footerMeta}/${footerAct} vs suma=${computed.meta}/${computed.activados}.`,
+                  payload: {
+                    categoria: cDef.name,
+                    footerMeta,
+                    computedMeta: computed.meta,
+                    footerActivados: footerAct,
+                    computedActivados: computed.activados
+                  }
+                });
+              }
             }
           }
           continue;
@@ -1623,12 +1767,21 @@ export function parseWorkbookFull(
         const vName = normalizeVendorKey(rawVName) === 'LUIS GUANIPA' ? 'VICTORIA VARGAS' : rawVName;
         const vKey = normalizeVendorKey(vName);
         const routeLookupKey = resolveCanonicalRouteKey(vKey);
-        const cartera = Math.round(parseLocaleNumber(row[resolvedCarteraCol], 0));
+        const cartera = Math.max(
+          0,
+          Math.round(parseLocaleNumber(row[resolvedCarteraCol], 0, qualityTracker, `${gridResolved.sheetName}:R${r + 1}:cartera`))
+        );
         const detailCounts = clientActByVendorKey.get(vKey) || clientActByVendorKey.get(routeLookupKey);
 
         for (const cDef of catDefs) {
-          const meta = Math.round(parseLocaleNumber(row[cDef.metaIdx], 0));
-          const activados = Math.round(parseLocaleNumber(row[cDef.actIdx], 0));
+          const meta = Math.max(
+            0,
+            Math.round(parseLocaleNumber(row[cDef.metaIdx], 0, qualityTracker, `${gridResolved.sheetName}:R${r + 1}:${cDef.name}:meta`))
+          );
+          const activados = Math.max(
+            0,
+            Math.round(parseLocaleNumber(row[cDef.actIdx], 0, qualityTracker, `${gridResolved.sheetName}:R${r + 1}:${cDef.name}:act`))
+          );
 
           const acc = sumByCat.get(cDef.name)!;
           acc.meta += meta;
@@ -1652,24 +1805,27 @@ export function parseWorkbookFull(
             });
           }
 
-          metasSupabaseRows.push({
-            periodo,
-            vendedor_id: vName,
-            vendedor_key: vKey,
-            categoria: cDef.name,
-            cartera,
-            meta,
-            activados
-          });
-
-          metasApiRows.push({
+          const candidateMetaApi = {
             vendedorId: vName,
             vendedorKey: vKey,
             categoria: cDef.name,
             cartera,
             meta,
             activados
-          });
+          };
+          if (isValidMetaRecord(candidateMetaApi)) {
+            metasSupabaseRows.push({
+              periodo,
+              vendedor_id: vName,
+              vendedor_key: vKey,
+              categoria: cDef.name,
+              cartera,
+              meta,
+              activados
+            });
+
+            metasApiRows.push(candidateMetaApi);
+          }
         }
       }
     }
@@ -1894,31 +2050,56 @@ export function parseWorkbookFull(
           : [];
 
         degustacionesRows.push({
-          id,
-          createdAt: parseSheetDate(row[cols.fechaRegistro]) || String(row[cols.fechaRegistro] ?? '').trim(),
-          vendedorNombre,
-          vendedorId: ruta || vendedorNombre,
+          id: sanitizeSheetText(id),
+          createdAt: parseSheetDate(row[cols.fechaRegistro]) || sanitizeSheetText(row[cols.fechaRegistro]),
+          vendedorNombre: sanitizeSheetText(vendedorNombre),
+          vendedorId: sanitizeSheetText(ruta || vendedorNombre),
           vendedorKey,
-          ruta,
+          ruta: sanitizeSheetText(ruta),
           clienteCodigo: normalizeClientCode(row[cols.clienteCodigo]).rawClean || 'PDV',
-          clienteNombre,
+          clienteNombre: sanitizeSheetText(clienteNombre),
           fecha: fechaDeg,
-          turno: String(row[cols.turno] ?? 'MAÑANA').trim().toUpperCase(),
-          hora: String(row[cols.horario] ?? '').trim(),
-          productos: parsedProductos,
-          kilosEstimados: +parseLocaleNumber(row[cols.kilosEstimados], 0).toFixed(2),
-          personasEstimadas: Math.round(parseLocaleNumber(row[cols.personasEstimadas], 0)),
+          turno: sanitizeSheetText(row[cols.turno] ?? 'MAÑANA').toUpperCase(),
+          hora: sanitizeSheetText(row[cols.horario]),
+          productos: parsedProductos.map((p) => sanitizeSheetText(p)).filter(Boolean),
+          kilosEstimados: roundToDecimals(
+            parseLocaleNumber(row[cols.kilosEstimados], 0, qualityTracker, `${degResolved.sheetName}:R${r + 1}:kilos`),
+            2
+          ),
+          personasEstimadas: Math.max(
+            0,
+            Math.round(
+              parseLocaleNumber(row[cols.personasEstimadas], 0, qualityTracker, `${degResolved.sheetName}:R${r + 1}:personas`)
+            )
+          ),
           requierePromotora: parseTruthySheetFlag(row[cols.requierePromotora]),
           materialPop: parseTruthySheetFlag(row[cols.materialPop]),
-          contactoPunto: String(row[cols.contactoPunto] ?? '').trim(),
-          telefonoContacto: String(row[cols.telefonoContacto] ?? '').trim(),
-          estado: String(row[cols.estado] ?? 'SOLICITADA').trim().toUpperCase(),
-          promotoraAsignada: String(row[cols.promotoraAsignada] ?? '').trim(),
-          notasTradeMarketing: String(row[cols.notasTradeMarketing] ?? '').trim()
+          contactoPunto: sanitizeSheetText(row[cols.contactoPunto]),
+          telefonoContacto: sanitizeSheetText(row[cols.telefonoContacto]),
+          estado: sanitizeSheetText(row[cols.estado] ?? 'SOLICITADA').toUpperCase(),
+          promotoraAsignada: sanitizeSheetText(row[cols.promotoraAsignada]),
+          notasTradeMarketing: sanitizeSheetText(row[cols.notasTradeMarketing])
         });
       }
     }
     metrics[degResolved.sheetName] = tabMetric;
+  }
+
+  const dataQuality = qualityTracker.snapshot();
+  if (dataQuality.sheetErrors > 0 || dataQuality.invalidText > 0) {
+    auditLogs.push({
+      severity: 'WARN',
+      sheet_name: 'WORKBOOK_QUALITY',
+      row_number: null,
+      event_code: 'DATA_QUALITY_COERCIONS',
+      message: `Calidad de datos numéricos: ${dataQuality.sheetErrors} errores de fórmula (#N/A/#DIV/0!) y ${dataQuality.invalidText} textos no numéricos saneados a 0.`,
+      payload: {
+        totalParsed: dataQuality.totalParsed,
+        sheetErrors: dataQuality.sheetErrors,
+        invalidText: dataQuality.invalidText,
+        samples: dataQuality.samples.slice(0, 15)
+      }
+    });
   }
 
   return {
@@ -1935,6 +2116,7 @@ export function parseWorkbookFull(
     degustacionesRows,
     metrics,
     warnings,
-    auditLogs
+    auditLogs,
+    dataQuality
   };
 }

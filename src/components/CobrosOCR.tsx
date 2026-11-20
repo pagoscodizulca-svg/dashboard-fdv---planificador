@@ -42,6 +42,7 @@ import {
   normalizeBcvDateInput,
   parseNumeroBcv
 } from '../services/bcvRateService';
+import { parseSafeNumber, sumMoneyCents } from '../utils/safeNumber';
 
 // Error Boundary específico para CobrosOCR para evitar que cualquier fallo deje la pantalla en blanco
 interface ErrorBoundaryProps {
@@ -377,12 +378,12 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
         ruta: String(c.ruta || ruta || 'Ruta 1'),
         metodo_pago: String(c.metodo_pago || 'Transferencia'),
         banco: String(c.banco || 'No especificado'),
-        monto: Number(c.monto) || 0,
+        monto: parseSafeNumber(c.monto, 0),
         referencia: String(c.referencia || ''),
         fecha_pago: String(c.fecha_pago || new Date().toISOString().split('T')[0]),
         titular: String(c.titular || 'No especificado'),
         rif: String(c.rif || ''),
-        tasa: Number(c.tasa) || 0,
+        tasa: parseSafeNumber(c.tasa, { fallback: 0, allowThreeDecimals: true }),
         codigo_cliente: String(c.codigo_cliente || 'N/A'),
         nombre_cliente: String(c.nombre_cliente || 'Sin nombre'),
         factura: String(c.factura || 'N/A'),
@@ -415,7 +416,7 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
         );
       });
 
-      const totalBs = normalizedRecords.reduce((acc, r) => acc + (Number(r.monto) || 0), 0);
+      const totalBs = sumMoneyCents(normalizedRecords.map((r) => r.monto));
       if (!silent) {
         notifyUser(
           'success',
@@ -1523,11 +1524,14 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
     setAlertMsg({ type: 'info', text: 'Generando documento PDF de la relación...' });
     try {
       const doc = new jsPDF('landscape');
-      const totalMonto = pagosConsolidados.reduce((acc, curr) => acc + (Number(curr.monto) || 0), 0);
-      const totalUSD = pagosConsolidados.reduce((acc, curr) => {
-        const t = Number(curr.tasa) || 0;
-        return acc + (t > 0 ? (Number(curr.monto) || 0) / t : 0);
-      }, 0);
+      const totalMonto = sumMoneyCents(pagosConsolidados.map((curr) => curr.monto));
+      const totalUSD = sumMoneyCents(
+        pagosConsolidados.map((curr) => {
+          const t = parseSafeNumber(curr.tasa, { fallback: 0, allowThreeDecimals: true });
+          const m = parseSafeNumber(curr.monto, 0);
+          return t > 0 ? m / t : 0;
+        })
+      );
 
       // Encabezado
       doc.setFontSize(14);
@@ -1541,8 +1545,8 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
 
       // Tabla de Pagos
       const tableData = pagosConsolidados.map(p => {
-        const m = Number(p.monto) || 0;
-        const t = Number(p.tasa) || 0;
+        const m = parseSafeNumber(p.monto, 0);
+        const t = parseSafeNumber(p.tasa, { fallback: 0, allowThreeDecimals: true });
         const usd = t > 0 ? (m / t).toFixed(2) : '0.00';
         return [
           p.codigo_cliente || 'N/A',
@@ -1638,11 +1642,15 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
     try {
       const doc = new jsPDF('landscape');
       const pagos = Array.isArray(rel.pagos) ? rel.pagos : [];
-      const totalMonto = Number(rel.montoTotal) || pagos.reduce((acc: number, curr: any) => acc + (Number(curr.monto) || 0), 0);
-      const totalUSD = pagos.reduce((acc: number, curr: any) => {
-        const t = Number(curr.tasa) || 0;
-        return acc + (t > 0 ? (Number(curr.monto) || 0) / t : 0);
-      }, 0);
+      const parsedRelTotal = parseSafeNumber(rel.montoTotal, 0);
+      const totalMonto = parsedRelTotal > 0 ? parsedRelTotal : sumMoneyCents(pagos.map((curr: any) => curr.monto));
+      const totalUSD = sumMoneyCents(
+        pagos.map((curr: any) => {
+          const t = parseSafeNumber(curr.tasa, { fallback: 0, allowThreeDecimals: true });
+          const m = parseSafeNumber(curr.monto, 0);
+          return t > 0 ? m / t : 0;
+        })
+      );
 
       doc.setFontSize(14);
       doc.setTextColor(211, 47, 47);
@@ -1654,8 +1662,8 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
       doc.text(`Total Pagos: ${pagos.length}  |  Total Bs: ${new Intl.NumberFormat('es-VE', { minimumFractionDigits: 2 }).format(totalMonto)}  |  Total USD: $${totalUSD.toFixed(2)}`, 14, 26);
 
       const tableData = pagos.map((p: any) => {
-        const m = Number(p.monto) || 0;
-        const t = Number(p.tasa) || 0;
+        const m = parseSafeNumber(p.monto, 0);
+        const t = parseSafeNumber(p.tasa, { fallback: 0, allowThreeDecimals: true });
         const usd = t > 0 ? (m / t).toFixed(2) : '0.00';
         return [
           p.codigo_cliente || 'N/A',
@@ -1717,7 +1725,7 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
   const handleEnviarCuentasPorCobrar = () => {
     if (pagosConsolidados.length === 0) return;
 
-    const totalMonto = pagosConsolidados.reduce((acc, curr) => acc + (Number(curr.monto) || 0), 0);
+    const totalMonto = sumMoneyCents(pagosConsolidados.map((curr) => curr.monto));
     const nuevaRelacion = {
       id: `rel-${Date.now()}`,
       fecha: new Date().toISOString(),
@@ -2722,7 +2730,7 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
                   <span className="text-neutral-400">Total a Relacionar:</span>
                   <span className="text-emerald-400 font-bold text-sm">
                     Bs. {new Intl.NumberFormat('es-VE', { minimumFractionDigits: 2 }).format(
-                      pagosConsolidados.reduce((acc, curr) => acc + (Number(curr.monto) || 0), 0)
+                      sumMoneyCents(pagosConsolidados.map((curr) => curr.monto))
                     )}
                   </span>
                 </div>
@@ -2775,7 +2783,8 @@ export const CobrosOCRInner: React.FC<CobrosOCRProps> = ({
             <div className="grid gap-3.5">
               {historialRelaciones.map(rel => {
                 const pagos = Array.isArray(rel.pagos) ? rel.pagos : [];
-                const montoTotal = Number(rel.montoTotal) || pagos.reduce((acc: number, curr: any) => acc + (Number(curr.monto) || 0), 0);
+                const parsedRelTotal = parseSafeNumber(rel.montoTotal, 0);
+                const montoTotal = parsedRelTotal > 0 ? parsedRelTotal : sumMoneyCents(pagos.map((curr: any) => curr.monto));
                 return (
                   <details key={rel.id} className="bg-neutral-950 border border-neutral-800 rounded-xl group overflow-hidden shadow-xs">
                     <summary className="p-4 bg-neutral-900/60 hover:bg-neutral-800/60 cursor-pointer flex flex-col md:flex-row md:items-center justify-between gap-4 transition-colors list-none">

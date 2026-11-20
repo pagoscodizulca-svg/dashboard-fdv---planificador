@@ -1,12 +1,38 @@
 import { VolumenData } from '../types';
+import { isClientActiveInAnyFocusProduct } from '../config/sheetsConfig';
 
-let memVolumen: { key: string; data: VolumenData[]; time: number } | null = null;
-let memActivacion: { key: string; data: any[]; time: number } | null = null;
-let memMetas: { key: string; data: any[]; time: number } | null = null;
-const MEM_TTL = 25000; // 25s ventana corta en memoria; SWR revalida en segundo plano
+export const DEFAULT_SHEETS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos (configurable)
+let cacheTtlMs = DEFAULT_SHEETS_CACHE_TTL_MS;
 
-const SWR_PREFIX = 'fdv_swr_v2_';
-const SWR_SYNC_META_KEY = `${SWR_PREFIX}sync_meta`;
+export const getSheetsCacheTtlMs = (): number => cacheTtlMs;
+
+export const setSheetsCacheTtlMs = (ms: number): void => {
+  if (typeof ms === 'number' && Number.isFinite(ms) && ms >= 0) {
+    cacheTtlMs = ms;
+  }
+};
+
+interface CacheEntry<T> {
+  key: string;
+  data: T;
+  savedAt: number;
+}
+
+const memVolumen = new Map<string, CacheEntry<VolumenData[]>>();
+const memActivacion = new Map<string, CacheEntry<any[]>>();
+const memMetas = new Map<string, CacheEntry<any[]>>();
+
+interface InFlightEntry<T> {
+  promise: Promise<T>;
+  controller: AbortController;
+  listeners: number;
+}
+
+const inFlightRequests = new Map<string, InFlightEntry<any>>();
+
+const SESSION_PREFIX = 'fdv_sheets_v3_';
+const LEGACY_SWR_PREFIX = 'fdv_swr_v2_';
+const SYNC_META_KEY = `${SESSION_PREFIX}sync_meta`;
 
 export interface SheetsSyncMeta {
   lastSyncAt: string | null;
@@ -14,50 +40,100 @@ export interface SheetsSyncMeta {
   updatedAt: number;
 }
 
-const buildSwrKey = (type: 'vol' | 'act' | 'metas', cacheKey: string): string => {
-  const safe = String(cacheKey || 'ALL').replace(/[^a-zA-Z0-9:_-]/g, '_');
-  return `${SWR_PREFIX}${type}_${safe}`;
-};
+export interface FetchSheetsOptions {
+  forceRefresh?: boolean;
+  vendorId?: string;
+  signal?: AbortSignal;
+  ttlMs?: number;
+}
 
-const readSwrStorage = <T>(storageKey: string): T | null => {
-  if (typeof window === 'undefined' || !window.localStorage) return null;
+const getSessionStorageSafe = (): Storage | null => {
+  if (typeof window === 'undefined') return null;
   try {
-    const raw = window.localStorage.getItem(storageKey);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    return (parsed && parsed.data !== undefined ? parsed.data : parsed) as T;
+    return window.sessionStorage || null;
   } catch {
     return null;
   }
 };
 
-const writeSwrStorage = (storageKey: string, data: unknown): void => {
-  if (typeof window === 'undefined' || !window.localStorage) return;
+const buildCacheStorageKey = (type: 'vol' | 'act' | 'metas', cacheKey: string): string => {
+  const safe = String(cacheKey || 'ALL').replace(/[^a-zA-Z0-9:_-]/g, '_');
+  return `${SESSION_PREFIX}${type}_${safe}`;
+};
+
+const readSessionCache = <T>(storageKey: string, ttlMs: number = cacheTtlMs): T | null => {
+  const storage = getSessionStorageSafe();
+  if (!storage) return null;
+  try {
+    const raw = storage.getItem(storageKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || typeof parsed.savedAt !== 'number') {
+      storage.removeItem(storageKey);
+      return null;
+    }
+    if (Date.now() - parsed.savedAt >= ttlMs) {
+      storage.removeItem(storageKey);
+      return null;
+    }
+    return parsed.data as T;
+  } catch {
+    try {
+      storage.removeItem(storageKey);
+    } catch {
+      // no-op
+    }
+    return null;
+  }
+};
+
+const writeSessionCache = (storageKey: string, data: unknown): void => {
+  const storage = getSessionStorageSafe();
+  if (!storage) return;
   const payload = JSON.stringify({ data, savedAt: Date.now() });
   try {
-    window.localStorage.setItem(storageKey, payload);
+    storage.setItem(storageKey, payload);
   } catch {
-    // Si localStorage alcanzó cuota máxima, limpiar entradas SWR antiguas y reintentar una vez
+    // Si sessionStorage alcanzó cuota máxima, purgar entradas previas y reintentar una vez
     try {
       const keysToRemove: string[] = [];
-      for (let i = 0; i < window.localStorage.length; i++) {
-        const k = window.localStorage.key(i);
-        if (k && k.startsWith(SWR_PREFIX) && k !== SWR_SYNC_META_KEY && k !== storageKey) {
+      for (let i = 0; i < storage.length; i++) {
+        const k = storage.key(i);
+        if (k && k.startsWith(SESSION_PREFIX) && k !== SYNC_META_KEY && k !== storageKey) {
           keysToRemove.push(k);
         }
       }
-      keysToRemove.forEach((k) => window.localStorage.removeItem(k));
-      window.localStorage.setItem(storageKey, payload);
+      keysToRemove.forEach((k) => storage.removeItem(k));
+      storage.setItem(storageKey, payload);
     } catch {
-      // Ignorar silenciosamente si el navegador bloquea almacenamiento privado
+      // Ignorar silenciosamente si el navegador restringe almacenamiento privado
     }
   }
 };
 
+const purgeLegacyLocalStorageCache = (): void => {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  try {
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (k && k.startsWith(LEGACY_SWR_PREFIX)) {
+        keysToRemove.push(k);
+      }
+    }
+    keysToRemove.forEach((k) => window.localStorage.removeItem(k));
+  } catch {
+    // no-op
+  }
+};
+
+// Limpiar entradas legacy sin TTL en localStorage al inicializar el módulo
+purgeLegacyLocalStorageCache();
+
 const emitSyncMetaUpdate = (meta: SheetsSyncMeta): void => {
   if (typeof window === 'undefined') return;
   try {
-    window.localStorage?.setItem(SWR_SYNC_META_KEY, JSON.stringify(meta));
+    getSessionStorageSafe()?.setItem(SYNC_META_KEY, JSON.stringify(meta));
     window.dispatchEvent(new CustomEvent('fdv-sheets-sync-meta', { detail: meta }));
   } catch {
     // no-op
@@ -65,11 +141,12 @@ const emitSyncMetaUpdate = (meta: SheetsSyncMeta): void => {
 };
 
 export const getLastSyncMetadata = (): SheetsSyncMeta => {
-  if (typeof window === 'undefined' || !window.localStorage) {
+  const storage = getSessionStorageSafe();
+  if (!storage) {
     return { lastSyncAt: null, source: null, updatedAt: 0 };
   }
   try {
-    const raw = window.localStorage.getItem(SWR_SYNC_META_KEY);
+    const raw = storage.getItem(SYNC_META_KEY);
     if (!raw) return { lastSyncAt: null, source: null, updatedAt: 0 };
     const parsed = JSON.parse(raw);
     return {
@@ -82,9 +159,19 @@ export const getLastSyncMetadata = (): SheetsSyncMeta => {
   }
 };
 
+const readFreshMemory = <T>(map: Map<string, CacheEntry<T>>, cacheKey: string, ttlMs: number): T | null => {
+  const entry = map.get(cacheKey);
+  if (!entry) return null;
+  if (Date.now() - entry.savedAt >= ttlMs) {
+    map.delete(cacheKey);
+    return null;
+  }
+  return entry.data;
+};
+
 /**
- * Obtiene instantáneamente (0 ms) la instantánea local Stale-While-Revalidate (SWR)
- * para mostrar datos al vendedor de inmediato mientras se revalida con Google Sheets en segundo plano.
+ * Obtiene instantáneamente (0 ms) la instantánea vigente dentro del TTL de sesión (5 min por defecto)
+ * sin servir jamás datos caducados indefinidamente.
  */
 export const getCachedSheetsSnapshot = (vendorId?: string): {
   volumen: VolumenData[];
@@ -95,16 +182,16 @@ export const getCachedSheetsSnapshot = (vendorId?: string): {
 } => {
   const cacheKey = `${vendorId || 'ALL'}`;
   const vol =
-    (memVolumen?.key === cacheKey ? memVolumen.data : null) ||
-    readSwrStorage<VolumenData[]>(buildSwrKey('vol', cacheKey)) ||
+    readFreshMemory(memVolumen, cacheKey, cacheTtlMs) ||
+    readSessionCache<VolumenData[]>(buildCacheStorageKey('vol', cacheKey), cacheTtlMs) ||
     [];
   const act =
-    (memActivacion?.key === cacheKey ? memActivacion.data : null) ||
-    readSwrStorage<any[]>(buildSwrKey('act', cacheKey)) ||
+    readFreshMemory(memActivacion, cacheKey, cacheTtlMs) ||
+    readSessionCache<any[]>(buildCacheStorageKey('act', cacheKey), cacheTtlMs) ||
     [];
   const metas =
-    (memMetas?.key === cacheKey ? memMetas.data : null) ||
-    readSwrStorage<any[]>(buildSwrKey('metas', cacheKey)) ||
+    readFreshMemory(memMetas, cacheKey, cacheTtlMs) ||
+    readSessionCache<any[]>(buildCacheStorageKey('metas', cacheKey), cacheTtlMs) ||
     [];
   const meta = getLastSyncMetadata();
 
@@ -118,23 +205,27 @@ export const getCachedSheetsSnapshot = (vendorId?: string): {
 };
 
 export const clearSheetsCache = (clearPersistent: boolean = false): void => {
-  memVolumen = null;
-  memActivacion = null;
-  memMetas = null;
+  memVolumen.clear();
+  memActivacion.clear();
+  memMetas.clear();
 
-  if (clearPersistent && typeof window !== 'undefined' && window.localStorage) {
-    try {
-      const keysToRemove: string[] = [];
-      for (let i = 0; i < window.localStorage.length; i++) {
-        const k = window.localStorage.key(i);
-        if (k && k.startsWith(SWR_PREFIX)) {
-          keysToRemove.push(k);
+  if (clearPersistent) {
+    const storage = getSessionStorageSafe();
+    if (storage) {
+      try {
+        const keysToRemove: string[] = [];
+        for (let i = 0; i < storage.length; i++) {
+          const k = storage.key(i);
+          if (k && k.startsWith(SESSION_PREFIX)) {
+            keysToRemove.push(k);
+          }
         }
+        keysToRemove.forEach((k) => storage.removeItem(k));
+      } catch {
+        // no-op
       }
-      keysToRemove.forEach((k) => window.localStorage.removeItem(k));
-    } catch {
-      // no-op
     }
+    purgeLegacyLocalStorageCache();
   }
 };
 
@@ -147,24 +238,64 @@ interface RetryFetchOptions {
   timeoutMs?: number;
   maxAttempts?: number;
   baseDelayMs?: number;
+  signal?: AbortSignal;
   onRetry?: (attempt: number, maxAttempts: number) => void;
 }
 
+const createAbortError = (): Error => {
+  if (typeof DOMException !== 'undefined') {
+    return new DOMException('La solicitud fue cancelada.', 'AbortError');
+  }
+  const err = new Error('La solicitud fue cancelada.');
+  err.name = 'AbortError';
+  return err;
+};
+
+const isAbortError = (err: unknown): boolean => {
+  if (!err || typeof err !== 'object') return false;
+  return (err as { name?: string }).name === 'AbortError';
+};
+
+const waitWithSignal = (ms: number, signal?: AbortSignal): Promise<void> =>
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(createAbortError());
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(createAbortError());
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+
 /**
- * Fetch con cabeceras estrictas anti-caché y reintento automático con Exponential Backoff
- * para proteger a los vendedores ante micro-cortes o fluctuaciones de señal móvil (3G/4G).
+ * Fetch con cabeceras estrictas anti-caché, soporte de AbortSignal del llamador y
+ * reintento automático con Exponential Backoff para resiliencia en redes móviles (3G/4G).
  */
 export const fetchWithRetryBackoff = async (
   url: string,
   options: RequestInit = {},
   retryOpts: RetryFetchOptions = {}
 ): Promise<Response> => {
-  const { timeoutMs = 12000, maxAttempts = 3, baseDelayMs = 600, onRetry } = retryOpts;
+  const { timeoutMs = 12000, maxAttempts = 3, baseDelayMs = 600, signal: callerSignal, onRetry } = retryOpts;
+  const externalSignal = callerSignal || options.signal || undefined;
   let lastError: any = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (externalSignal?.aborted) {
+      throw createAbortError();
+    }
+
     const controller = new AbortController();
+    const onExternalAbort = () => controller.abort();
+    externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+
     try {
       const separator = url.includes('?') ? '&' : '?';
       const bustUrl = `${url}${separator}_t=${Date.now()}`;
@@ -186,16 +317,20 @@ export const fetchWithRetryBackoff = async (
 
       lastError = new Error(`HTTP ${response.status}`);
     } catch (err: any) {
+      if (externalSignal?.aborted) {
+        throw createAbortError();
+      }
       lastError = err;
     } finally {
       clearTimeout(timer);
+      externalSignal?.removeEventListener('abort', onExternalAbort);
     }
 
     if (attempt < maxAttempts) {
       if (onRetry) onRetry(attempt + 1, maxAttempts);
       const jitter = Math.floor(Math.random() * 150);
       const delay = baseDelayMs * Math.pow(2, attempt - 1) + jitter;
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      await waitWithSignal(delay, externalSignal);
     }
   }
 
@@ -214,103 +349,188 @@ const recordResponseSyncHeaders = (response: Response, fallbackTimestamp?: strin
   });
 };
 
-export const fetchVolumenData = async (force: boolean = false, vendorId?: string): Promise<VolumenData[]> => {
-  const cacheKey = `${vendorId || 'ALL'}`;
-  const swrKey = buildSwrKey('vol', cacheKey);
-  if (!force && memVolumen && memVolumen.key === cacheKey && Date.now() - memVolumen.time < MEM_TTL) {
-    return memVolumen.data;
+function resolveFetchArgs(
+  forceOrOpts?: boolean | FetchSheetsOptions,
+  vendorId?: string,
+  signal?: AbortSignal
+): { force: boolean; vendorId?: string; signal?: AbortSignal; ttlMs: number } {
+  if (typeof forceOrOpts === 'object' && forceOrOpts !== null) {
+    return {
+      force: Boolean(forceOrOpts.forceRefresh),
+      vendorId: forceOrOpts.vendorId,
+      signal: forceOrOpts.signal,
+      ttlMs: typeof forceOrOpts.ttlMs === 'number' ? forceOrOpts.ttlMs : cacheTtlMs
+    };
+  }
+  return {
+    force: Boolean(forceOrOpts),
+    vendorId,
+    signal,
+    ttlMs: cacheTtlMs
+  };
+}
+
+function attachCallerSignal<T>(entry: InFlightEntry<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) {
+    return entry.promise;
+  }
+  if (signal.aborted) {
+    return Promise.reject(createAbortError());
   }
 
-  try {
-    const vParam = vendorId ? `&vendedor=${encodeURIComponent(vendorId)}` : '';
-    const response = await fetchWithRetryBackoff(
-      `/api/data/volumen?force=${force}${vParam}`,
-      { headers: getAuthHeaders() },
-      { timeoutMs: force ? 18000 : 10000, maxAttempts: 3 }
+  entry.listeners++;
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      signal.removeEventListener('abort', onAbort);
+    };
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      entry.listeners = Math.max(0, entry.listeners - 1);
+      if (entry.listeners === 0) {
+        entry.controller.abort();
+      }
+      reject(createAbortError());
+    };
+
+    signal.addEventListener('abort', onAbort, { once: true });
+    entry.promise.then(
+      (val) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(val);
+      },
+      (err) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
+      }
     );
-    if (!response.ok) {
-      return (memVolumen?.key === cacheKey ? memVolumen.data : null) || readSwrStorage<VolumenData[]>(swrKey) || [];
-    }
-    const text = await response.text();
-    if (!text.trim().startsWith('{') && !text.trim().startsWith('[')) {
-      console.warn('Respuesta no-JSON recibida en volumen data.');
-      return (memVolumen?.key === cacheKey ? memVolumen.data : null) || readSwrStorage<VolumenData[]>(swrKey) || [];
-    }
-    const parsed: VolumenData[] = JSON.parse(text);
-    memVolumen = { key: cacheKey, data: parsed, time: Date.now() };
-    writeSwrStorage(swrKey, parsed);
-    recordResponseSyncHeaders(response);
-    return parsed;
-  } catch (error: any) {
-    console.warn('Error leyendo volumen data (usando respaldo SWR):', error?.message);
-    return (memVolumen?.key === cacheKey ? memVolumen.data : null) || readSwrStorage<VolumenData[]>(swrKey) || [];
+  });
+}
+
+async function fetchDatasetWithDedup<T>(params: {
+  type: 'vol' | 'act' | 'metas';
+  endpoint: string;
+  memMap: Map<string, CacheEntry<T[]>>;
+  force: boolean;
+  vendorId?: string;
+  signal?: AbortSignal;
+  ttlMs: number;
+}): Promise<T[]> {
+  const { type, endpoint, memMap, force, vendorId, signal, ttlMs } = params;
+  if (signal?.aborted) {
+    throw createAbortError();
   }
+
+  const cacheKey = `${vendorId || 'ALL'}`;
+  const storageKey = buildCacheStorageKey(type, cacheKey);
+
+  if (!force) {
+    const freshMem = readFreshMemory(memMap, cacheKey, ttlMs);
+    if (freshMem) return freshMem;
+
+    const freshSession = readSessionCache<T[]>(storageKey, ttlMs);
+    if (freshSession) {
+      memMap.set(cacheKey, { key: cacheKey, data: freshSession, savedAt: Date.now() });
+      return freshSession;
+    }
+  }
+
+  const flightKey = `${type}:${cacheKey}:${force ? 'force' : 'std'}`;
+  const existingFlight = inFlightRequests.get(flightKey) as InFlightEntry<T[]> | undefined;
+  if (existingFlight) {
+    return attachCallerSignal(existingFlight, signal);
+  }
+
+  const controller = new AbortController();
+  const sharedPromise = (async (): Promise<T[]> => {
+    try {
+      const vParam = vendorId ? `&vendedor=${encodeURIComponent(vendorId)}` : '';
+      const response = await fetchWithRetryBackoff(
+        `${endpoint}?force=${force}${vParam}`,
+        { headers: getAuthHeaders() },
+        { timeoutMs: force ? 18000 : 10000, maxAttempts: 3, signal: controller.signal }
+      );
+      if (!response.ok) {
+        return readFreshMemory(memMap, cacheKey, ttlMs) || readSessionCache<T[]>(storageKey, ttlMs) || [];
+      }
+      const text = await response.text();
+      const trimmed = text.trim();
+      if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+        return readFreshMemory(memMap, cacheKey, ttlMs) || readSessionCache<T[]>(storageKey, ttlMs) || [];
+      }
+      const parsed: T[] = JSON.parse(trimmed);
+      if (!Array.isArray(parsed)) {
+        return readFreshMemory(memMap, cacheKey, ttlMs) || readSessionCache<T[]>(storageKey, ttlMs) || [];
+      }
+      memMap.set(cacheKey, { key: cacheKey, data: parsed, savedAt: Date.now() });
+      writeSessionCache(storageKey, parsed);
+      recordResponseSyncHeaders(response);
+      return parsed;
+    } catch (error: any) {
+      if (isAbortError(error) || controller.signal.aborted) {
+        throw createAbortError();
+      }
+      return readFreshMemory(memMap, cacheKey, ttlMs) || readSessionCache<T[]>(storageKey, ttlMs) || [];
+    } finally {
+      inFlightRequests.delete(flightKey);
+    }
+  })();
+
+  const entry: InFlightEntry<T[]> = {
+    promise: sharedPromise,
+    controller,
+    listeners: signal ? 0 : 1
+  };
+  inFlightRequests.set(flightKey, entry);
+
+  return attachCallerSignal(entry, signal);
+}
+
+export const fetchVolumenData = async (
+  forceOrOpts: boolean | FetchSheetsOptions = false,
+  vendorId?: string,
+  signal?: AbortSignal
+): Promise<VolumenData[]> => {
+  const args = resolveFetchArgs(forceOrOpts, vendorId, signal);
+  return fetchDatasetWithDedup<VolumenData>({
+    type: 'vol',
+    endpoint: '/api/data/volumen',
+    memMap: memVolumen,
+    ...args
+  });
 };
 
-export const fetchActivacionData = async (force: boolean = false, vendorId?: string): Promise<any[]> => {
-  const cacheKey = `${vendorId || 'ALL'}`;
-  const swrKey = buildSwrKey('act', cacheKey);
-  if (!force && memActivacion && memActivacion.key === cacheKey && Date.now() - memActivacion.time < MEM_TTL) {
-    return memActivacion.data;
-  }
-
-  try {
-    const vParam = vendorId ? `&vendedor=${encodeURIComponent(vendorId)}` : '';
-    const response = await fetchWithRetryBackoff(
-      `/api/data/activacion?force=${force}${vParam}`,
-      { headers: getAuthHeaders() },
-      { timeoutMs: force ? 18000 : 10000, maxAttempts: 3 }
-    );
-    if (!response.ok) {
-      return (memActivacion?.key === cacheKey ? memActivacion.data : null) || readSwrStorage<any[]>(swrKey) || [];
-    }
-    const text = await response.text();
-    if (!text.trim().startsWith('{') && !text.trim().startsWith('[')) {
-      console.warn('Respuesta no-JSON recibida en activacion data.');
-      return (memActivacion?.key === cacheKey ? memActivacion.data : null) || readSwrStorage<any[]>(swrKey) || [];
-    }
-    const parsed: any[] = JSON.parse(text);
-    memActivacion = { key: cacheKey, data: parsed, time: Date.now() };
-    writeSwrStorage(swrKey, parsed);
-    recordResponseSyncHeaders(response);
-    return parsed;
-  } catch (error: any) {
-    console.warn('Error leyendo activacion data (usando respaldo SWR):', error?.message);
-    return (memActivacion?.key === cacheKey ? memActivacion.data : null) || readSwrStorage<any[]>(swrKey) || [];
-  }
+export const fetchActivacionData = async (
+  forceOrOpts: boolean | FetchSheetsOptions = false,
+  vendorId?: string,
+  signal?: AbortSignal
+): Promise<any[]> => {
+  const args = resolveFetchArgs(forceOrOpts, vendorId, signal);
+  return fetchDatasetWithDedup<any>({
+    type: 'act',
+    endpoint: '/api/data/activacion',
+    memMap: memActivacion,
+    ...args
+  });
 };
 
-export const fetchMetasActivacion = async (force: boolean = false, vendorId?: string): Promise<any[]> => {
-  const cacheKey = `${vendorId || 'ALL'}`;
-  const swrKey = buildSwrKey('metas', cacheKey);
-  if (!force && memMetas && memMetas.key === cacheKey && Date.now() - memMetas.time < MEM_TTL) {
-    return memMetas.data;
-  }
-
-  try {
-    const vParam = vendorId ? `&vendedor=${encodeURIComponent(vendorId)}` : '';
-    const response = await fetchWithRetryBackoff(
-      `/api/data/metas-activacion?force=${force}${vParam}`,
-      { headers: getAuthHeaders() },
-      { timeoutMs: force ? 18000 : 10000, maxAttempts: 3 }
-    );
-    if (!response.ok) {
-      return (memMetas?.key === cacheKey ? memMetas.data : null) || readSwrStorage<any[]>(swrKey) || [];
-    }
-    const text = await response.text();
-    if (!text.trim().startsWith('{') && !text.trim().startsWith('[')) {
-      console.warn('Respuesta no-JSON recibida en metas data.');
-      return (memMetas?.key === cacheKey ? memMetas.data : null) || readSwrStorage<any[]>(swrKey) || [];
-    }
-    const parsed: any[] = JSON.parse(text);
-    memMetas = { key: cacheKey, data: parsed, time: Date.now() };
-    writeSwrStorage(swrKey, parsed);
-    recordResponseSyncHeaders(response);
-    return parsed;
-  } catch (error: any) {
-    console.warn('Error leyendo metas data (usando respaldo SWR):', error?.message);
-    return (memMetas?.key === cacheKey ? memMetas.data : null) || readSwrStorage<any[]>(swrKey) || [];
-  }
+export const fetchMetasActivacion = async (
+  forceOrOpts: boolean | FetchSheetsOptions = false,
+  vendorId?: string,
+  signal?: AbortSignal
+): Promise<any[]> => {
+  const args = resolveFetchArgs(forceOrOpts, vendorId, signal);
+  return fetchDatasetWithDedup<any>({
+    type: 'metas',
+    endpoint: '/api/data/metas-activacion',
+    memMap: memMetas,
+    ...args
+  });
 };
 
 export const toggleClienteRubro = async (
@@ -319,19 +539,18 @@ export const toggleClienteRubro = async (
   active: boolean
 ): Promise<boolean> => {
   const cleanCod = String(clienteCodigo || '').replace(/^[#\s]+/, '').trim();
-  if (memActivacion && Array.isArray(memActivacion.data)) {
-    memActivacion.data.forEach((c: any) => {
-      const cid = String(c.id || '').replace(/^[#\s]+/, '').trim();
-      if (cid === cleanCod) {
-        if (!c.cats) c.cats = {};
-        c.cats[rubro] = active;
-        const anyActive = Boolean(
-          c.cats.AZUCAR || c.cats.LECHE_VENCAMPO || c.cats.ESTANDAR_ASTURIAS || c.cats.MORTADELA_ASTURIAS || c.cats.SALPICAO
-        );
-        c.status = anyActive ? 'ACTIVO' : 'INACTIVO';
-      }
-    });
-    writeSwrStorage(buildSwrKey('act', memActivacion.key), memActivacion.data);
+  for (const [cacheKey, entry] of memActivacion.entries()) {
+    if (Array.isArray(entry.data)) {
+      entry.data.forEach((c: any) => {
+        const cid = String(c.id || '').replace(/^[#\s]+/, '').trim();
+        if (cid === cleanCod) {
+          if (!c.cats) c.cats = {};
+          c.cats[rubro] = active;
+          c.status = isClientActiveInAnyFocusProduct(c) ? 'ACTIVO' : 'INACTIVO';
+        }
+      });
+      writeSessionCache(buildCacheStorageKey('act', cacheKey), entry.data);
+    }
   }
   try {
     const res = await fetchWithRetryBackoff(
@@ -347,14 +566,14 @@ export const toggleClienteRubro = async (
       { timeoutMs: 10000, maxAttempts: 3 }
     );
     return res.ok;
-  } catch (e) {
-    console.warn('Error sincronizando rubro de cliente con el servidor:', e);
+  } catch {
     return false;
   }
 };
 
 export const triggerSheetsSync = async (
-  onRetry?: (attempt: number, maxAttempts: number) => void
+  onRetry?: (attempt: number, maxAttempts: number) => void,
+  signal?: AbortSignal
 ): Promise<{
   success: boolean;
   message: string;
@@ -378,6 +597,7 @@ export const triggerSheetsSync = async (
       timeoutMs: 22000,
       maxAttempts: 3,
       baseDelayMs: 700,
+      signal,
       onRetry
     }
   );
@@ -388,7 +608,7 @@ export const triggerSheetsSync = async (
   }
 
   const data = await response.json();
-  clearSheetsCache(false);
+  clearSheetsCache(true);
   recordResponseSyncHeaders(response, data?.timestamp);
   return data;
 };

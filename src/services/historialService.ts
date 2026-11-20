@@ -1,4 +1,4 @@
-import { getAuthHeaders } from './googleSheetsService';
+import { getAuthHeaders, DEFAULT_SHEETS_CACHE_TTL_MS } from './googleSheetsService';
 import { RubroCodigo, categoriaARubroCodigo } from '../lib/rubros';
 
 export interface HistPeriodo { ano: number; mes: number }
@@ -125,26 +125,112 @@ export class HistorialError extends Error {
   constructor(message: string, code?: string) { super(message); this.code = code; }
 }
 
-async function getJSON<T>(url: string): Promise<T> {
-  const res = await fetch(url, { headers: getAuthHeaders() });
-  let body: any = null;
-  try { body = await res.json(); } catch { /* respuesta vacía */ }
-  if (!res.ok) throw new HistorialError(body?.error || `Error ${res.status} consultando el historial`, body?.code);
-  return body as T;
+export interface HistorialFetchOptions {
+  forceRefresh?: boolean;
+  signal?: AbortSignal;
+  ttlMs?: number;
+}
+
+const histCache = new Map<string, { data: unknown; savedAt: number }>();
+const histInFlight = new Map<string, { promise: Promise<unknown>; controller: AbortController; listeners: number }>();
+
+export function clearHistorialCache(): void {
+  histCache.clear();
+}
+
+const createHistAbortError = (): Error => {
+  if (typeof DOMException !== 'undefined') {
+    return new DOMException('Consulta de historial cancelada.', 'AbortError');
+  }
+  const err = new Error('Consulta de historial cancelada.');
+  err.name = 'AbortError';
+  return err;
+};
+
+async function getJSON<T>(url: string, options: HistorialFetchOptions = {}): Promise<T> {
+  const { forceRefresh = false, signal, ttlMs = DEFAULT_SHEETS_CACHE_TTL_MS } = options;
+  if (signal?.aborted) {
+    throw createHistAbortError();
+  }
+
+  if (!forceRefresh) {
+    const cached = histCache.get(url);
+    if (cached && Date.now() - cached.savedAt < ttlMs) {
+      return cached.data as T;
+    }
+    if (cached) {
+      histCache.delete(url);
+    }
+  }
+
+  const attachSignal = (entry: { promise: Promise<unknown>; controller: AbortController; listeners: number }): Promise<T> => {
+    if (!signal) return entry.promise as Promise<T>;
+    entry.listeners++;
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        entry.listeners = Math.max(0, entry.listeners - 1);
+        if (entry.listeners === 0) entry.controller.abort();
+        reject(createHistAbortError());
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      entry.promise.then(
+        (val) => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener('abort', onAbort);
+          resolve(val as T);
+        },
+        (err) => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener('abort', onAbort);
+          reject(err);
+        }
+      );
+    });
+  };
+
+  const existing = histInFlight.get(url);
+  if (existing && !forceRefresh) {
+    return attachSignal(existing);
+  }
+
+  const controller = new AbortController();
+  const promise = (async () => {
+    try {
+      const res = await fetch(url, { headers: getAuthHeaders(), signal: controller.signal });
+      let body: any = null;
+      try { body = await res.json(); } catch { /* respuesta vacía */ }
+      if (!res.ok) throw new HistorialError(body?.error || `Error ${res.status} consultando el historial`, body?.code);
+      histCache.set(url, { data: body, savedAt: Date.now() });
+      return body as T;
+    } finally {
+      histInFlight.delete(url);
+    }
+  })();
+
+  const entry = { promise, controller, listeners: signal ? 0 : 1 };
+  histInFlight.set(url, entry);
+  return attachSignal(entry);
 }
 
 const v = (vendedor?: string) => (vendedor ? `vendedor=${encodeURIComponent(vendedor)}` : '');
 
-export const fetchHistMeta = () => getJSON<{ periodos: HistPeriodo[] }>('/api/historial/meta');
-export const fetchHistVolumen = (vendedor?: string) =>
-  getJSON<{ rows: HistVolumenRow[] }>(`/api/historial/volumen?${v(vendedor)}`);
-export const fetchHistRubros = (vendedor?: string) =>
-  getJSON<{ meses: HistRubroMes[]; cartera: number }>(`/api/historial/rubros?${v(vendedor)}`);
-export const fetchHistClientes = (ano: number, mes: number, vendedor?: string) =>
-  getJSON<{ rows: HistClienteRow[] }>(`/api/historial/clientes?ano=${ano}&mes=${mes}&${v(vendedor)}`);
-export const fetchHistCliente = (id: string, vendedor?: string) =>
-  getJSON<HistClienteDetalle>(`/api/historial/cliente/${encodeURIComponent(id)}?${v(vendedor)}`);
-export const fetchHistRubro360 = (rubro: RubroCodigo, vendedor?: string, meses: string[] = []) =>
+export const fetchHistMeta = (options?: HistorialFetchOptions) =>
+  getJSON<{ periodos: HistPeriodo[] }>('/api/historial/meta', options);
+export const fetchHistVolumen = (vendedor?: string, options?: HistorialFetchOptions) =>
+  getJSON<{ rows: HistVolumenRow[] }>(`/api/historial/volumen?${v(vendedor)}`, options);
+export const fetchHistRubros = (vendedor?: string, options?: HistorialFetchOptions) =>
+  getJSON<{ meses: HistRubroMes[]; cartera: number }>(`/api/historial/rubros?${v(vendedor)}`, options);
+export const fetchHistClientes = (ano: number, mes: number, vendedor?: string, options?: HistorialFetchOptions) =>
+  getJSON<{ rows: HistClienteRow[] }>(`/api/historial/clientes?ano=${ano}&mes=${mes}&${v(vendedor)}`, options);
+export const fetchHistCliente = (id: string, vendedor?: string, options?: HistorialFetchOptions) =>
+  getJSON<HistClienteDetalle>(`/api/historial/cliente/${encodeURIComponent(id)}?${v(vendedor)}`, options);
+export const fetchHistRubro360 = (rubro: RubroCodigo, vendedor?: string, meses: string[] = [], options?: HistorialFetchOptions) =>
   getJSON<Rubro360Data>(
-    `/api/historial/rubro-360?rubro=${encodeURIComponent(rubro)}&${v(vendedor)}${meses.length ? `&meses=${encodeURIComponent(meses.join(','))}` : ''}`
+    `/api/historial/rubro-360?rubro=${encodeURIComponent(rubro)}&${v(vendedor)}${meses.length ? `&meses=${encodeURIComponent(meses.join(','))}` : ''}`,
+    options
   );

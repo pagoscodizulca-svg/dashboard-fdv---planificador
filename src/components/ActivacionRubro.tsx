@@ -15,6 +15,46 @@ import {
 } from '../lib/rubros';
 import { categoryToRubroCode } from '../services/historialService';
 import { Rubro360Panel, RubroStatsActual } from './Rubro360Panel';
+import { FOCUS_PRODUCT_ALIASES } from '../config/sheetsConfig';
+import { calculateCompliancePct, parseSafeNumber } from '../utils/safeNumber';
+
+function getComplianceTier(pct: number): {
+  label: string;
+  pdfLabel: string;
+  shortLabel: string;
+  badgeClass: string;
+  dotClass: string;
+  textClass: string;
+} {
+  if (pct >= 100) {
+    return {
+      label: 'Cumplido (≥100%)',
+      pdfLabel: 'Cumplido (>=100%)',
+      shortLabel: 'Cumplido',
+      badgeClass: 'border-emerald-900/50 bg-emerald-950/40 text-emerald-400',
+      dotClass: 'bg-emerald-500',
+      textClass: 'text-emerald-400'
+    };
+  }
+  if (pct >= 80) {
+    return {
+      label: 'En Riesgo (80%-99%)',
+      pdfLabel: 'En Riesgo (80%-99%)',
+      shortLabel: 'En Riesgo',
+      badgeClass: 'border-amber-900/50 bg-amber-950/40 text-amber-400',
+      dotClass: 'bg-amber-500',
+      textClass: 'text-amber-400'
+    };
+  }
+  return {
+    label: 'Crítico (<80%)',
+    pdfLabel: 'Critico (<80%)',
+    shortLabel: 'Crítico',
+    badgeClass: 'border-red-900/50 bg-red-950/40 text-red-400',
+    dotClass: 'bg-red-500',
+    textClass: 'text-red-400'
+  };
+}
 
 const normSearchText = (val: string | undefined | null) =>
   String(val || '')
@@ -115,19 +155,12 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
         if (!key) continue;
         const ov = manualMap[key];
         const code = categoryToRubroCode(cat);
-        // Alias de claves antiguas que aún pueden venir en el payload (compatibilidad)
-        const aliasCats: Record<string, string[]> = {
-          AZUCAR: ['AZÚCAR'],
-          POLLO: ['ARROZ'],
-          ESTANDAR_ASTURIAS: ['ENTERO'],
-          MORTADELA_SALPICAO: ['LIGEROS']
-        };
-        const claves = [code, ...(aliasCats[code] || [])];
+        const claves = (FOCUS_PRODUCT_ALIASES as Record<string, string[]>)[code] || [code];
         const ovVal = ov?.[code];
         const isActive =
           ovVal !== undefined
             ? Boolean(ovVal)
-            : claves.some((k) => Boolean(a.cats?.[k])) || (Number(a.cajas?.[code]) || 0) > 0;
+            : claves.some((k) => Boolean(a.cats?.[k])) || parseSafeNumber(a.cajas?.[code], 0) > 0;
         if (isActive) activeSet.add(key);
         else if (ov) activeSet.delete(key);
       }
@@ -142,8 +175,8 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
         const norm = normalizeCat(m.categoria);
         if (statsMap.has(norm)) {
           const curr = statsMap.get(norm)!;
-          curr.meta += Number(m.meta) || 0;
-          curr.activados += Number(m.activados) || 0;
+          curr.meta += Math.max(0, Math.round(parseSafeNumber(m.meta, 0)));
+          curr.activados += Math.max(0, Math.round(parseSafeNumber(m.activados, 0)));
         }
       });
 
@@ -153,7 +186,7 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
         // Espejo Exacto del "Grid de Activación por Vendedor": respetar siempre las cifras oficiales de la hoja (incluyendo "-" = 0)
         const activados = d.activados;
         const faltante = Math.max(0, meta - activados);
-        const cumplimiento = meta > 0 ? (activados / meta) * 100 : 0;
+        const cumplimiento = calculateCompliancePct(activados, meta, 2);
         const estCierre = mesInfo.elapsedWorkingDays > 0
           ? Math.round((activados / mesInfo.elapsedWorkingDays) * mesInfo.totalWorkingDays)
           : activados;
@@ -273,9 +306,8 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
     doc.text(`${totalEstCierreVal} cli`, 164, 45);
 
     const tableData = filteredStats.map((stat, idx) => {
-      const isSuccess = stat.cumplimiento >= 100;
+      const tier = getComplianceTier(stat.cumplimiento);
       const ritmoStr = stat.faltante === 0 ? '0/d' : `${(stat.faltante / diasRestantesMes).toFixed(1)}/d`;
-      const estadoStr = isSuccess ? 'Cumplido (>=100%)' : 'En Riesgo';
       return [
         (idx + 1).toString(),
         stat.label,
@@ -284,7 +316,7 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
         stat.faltante === 0 ? '¡Meta! (0)' : stat.faltante.toString(),
         stat.cumplimiento.toFixed(1) + '%',
         ritmoStr,
-        estadoStr,
+        tier.pdfLabel,
         `${stat.estCierre} cli`
       ];
     });
@@ -292,7 +324,7 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
     const filtMeta = filteredStats.reduce((acc, curr) => acc + curr.meta, 0);
     const filtActivados = filteredStats.reduce((acc, curr) => acc + curr.activados, 0);
     const filtFaltante = filteredStats.reduce((acc, curr) => acc + curr.faltante, 0);
-    const filtCumplimiento = filtMeta > 0 ? (filtActivados / filtMeta) * 100 : 0;
+    const filtCumplimiento = calculateCompliancePct(filtActivados, filtMeta, 2);
     const filtEstCierre = filteredStats.reduce((acc, curr) => acc + curr.estCierre, 0);
     const filtRitmo = filtFaltante === 0 ? '0/d' : `${(filtFaltante / diasRestantesMes).toFixed(1)}/d`;
 
@@ -305,7 +337,7 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
         filtFaltante.toString(),
         filtCumplimiento.toFixed(1) + '%',
         filtRitmo,
-        filtCumplimiento >= 100 ? 'Cumplido (>=100%)' : 'En Riesgo',
+        getComplianceTier(filtCumplimiento).pdfLabel,
         `${filtEstCierre} cli`
       ]);
     }
@@ -605,7 +637,7 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
                 </tr>
               ) : (
                 filteredStats.map((stat) => {
-                 const isSuccess = stat.cumplimiento >= 100;
+                 const tier = getComplianceTier(stat.cumplimiento);
                  const rCode = categoryToRubroCode(stat.categoria);
                  const isSelected = selectedRubros.includes(rCode);
                  return (
@@ -635,15 +667,15 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
                     <td className="p-3 md:p-4 text-center text-emerald-400 font-bold border-r border-neutral-800">{stat.activados}</td>
                     <td className="p-3 md:p-4 text-center border-r border-neutral-800">{stat.faltante}</td>
                     <td className="p-3 md:p-4 text-center border-r border-neutral-800">
-                      <span className={`px-2 py-1 rounded border ${isSuccess ? 'border-emerald-900/50 bg-emerald-950/40 text-emerald-400' : 'border-amber-900/50 bg-amber-950/40 text-amber-400'}`}>
+                      <span className={`px-2 py-1 rounded border ${tier.badgeClass}`}>
                         {stat.cumplimiento.toFixed(1)}%
                       </span>
                     </td>
                     <td className="p-3 md:p-4 font-sans border-r border-neutral-800">
                       <div className="flex items-center gap-2">
-                        <div className={`w-2 h-2 rounded-full ${isSuccess ? 'bg-emerald-500' : 'bg-amber-500'}`}></div>
-                        <span className={isSuccess ? 'text-emerald-400' : 'text-amber-400'}>
-                          {isSuccess ? 'Cumplido (≥100%)' : 'En Riesgo (80%-99%)'}
+                        <div className={`w-2 h-2 rounded-full ${tier.dotClass}`}></div>
+                        <span className={tier.textClass}>
+                          {tier.label}
                         </span>
                       </div>
                     </td>
@@ -671,8 +703,9 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
                 const subMeta = filteredStats.reduce((a, c) => a + c.meta, 0);
                 const subAct = filteredStats.reduce((a, c) => a + c.activados, 0);
                 const subFalt = filteredStats.reduce((a, c) => a + c.faltante, 0);
-                const subCumpl = subMeta > 0 ? (subAct / subMeta) * 100 : 0;
+                const subCumpl = calculateCompliancePct(subAct, subMeta, 2);
                 const subEst = filteredStats.reduce((a, c) => a + c.estCierre, 0);
+                const subTier = getComplianceTier(subCumpl);
                 return (
                   <tr className="bg-neutral-900/70 border-t border-neutral-700 font-bold text-xs">
                     <td className="p-3 text-center text-amber-400 border-r border-neutral-800">∑</td>
@@ -683,8 +716,8 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
                     <td className="p-3 text-center text-emerald-400 border-r border-neutral-800">{subAct}</td>
                     <td className="p-3 text-center text-red-400 border-r border-neutral-800">{subFalt}</td>
                     <td className="p-3 text-center border-r border-neutral-800">{subCumpl.toFixed(1)}%</td>
-                    <td className="p-3 font-sans border-r border-neutral-800 text-neutral-300">
-                      {subCumpl >= 100 ? 'Cumplido' : 'En Riesgo'}
+                    <td className={`p-3 font-sans border-r border-neutral-800 ${subTier.textClass}`}>
+                      {subTier.shortLabel}
                     </td>
                     <td className="p-3 text-center text-amber-400 border-r border-neutral-800">{subEst} cli</td>
                     <td className="p-3 text-center text-neutral-500 font-sans text-[10px]">Filtro</td>
@@ -693,22 +726,34 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
               })()}
 
               {/* TFOOT / TOTALS ROW */}
+              {(() => {
+                const totalTier = getComplianceTier(totalCumplimiento);
+                const faltanteNetoGlobal = Math.max(0, totalMeta - totalActivados);
+                return (
               <tr className="bg-red-950/10 border-t-2 border-red-900/50 font-bold">
                 <td className="p-3 md:p-4 text-center text-red-500 border-r border-neutral-800">Σ</td>
                 <td className="p-3 md:p-4 font-sans text-red-400 border-r border-neutral-800">TOTALES GENERALES</td>
                 <td className="p-3 md:p-4 text-center border-r border-neutral-800">{totalMeta}</td>
                 <td className="p-3 md:p-4 text-center text-emerald-400 border-r border-neutral-800">{totalActivados}</td>
-                <td className="p-3 md:p-4 text-center border-r border-neutral-800">{totalFaltante}</td>
+                <td
+                  className="p-3 md:p-4 text-center border-r border-neutral-800"
+                  title={`Suma de déficits por rubro: ${totalFaltante} | Brecha neta global (Meta - Activados): ${faltanteNetoGlobal}`}
+                >
+                  <div>{totalFaltante}</div>
+                  {faltanteNetoGlobal !== totalFaltante && (
+                    <div className="text-[10px] font-sans font-normal text-neutral-400">Neto: {faltanteNetoGlobal}</div>
+                  )}
+                </td>
                 <td className="p-3 md:p-4 text-center border-r border-neutral-800">
-                  <span className={`px-2 py-1 rounded border ${totalCumplimiento >= 100 ? 'border-emerald-900/50 bg-emerald-950/40 text-emerald-400' : 'border-amber-900/50 bg-amber-950/40 text-amber-400'}`}>
+                  <span className={`px-2 py-1 rounded border ${totalTier.badgeClass}`}>
                     {totalCumplimiento.toFixed(1)}%
                   </span>
                 </td>
                 <td className="p-3 md:p-4 font-sans border-r border-neutral-800">
                   <div className="flex items-center gap-2">
-                    <div className={`w-2 h-2 rounded-full ${totalCumplimiento >= 100 ? 'bg-emerald-500' : 'bg-amber-500'}`}></div>
-                    <span className={totalCumplimiento >= 100 ? 'text-emerald-400' : 'text-amber-400'}>
-                      {totalCumplimiento >= 100 ? 'Cumplido (≥100%)' : 'En Riesgo'}
+                    <div className={`w-2 h-2 rounded-full ${totalTier.dotClass}`}></div>
+                    <span className={totalTier.textClass}>
+                      {totalTier.label}
                     </span>
                   </div>
                 </td>
@@ -719,6 +764,8 @@ export const ActivacionRubro: React.FC<Props> = ({ filteredVolumen, filteredActi
                   {RUBROS_ACTIVACION.length} Rubros
                 </td>
               </tr>
+                );
+              })()}
             </tbody>
           </table>
         </div>
