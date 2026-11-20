@@ -7762,28 +7762,463 @@ function getRuntimeSellerCatalog() {
 init_define_import_meta_env();
 init_vendorRoutes();
 init_vendorKeyNormalizer();
+
+// src/utils/safeNumber.ts
+init_define_import_meta_env();
+var DataQualityTracker = class {
+  constructor(maxSamples = 50) {
+    this.totalParsed = 0;
+    this.coercedToFallback = 0;
+    this.emptyOrDash = 0;
+    this.sheetErrors = 0;
+    this.invalidText = 0;
+    this.nonFinite = 0;
+    this.samples = [];
+    this.maxSamples = Math.max(0, maxSamples);
+  }
+  recordParsed() {
+    this.totalParsed++;
+  }
+  recordIssue(kind, raw, context) {
+    this.coercedToFallback++;
+    switch (kind) {
+      case "empty_or_dash":
+        this.emptyOrDash++;
+        break;
+      case "sheet_error":
+        this.sheetErrors++;
+        break;
+      case "invalid_text":
+        this.invalidText++;
+        break;
+      case "non_finite":
+        this.nonFinite++;
+        break;
+    }
+    if (kind !== "empty_or_dash" && this.samples.length < this.maxSamples) {
+      const rawText = raw === null || raw === void 0 ? String(raw) : String(raw).slice(0, 80);
+      this.samples.push({ kind, raw: rawText, ...context ? { context } : {} });
+    }
+  }
+  snapshot() {
+    return {
+      totalParsed: this.totalParsed,
+      coercedToFallback: this.coercedToFallback,
+      emptyOrDash: this.emptyOrDash,
+      sheetErrors: this.sheetErrors,
+      invalidText: this.invalidText,
+      nonFinite: this.nonFinite,
+      samples: this.samples.slice()
+    };
+  }
+  reset() {
+    this.totalParsed = 0;
+    this.coercedToFallback = 0;
+    this.emptyOrDash = 0;
+    this.sheetErrors = 0;
+    this.invalidText = 0;
+    this.nonFinite = 0;
+    this.samples = [];
+  }
+};
+var UNICODE_WS_RE = /[\u00A0\u202F\u2007\u200B-\u200D\uFEFF\t\r\n]+/g;
+var DASH_ONLY_RE = /^[-–—]+$/;
+var SHEET_ERROR_RE = /^(?:#?n\/?a|#?n\/?d|#div\/0!|#value!|#ref!|#name\?|#num!|#null!|#error!|null|undefined|nan|infinity|-infinity)$/i;
+var EMPTY_LABEL_RE = /^(?:sin\s*dato|s\/d|none)$/i;
+function cleanNumericWhitespace(raw) {
+  return raw.replace(UNICODE_WS_RE, " ").trim();
+}
+function isSheetErrorMarker(raw) {
+  if (typeof raw === "number") return !Number.isFinite(raw);
+  if (raw === null || raw === void 0) return false;
+  const s = cleanNumericWhitespace(String(raw));
+  if (!s) return false;
+  return SHEET_ERROR_RE.test(s);
+}
+function isBlankOrDashMarker(raw) {
+  if (raw === null || raw === void 0) return true;
+  const s = cleanNumericWhitespace(String(raw));
+  if (!s) return true;
+  return DASH_ONLY_RE.test(s) || EMPTY_LABEL_RE.test(s);
+}
+function stripCurrencyAndUnits(raw) {
+  return raw.replace(/(?:^|[\s(])(?:US\$|USD|VES|EUR|BS\.?\s*[SD]?|BS\.?)(?=[\s\d+\-(]|$)/gi, " ").replace(/(?:[\d\s)])(?:KGS?|CAJAS?|CJ|UNDS?|BULTOS?|BLT|USD|VES|EUR|BS\.?\s*[SD]?|BS\.?)(?=$|[\s)])/gi, (m) => m[0]).replace(/[$€£%]/g, "").replace(/\s+/g, "");
+}
+function isValidNumericCell(raw) {
+  if (typeof raw === "number") return Number.isFinite(raw);
+  if (raw === null || raw === void 0 || typeof raw === "boolean") return false;
+  const s = cleanNumericWhitespace(String(raw));
+  if (!s || isBlankOrDashMarker(s) || isSheetErrorMarker(s)) return false;
+  if (!/\d/.test(s)) return false;
+  let normalized = s;
+  if (/^\(.*\)$/.test(normalized)) {
+    normalized = normalized.slice(1, -1).trim();
+  }
+  normalized = stripCurrencyAndUnits(normalized);
+  if (normalized.startsWith("-") || normalized.startsWith("+")) {
+    normalized = normalized.slice(1);
+  }
+  return /^\d+(?:[.,]\d+)*$/.test(normalized);
+}
+function parseSafeNumber(raw, optionsOrFallback) {
+  const opts = typeof optionsOrFallback === "number" ? { fallback: optionsOrFallback } : optionsOrFallback || {};
+  const fallback = typeof opts.fallback === "number" && Number.isFinite(opts.fallback) ? opts.fallback : 0;
+  const localeHint = opts.localeHint || "auto";
+  const allowThreeDecimals = Boolean(opts.allowThreeDecimals);
+  const tracker = opts.tracker;
+  const context = opts.context;
+  tracker?.recordParsed();
+  if (typeof raw === "number") {
+    if (!Number.isFinite(raw)) {
+      tracker?.recordIssue("non_finite", raw, context);
+      return fallback;
+    }
+    return Object.is(raw, -0) ? 0 : raw;
+  }
+  if (raw === null || raw === void 0) {
+    tracker?.recordIssue("empty_or_dash", raw, context);
+    return fallback;
+  }
+  if (typeof raw === "boolean") {
+    tracker?.recordIssue("invalid_text", raw, context);
+    return fallback;
+  }
+  let s = cleanNumericWhitespace(String(raw));
+  if (!s || isBlankOrDashMarker(s)) {
+    tracker?.recordIssue("empty_or_dash", raw, context);
+    return fallback;
+  }
+  if (isSheetErrorMarker(s)) {
+    tracker?.recordIssue("sheet_error", raw, context);
+    return fallback;
+  }
+  let isNegative = false;
+  if (/^\(.*\)$/.test(s)) {
+    isNegative = true;
+    s = s.slice(1, -1).trim();
+  }
+  s = stripCurrencyAndUnits(s);
+  if (s.startsWith("-")) {
+    isNegative = !isNegative;
+    s = s.slice(1);
+  } else if (s.startsWith("+")) {
+    s = s.slice(1);
+  }
+  if (!s || DASH_ONLY_RE.test(s)) {
+    tracker?.recordIssue("empty_or_dash", raw, context);
+    return fallback;
+  }
+  if (!/^\d+(?:[.,]\d+)*$/.test(s)) {
+    tracker?.recordIssue("invalid_text", raw, context);
+    return fallback;
+  }
+  const lastComma = s.lastIndexOf(",");
+  const lastDot = s.lastIndexOf(".");
+  if (lastComma !== -1 && lastDot !== -1) {
+    if (lastComma > lastDot) {
+      s = s.replace(/\./g, "").replace(",", ".");
+    } else {
+      s = s.replace(/,/g, "");
+    }
+  } else if (lastComma !== -1) {
+    const commaCount = (s.match(/,/g) || []).length;
+    if (commaCount > 1) {
+      s = s.replace(/,/g, "");
+    } else {
+      const [intPart, fracPart] = s.split(",");
+      const looksLikeThousands = localeHint !== "es" && !allowThreeDecimals && fracPart.length === 3 && /^[1-9]\d{0,2}$/.test(intPart);
+      s = looksLikeThousands ? `${intPart}${fracPart}` : `${intPart}.${fracPart}`;
+    }
+  } else if (lastDot !== -1) {
+    const dotCount = (s.match(/\./g) || []).length;
+    if (dotCount > 1) {
+      s = s.replace(/\./g, "");
+    } else {
+      const [intPart, fracPart] = s.split(".");
+      const looksLikeHispanicThousands = localeHint !== "en" && !allowThreeDecimals && fracPart.length === 3 && /^[1-9]\d{0,2}$/.test(intPart);
+      if (looksLikeHispanicThousands) {
+        s = `${intPart}${fracPart}`;
+      }
+    }
+  }
+  const parsed = Number(s);
+  if (!Number.isFinite(parsed)) {
+    tracker?.recordIssue("non_finite", raw, context);
+    return fallback;
+  }
+  const result = isNegative ? -parsed : parsed;
+  return Object.is(result, -0) ? 0 : result;
+}
+function roundToDecimals(value, decimals = 2) {
+  if (!Number.isFinite(value)) return 0;
+  const safeDecimals = Math.max(0, Math.min(8, Math.trunc(decimals)));
+  const factor = Math.pow(10, safeDecimals);
+  const rounded = Math.sign(value) * Math.round((Math.abs(value) + 1e-12) * factor) / factor;
+  return Object.is(rounded, -0) ? 0 : rounded;
+}
+function parseSafePercentage(raw, options = {}) {
+  const { scale = "auto", referenceRatio, decimals = 4, tracker, context } = options;
+  if (raw === null || raw === void 0) return null;
+  if (typeof raw === "number") {
+    if (!Number.isFinite(raw)) {
+      tracker?.recordIssue("non_finite", raw, context);
+      return null;
+    }
+    if (raw === 0) return 0;
+    if (scale === "ratio_0_1") {
+      return roundToDecimals(raw * 100, decimals);
+    }
+    if (scale === "percent_0_100") {
+      return roundToDecimals(raw, decimals);
+    }
+    if (referenceRatio !== void 0 && Number.isFinite(referenceRatio)) {
+      const expectedPct = referenceRatio * 100;
+      const errAsRatio = Math.abs(raw * 100 - expectedPct);
+      const errAsPercent = Math.abs(raw - expectedPct);
+      const chosen = errAsRatio <= errAsPercent ? raw * 100 : raw;
+      return roundToDecimals(chosen, decimals);
+    }
+    const scaled = Math.abs(raw) <= 2 ? raw * 100 : raw;
+    return roundToDecimals(scaled, decimals);
+  }
+  const s = cleanNumericWhitespace(String(raw));
+  if (!s || isBlankOrDashMarker(s)) {
+    tracker?.recordIssue("empty_or_dash", raw, context);
+    return null;
+  }
+  if (isSheetErrorMarker(s)) {
+    tracker?.recordIssue("sheet_error", raw, context);
+    return null;
+  }
+  if (!isValidNumericCell(s)) {
+    tracker?.recordIssue("invalid_text", raw, context);
+    return null;
+  }
+  const hasExplicitPercent = s.includes("%");
+  const numericVal = parseSafeNumber(s, {
+    fallback: Number.NaN,
+    allowThreeDecimals: true,
+    tracker,
+    context
+  });
+  if (!Number.isFinite(numericVal)) return null;
+  if (hasExplicitPercent) {
+    return roundToDecimals(numericVal, decimals);
+  }
+  return parseSafePercentage(numericVal, { scale, referenceRatio, decimals });
+}
+function sumDecimalExact(values, decimals = 2, parseOptions) {
+  const safeDecimals = Math.max(0, Math.min(6, Math.trunc(decimals)));
+  const factor = Math.pow(10, safeDecimals);
+  let scaledTotal = 0;
+  for (const item of values) {
+    const n = typeof item === "number" && Number.isFinite(item) ? item : parseSafeNumber(item, parseOptions);
+    if (!Number.isFinite(n)) continue;
+    scaledTotal += Math.round(n * factor);
+  }
+  const result = scaledTotal / factor;
+  return Object.is(result, -0) ? 0 : result;
+}
+function sanitizeSheetText(raw, options = {}) {
+  if (raw === null || raw === void 0) return "";
+  const { maxLength, preserveNewlines = false } = options;
+  let text = String(raw).replace(preserveNewlines ? /[\u0000-\u0009\u000B\u000C\u000E-\u001F\u007F]/g : /[\u0000-\u001F\u007F]/g, " ").replace(/[\u200B-\u200D\uFEFF]/g, "").replace(/[\u00A0\u202F\u2007]/g, " ");
+  if (preserveNewlines) {
+    text = text.split("\n").map((line) => line.replace(/[ \t]+/g, " ").trim()).join("\n").trim();
+  } else {
+    text = text.replace(/\s+/g, " ").trim();
+  }
+  if (maxLength && maxLength > 0 && text.length > maxLength) {
+    return text.slice(0, maxLength).trim();
+  }
+  return text;
+}
+
+// src/config/sheetsConfig.ts
+init_define_import_meta_env();
 var DEFAULT_GOOGLE_SHEET_ID = "";
+var ALLOWED_GOOGLE_SHEETS_ORIGIN = "https://docs.google.com";
+var ALLOWED_GOOGLE_SHEETS_PATH_PREFIX = "/spreadsheets/";
+var GOOGLE_SHEET_ID_REGEX = /^[a-zA-Z0-9_-]{20,80}$/;
+var GOOGLE_SHEET_GID_REGEX = /^\d{1,15}$/;
+var PLACEHOLDER_ID_RE = /(?:PEGA_AQUI|GOOGLE_SHEET_ID|YOUR_SHEET_ID|REPLACE_ME|GID_HOJA|EXAMPLE)/i;
+function validateGoogleSheetsUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== "string") {
+    throw new Error("[SECURITY_ALLOWLIST] URL de Google Sheets vac\xEDa o inv\xE1lida.");
+  }
+  const trimmed = rawUrl.trim();
+  if (/(?:\.\.|%2e%2e|%2f\.\.|\.\.%2f|\\)/i.test(trimmed)) {
+    throw new Error("[SECURITY_ALLOWLIST] Path traversal detectado en URL de Google Sheets.");
+  }
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error("[SECURITY_ALLOWLIST] URL de Google Sheets malformada.");
+  }
+  if (parsed.protocol !== "https:") {
+    throw new Error("[SECURITY_ALLOWLIST] Solo se permite protocolo HTTPS para Google Sheets.");
+  }
+  if (parsed.hostname.toLowerCase() !== "docs.google.com") {
+    throw new Error("[SECURITY_ALLOWLIST] Dominio fuera de allowlist para Google Sheets.");
+  }
+  if (parsed.port !== "" || parsed.username !== "" || parsed.password !== "") {
+    throw new Error("[SECURITY_ALLOWLIST] URL de Google Sheets con puerto o credenciales embebidas no permitida.");
+  }
+  if (!parsed.pathname.startsWith(ALLOWED_GOOGLE_SHEETS_PATH_PREFIX)) {
+    throw new Error("[SECURITY_ALLOWLIST] Ruta fuera de /spreadsheets/ no permitida.");
+  }
+  return parsed.toString();
+}
 function sanitizeGoogleSheetId(raw) {
   if (!raw) return DEFAULT_GOOGLE_SHEET_ID;
   const cleaned = String(raw).trim().replace(/^['"<]+|['">]+$/g, "").trim();
-  if (!cleaned || /PEGA_AQUI/i.test(cleaned)) {
+  if (!cleaned || PLACEHOLDER_ID_RE.test(cleaned)) {
     return DEFAULT_GOOGLE_SHEET_ID;
   }
-  const urlMatch = cleaned.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
-  if (urlMatch && urlMatch[1]) {
-    return urlMatch[1];
+  if (/^https?:\/\//i.test(cleaned)) {
+    try {
+      const safeUrl = validateGoogleSheetsUrl(cleaned);
+      const parsed = new URL(safeUrl);
+      const match = parsed.pathname.match(/^\/spreadsheets\/d\/([a-zA-Z0-9_-]{20,80})(?:\/|$)/);
+      return match && match[1] ? match[1] : DEFAULT_GOOGLE_SHEET_ID;
+    } catch {
+      return DEFAULT_GOOGLE_SHEET_ID;
+    }
   }
-  return cleaned;
+  const inlineMatch = cleaned.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]{20,80})(?:\/|$)/);
+  const candidate = inlineMatch && inlineMatch[1] ? inlineMatch[1] : cleaned;
+  return GOOGLE_SHEET_ID_REGEX.test(candidate) ? candidate : DEFAULT_GOOGLE_SHEET_ID;
+}
+function sanitizeGoogleSheetGid(raw) {
+  if (raw === null || raw === void 0) return "";
+  const cleaned = String(raw).trim().replace(/^['"<]+|['">]+$/g, "").trim();
+  if (!cleaned || PLACEHOLDER_ID_RE.test(cleaned)) return "";
+  return GOOGLE_SHEET_GID_REGEX.test(cleaned) ? cleaned : "";
 }
 function getGoogleSheetId(envOverride) {
   const procEnv = typeof process !== "undefined" && process.env ? process.env : {};
-  const raw = envOverride?.GOOGLE_SHEET_ID || procEnv.GOOGLE_SHEET_ID || "";
+  const raw = envOverride?.GOOGLE_SHEET_ID ?? procEnv.GOOGLE_SHEET_ID ?? "";
   return sanitizeGoogleSheetId(raw);
 }
+function buildValidatedGoogleSheetUrl(params) {
+  const {
+    sheetId,
+    format = "xlsx",
+    gid,
+    cacheBust = true,
+    envOverride
+  } = params;
+  const id = sanitizeGoogleSheetId(sheetId ?? getGoogleSheetId(envOverride));
+  if (!id) {
+    throw new Error("[SECURITY_ALLOWLIST] GOOGLE_SHEET_ID inv\xE1lido o ausente.");
+  }
+  if (format !== "xlsx" && format !== "csv") {
+    throw new Error("[SECURITY_ALLOWLIST] Formato de exportaci\xF3n de Google Sheets no permitido.");
+  }
+  const url = new URL(`${ALLOWED_GOOGLE_SHEETS_ORIGIN}/spreadsheets/d/${id}/export`);
+  url.searchParams.set("format", format);
+  if (gid !== void 0 && gid !== null && String(gid).trim() !== "") {
+    const cleanGid = sanitizeGoogleSheetGid(gid);
+    if (!cleanGid) {
+      throw new Error("[SECURITY_ALLOWLIST] Par\xE1metro gid inv\xE1lido para Google Sheets.");
+    }
+    url.searchParams.set("gid", cleanGid);
+  }
+  if (cacheBust) {
+    url.searchParams.set("_cb", String(Date.now()));
+  }
+  return validateGoogleSheetsUrl(url.toString());
+}
+var FOCUS_PRODUCT_CODES = RUBROS_ACTIVACION;
+var FOCUS_PRODUCT_ALIASES = {
+  AZUCAR: ["AZUCAR"],
+  LECHE_VENCAMPO: ["LECHE_VENCAMPO"],
+  POLLO: ["POLLO", "ARROZ"],
+  ESTANDAR_ASTURIAS: ["ESTANDAR_ASTURIAS", "ENTERO"],
+  MORTADELA_SALPICAO: ["MORTADELA_SALPICAO", "MORTADELA_ASTURIAS", "SALPICAO", "LIGEROS"]
+};
+var GRID_CATEGORY_HEADER_KEYWORDS = {
+  AZUCAR: { keywords: ["azucar"], fallbackMeta: 2, fallbackAct: 3 },
+  LECHE_VENCAMPO: { keywords: ["leche_vencampo", "leche_en_polvo_vencampo", "leche"], fallbackMeta: 4, fallbackAct: 5 },
+  POLLO: { keywords: ["pollo"], fallbackMeta: 6, fallbackAct: 7 },
+  ESTANDAR_ASTURIAS: { keywords: ["estandar_y_superior_asturias", "estandar", "superior"], fallbackMeta: 8, fallbackAct: 9 },
+  MORTADELA_SALPICAO: {
+    keywords: ["mortadela_salpicao_y_asturias", "mortadela_salpicao", "mortadela", "salpicao"],
+    fallbackMeta: 10,
+    fallbackAct: 11
+  }
+};
+function isClientActiveForFocusProduct(cliente, codigo) {
+  if (!cliente) return false;
+  const keys = FOCUS_PRODUCT_ALIASES[codigo] || [codigo];
+  const cats = cliente.cats || {};
+  const cajas = cliente.cajas || {};
+  return keys.some((k) => {
+    const flag = cats[k];
+    const boxes = cajas[k];
+    const flagActive = flag === true || flag === 1 || typeof flag === "number" && flag > 0;
+    const boxesActive = typeof boxes === "number" && Number.isFinite(boxes) && boxes > 0;
+    return flagActive || boxesActive;
+  });
+}
+function isClientActiveInAnyFocusProduct(cliente) {
+  return FOCUS_PRODUCT_CODES.some((code) => isClientActiveForFocusProduct(cliente, code));
+}
+var SUMMARY_LABEL_PATTERNS = [
+  /^(?:GRAN\s+)?(?:SUB[\s-]?)?TOTAL(?:ES)?(?:\s+(?:GENERAL(?:ES)?|EMPRESA|VENTAS?|KG|CAJAS?|ACTIVADOS?|META|MES|RUTA|ZONA|FDV|EQUIPO|GRUPO|COMERCIAL|GLOBAL|CONSOLIDADO|NETO|BRUTO))?$/,
+  /^(?:TOTAL(?:ES)?\s+DE\s+.+)$/,
+  /^(?:PROMEDIO|MEDIA|RESUMEN|CONSOLIDADO|SUMATORIA|ACUMULADO)(?:\s+(?:GENERAL|EMPRESA|MENSUAL|TOTAL|DE\s+.+))?$/,
+  /^(?:TOTAL\s+)?EMPRESA$/,
+  /^GENERAL$/
+];
+function normalizeSummaryToken(raw) {
+  return sanitizeSheetText(raw).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().replace(/[∑Σ:]+/g, " ").replace(/\s+/g, " ").trim();
+}
+function isSummaryOrHeaderLabel(raw, extraHeaderTokens = []) {
+  const token = normalizeSummaryToken(raw);
+  if (!token) return false;
+  if (SUMMARY_LABEL_PATTERNS.some((re) => re.test(token))) {
+    return true;
+  }
+  if (extraHeaderTokens.length > 0) {
+    const normalizedExtras = extraHeaderTokens.map(normalizeSummaryToken);
+    if (normalizedExtras.includes(token)) {
+      return true;
+    }
+  }
+  return false;
+}
+function isValidVolumenRecord(rec) {
+  if (!rec || typeof rec !== "object") return false;
+  const r = rec;
+  return typeof r.vendedorId === "string" && r.vendedorId.trim().length > 0 && typeof r.skuId === "string" && r.skuId.trim().length > 0 && typeof r.meta === "number" && Number.isFinite(r.meta) && typeof r.ejecutado === "number" && Number.isFinite(r.ejecutado) && (r.porcentajeCumplimiento === void 0 || r.porcentajeCumplimiento === null || typeof r.porcentajeCumplimiento === "number" && Number.isFinite(r.porcentajeCumplimiento));
+}
+function isValidMetaRecord(rec) {
+  if (!rec || typeof rec !== "object") return false;
+  const r = rec;
+  return typeof r.vendedorId === "string" && r.vendedorId.trim().length > 0 && typeof r.vendedorKey === "string" && r.vendedorKey.trim().length > 0 && typeof r.categoria === "string" && r.categoria.trim().length > 0 && typeof r.cartera === "number" && Number.isFinite(r.cartera) && r.cartera >= 0 && typeof r.meta === "number" && Number.isFinite(r.meta) && r.meta >= 0 && typeof r.activados === "number" && Number.isFinite(r.activados) && r.activados >= 0;
+}
+function isValidActivacionRecord(rec) {
+  if (!rec || typeof rec !== "object") return false;
+  const r = rec;
+  if (typeof r.id !== "string" || r.id.trim().length === 0 || typeof r.vendedorId !== "string" || r.vendedorId.trim().length === 0 || r.status !== "ACTIVO" && r.status !== "INACTIVO" || !r.cats || typeof r.cats !== "object" || !r.cajas || typeof r.cajas !== "object") {
+    return false;
+  }
+  for (const val of Object.values(r.cajas)) {
+    if (typeof val !== "number" || !Number.isFinite(val)) return false;
+  }
+  return true;
+}
+
+// src/services/googleSheetsParser.ts
 function buildGoogleSheetExportUrl(sheetId, format = "xlsx", gid) {
-  const id = sanitizeGoogleSheetId(sheetId || getGoogleSheetId());
-  const gidParam = gid !== void 0 && gid !== null && String(gid).trim() !== "" ? `&gid=${encodeURIComponent(String(gid))}` : "";
-  return `https://docs.google.com/spreadsheets/d/${id}/export?format=${format}${gidParam}&_cb=${Date.now()}`;
+  return buildValidatedGoogleSheetUrl({
+    sheetId,
+    format,
+    gid,
+    cacheBust: true
+  });
 }
 function parseCsvRfc4180(csvText) {
   if (!csvText) return [];
@@ -7867,72 +8302,10 @@ function normalizeClientCode(raw) {
   return { rawClean, canonical };
 }
 function isBlankOrZeroMarker(raw) {
-  if (raw === null || raw === void 0) return true;
-  const s = String(raw).replace(/\u00A0/g, " ").trim();
-  if (!s) return true;
-  return /^[-–—]+$/.test(s) || /^(n\/?a|#n\/?d|#n\/?a|#value!|#ref!|#div\/0!|null|undefined|sin\s*dato)$/i.test(s);
+  return isBlankOrDashMarker(raw) || isSheetErrorMarker(raw);
 }
-function isValidNumericCell(raw) {
-  if (typeof raw === "number") return Number.isFinite(raw);
-  if (raw === null || raw === void 0 || typeof raw === "boolean") return false;
-  const s = String(raw).replace(/\u00A0/g, " ").trim();
-  if (!s || isBlankOrZeroMarker(s)) return false;
-  if (!/\d/.test(s)) return false;
-  const stripped = s.replace(/^\((.*)\)$/, "$1").replace(/[$\u20AC\u00A3%+\-\s]/g, "").replace(/\b(bs\.?|usd|kg|kgs|cj|cajas|und)\b/gi, "").trim();
-  return /^\d+([.,]\d+)*$/.test(stripped);
-}
-function parseLocaleNumber(raw, fallback = 0) {
-  if (typeof raw === "number") {
-    return Number.isFinite(raw) ? raw : fallback;
-  }
-  if (raw === null || raw === void 0 || typeof raw === "boolean") {
-    return fallback;
-  }
-  let s = String(raw).replace(/\u00A0/g, " ").trim();
-  if (!s || isBlankOrZeroMarker(s)) return fallback;
-  let isNegative = false;
-  if (/^\(.*\)$/.test(s)) {
-    isNegative = true;
-    s = s.slice(1, -1).trim();
-  }
-  s = s.replace(/[$\u20AC\u00A3%]/g, "").replace(/\b(bs\.?|usd|kg|kgs|cj|cajas|und)\b/gi, "").replace(/\s+/g, "");
-  if (s.startsWith("-")) {
-    isNegative = !isNegative;
-    s = s.slice(1);
-  } else if (s.startsWith("+")) {
-    s = s.slice(1);
-  }
-  if (!s || /^[-–—]+$/.test(s)) return fallback;
-  const lastComma = s.lastIndexOf(",");
-  const lastDot = s.lastIndexOf(".");
-  if (lastComma !== -1 && lastDot !== -1) {
-    if (lastComma > lastDot) {
-      s = s.replace(/\./g, "").replace(",", ".");
-    } else {
-      s = s.replace(/,/g, "");
-    }
-  } else if (lastComma !== -1) {
-    const commaCount = (s.match(/,/g) || []).length;
-    if (commaCount > 1) {
-      s = s.replace(/,/g, "");
-    } else {
-      const [intPart, fracPart] = s.split(",");
-      if (intPart === "0" || fracPart.length !== 3) {
-        s = `${intPart}.${fracPart}`;
-      } else {
-        s = `${intPart}${fracPart}`;
-      }
-    }
-  } else if (lastDot !== -1) {
-    const dotCount = (s.match(/\./g) || []).length;
-    if (dotCount > 1) {
-      s = s.replace(/\./g, "");
-    }
-  }
-  const parsed = Number(s);
-  if (!Number.isFinite(parsed)) return fallback;
-  const result = isNegative ? -parsed : parsed;
-  return Object.is(result, -0) ? 0 : result;
+function parseLocaleNumber(raw, fallback = 0, tracker, context) {
+  return parseSafeNumber(raw, { fallback, tracker, context });
 }
 function parseSheetDate(raw) {
   if (raw === null || raw === void 0) return null;
@@ -8096,27 +8469,62 @@ function extractSheetRows(XLSX2, sheet) {
     raw: true
   });
 }
-function parseOfficialSheetPercentage(rawPct) {
-  if (rawPct === null || rawPct === void 0) return null;
-  if (typeof rawPct === "number") {
-    if (!Number.isFinite(rawPct)) return null;
-    const val2 = +(rawPct * 100).toFixed(4);
-    return Object.is(val2, -0) ? 0 : val2;
+function getMergedHeaderSpansForRow(sheet, targetRow) {
+  const spans = /* @__PURE__ */ new Map();
+  const merges = Array.isArray(sheet?.["!merges"]) ? sheet["!merges"] : [];
+  for (const m of merges) {
+    if (m && m.s && m.e && typeof m.s.r === "number" && typeof m.e.r === "number" && typeof m.s.c === "number" && typeof m.e.c === "number" && m.s.r <= targetRow && m.e.r >= targetRow && m.e.c >= m.s.c) {
+      spans.set(m.s.c, m.e.c + 1);
+    }
   }
-  const s = String(rawPct).replace(/\u00A0/g, " ").trim();
-  if (!s || isBlankOrZeroMarker(s) || !isValidNumericCell(s)) return null;
-  if (s.includes("%")) {
-    const val2 = +parseLocaleNumber(s, 0).toFixed(4);
-    return Object.is(val2, -0) ? 0 : val2;
+  return spans;
+}
+function expandMergedRowValues(sheet, rowValues, targetRow) {
+  const expanded = Array.isArray(rowValues) ? rowValues.slice() : [];
+  const merges = Array.isArray(sheet?.["!merges"]) ? sheet["!merges"] : [];
+  for (const m of merges) {
+    if (m && m.s && m.e && typeof m.s.r === "number" && typeof m.e.r === "number" && typeof m.s.c === "number" && typeof m.e.c === "number" && m.s.r <= targetRow && m.e.r >= targetRow) {
+      const anchor = expanded[m.s.c];
+      if (anchor !== null && anchor !== void 0 && String(anchor).trim() !== "") {
+        for (let c = m.s.c + 1; c <= m.e.c; c++) {
+          if (expanded[c] === null || expanded[c] === void 0 || String(expanded[c]).trim() === "") {
+            expanded[c] = anchor;
+          }
+        }
+      }
+    }
   }
-  const val = +(parseLocaleNumber(s, 0) * 100).toFixed(4);
-  return Object.is(val, -0) ? 0 : val;
+  return expanded;
+}
+function sheetCellHasPercentageFormat(XLSX2, sheet, rowIdx, colIdx) {
+  if (!sheet || !XLSX2?.utils?.encode_cell || rowIdx < 0 || colIdx < 0) return false;
+  try {
+    const addr = XLSX2.utils.encode_cell({ r: rowIdx, c: colIdx });
+    const cell = sheet[addr];
+    if (!cell) return false;
+    if (typeof cell.z === "string" && cell.z.includes("%")) return true;
+    if (typeof cell.w === "string" && cell.w.includes("%")) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+function parseOfficialSheetPercentage(rawPct, options = {}) {
+  const { hasPercentFormat = false, referenceRatio, tracker, context } = options;
+  return parseSafePercentage(rawPct, {
+    scale: hasPercentFormat ? "ratio_0_1" : "auto",
+    referenceRatio,
+    decimals: 4,
+    tracker,
+    context
+  });
 }
 function parseWorkbookFull(XLSX2, workbook, options) {
   const { periodo, masterClients = [], ventasMes = [] } = options;
   const warnings = [];
   const auditLogs = [];
   const metrics = {};
+  const qualityTracker = new DataQualityTracker(50);
   const volumenSupabaseRows = [];
   const volumenApiRows = [];
   const volResolved = resolveSheetByAliases(workbook, ["volumen_por_sku"], ["volumen", "sku"]);
@@ -8134,7 +8542,12 @@ function parseWorkbookFull(XLSX2, workbook, options) {
     if (rows.length >= 2) {
       const header0 = rows[0] || [];
       const header1 = rows[1] || [];
-      const maxHeaderCols = Math.max(header0.length, header1.length);
+      const row0MergeSpans = getMergedHeaderSpansForRow(volResolved.sheet, 0);
+      const maxHeaderCols = Math.max(
+        header0.length,
+        header1.length,
+        ...Array.from(row0MergeSpans.values(), (end) => end)
+      );
       const baseCols = mapHeaderColumns(
         header1,
         {
@@ -8148,15 +8561,17 @@ function parseWorkbookFull(XLSX2, workbook, options) {
       for (let c = 0; c < maxHeaderCols; c++) {
         if (c === baseCols.sku || c === baseCols.articulo) continue;
         const h0 = header0[c];
-        if (h0 !== null && h0 !== void 0 && String(h0).trim() !== "") {
+        if (h0 !== null && h0 !== void 0 && sanitizeSheetText(h0) !== "") {
           headerStarts.push(c);
         }
       }
       const supervisorOccurrences = /* @__PURE__ */ new Map();
       for (let bIdx = 0; bIdx < headerStarts.length; bIdx++) {
         const startCol = headerStarts[bIdx];
-        const endCol = bIdx + 1 < headerStarts.length ? headerStarts[bIdx + 1] : Math.min(startCol + 3, maxHeaderCols);
-        const rawVendorName = String(header0[startCol] || "").replace(/\s+/g, " ").trim();
+        const mergedEnd = row0MergeSpans.get(startCol);
+        const nextStart = bIdx + 1 < headerStarts.length ? headerStarts[bIdx + 1] : Math.min(startCol + 3, maxHeaderCols);
+        const endCol = mergedEnd && mergedEnd > startCol ? Math.min(mergedEnd, nextStart) : nextStart;
+        const rawVendorName = sanitizeSheetText(header0[startCol]);
         if (!rawVendorName) continue;
         const vendorKey = normalizeVendorKey(rawVendorName);
         if (isSupervisorSummaryHeader(rawVendorName)) {
@@ -8174,11 +8589,24 @@ function parseWorkbookFull(XLSX2, workbook, options) {
           });
           continue;
         }
+        if (isSummaryOrHeaderLabel(rawVendorName)) {
+          auditLogs.push({
+            severity: "INFO",
+            sheet_name: volResolved.sheetName,
+            row_number: 1,
+            event_code: "SUMMARY_COLUMN_SKIPPED",
+            vendor_key: vendorKey,
+            entity_key: `COL_${startCol}`,
+            message: `Columna resumen "${rawVendorName}" en col ${startCol} excluida para evitar doble conteo.`,
+            payload: { startCol, rawVendorName }
+          });
+          continue;
+        }
         let cuotaCol = startCol;
-        let ejecutadoCol = startCol + 1;
+        let ejecutadoCol = startCol + 1 < endCol ? startCol + 1 : startCol;
         let pctCol = startCol + 2 < endCol ? startCol + 2 : -1;
         for (let subC = startCol; subC < endCol; subC++) {
-          const rawSub = String(header1[subC] ?? "").trim();
+          const rawSub = sanitizeSheetText(header1[subC]);
           const subNorm = normalizeHeaderKey(rawSub);
           if (subNorm === "cuota" || subNorm === "cuota_kg" || subNorm === "meta" || subNorm === "meta_kg") {
             cuotaCol = subC;
@@ -8206,8 +8634,20 @@ function parseWorkbookFull(XLSX2, workbook, options) {
         }
         const rawSku = row[baseCols.sku];
         const rawArticulo = row[baseCols.articulo];
-        const sku = rawSku !== null && rawSku !== void 0 ? String(rawSku).trim() : "";
-        const articulo = rawArticulo !== null && rawArticulo !== void 0 ? String(rawArticulo).trim() : "";
+        const sku = sanitizeSheetText(rawSku);
+        const articulo = sanitizeSheetText(rawArticulo);
+        if (isSummaryOrHeaderLabel(sku, ["COD", "CODIGO", "SKU", "ID ARTICULO", "COD ARTICULO"]) || !sku && isSummaryOrHeaderLabel(articulo, ["ARTICULO", "PRODUCTO", "DESCRIPCION", "NOMBRE"]) || !/^\d+$/.test(sku) && isSummaryOrHeaderLabel(articulo, ["ARTICULO", "PRODUCTO", "DESCRIPCION", "NOMBRE"])) {
+          tabMetric.summaryRowsSkipped++;
+          auditLogs.push({
+            severity: "INFO",
+            sheet_name: volResolved.sheetName,
+            row_number: r + 1,
+            event_code: "SUMMARY_OR_REPEATED_HEADER_SKIPPED",
+            entity_key: sku || articulo || `ROW_${r + 1}`,
+            message: `Fila resumen o encabezado repetido ("${sku || articulo}") excluida en "${volResolved.sheetName}".`
+          });
+          continue;
+        }
         if (!sku) {
           if (!articulo) {
             tabMetric.summaryRowsSkipped++;
@@ -8279,8 +8719,8 @@ function parseWorkbookFull(XLSX2, workbook, options) {
             });
           } else {
             const candHasData = candVec.some(([m, k]) => m !== 0 || k !== 0);
-            const keptNetKg = +primaryVec.reduce((a, [, k]) => a + k, 0).toFixed(2);
-            const collidedNetKg = +candVec.reduce((a, [, k]) => a + k, 0).toFixed(2);
+            const keptNetKg = sumDecimalExact(primaryVec.map(([, k]) => k), 2);
+            const collidedNetKg = sumDecimalExact(candVec.map(([, k]) => k), 2);
             if (!primaryHasData && candHasData) {
               primary = candidate;
               primaryVec = candVec;
@@ -8311,9 +8751,21 @@ function parseWorkbookFull(XLSX2, workbook, options) {
       for (const skuRow of validSkuRows) {
         const row = rows[skuRow.rowIdx];
         for (const block of vendorBlocks) {
-          const metaKg = +parseLocaleNumber(row[block.cuotaCol], 0).toFixed(2);
-          const ventaKg = +parseLocaleNumber(row[block.ejecutadoCol], 0).toFixed(2);
-          const pctVal = block.pctCol >= 0 ? parseOfficialSheetPercentage(row[block.pctCol]) : null;
+          const cellCtx = `${volResolved.sheetName}:R${skuRow.rowIdx + 1}:${block.vendorKey}`;
+          const metaKg = roundToDecimals(
+            parseLocaleNumber(row[block.cuotaCol], 0, qualityTracker, `${cellCtx}:meta`),
+            2
+          );
+          const ventaKg = roundToDecimals(
+            parseLocaleNumber(row[block.ejecutadoCol], 0, qualityTracker, `${cellCtx}:venta`),
+            2
+          );
+          const pctVal = block.pctCol >= 0 ? parseOfficialSheetPercentage(row[block.pctCol], {
+            hasPercentFormat: sheetCellHasPercentageFormat(XLSX2, volResolved.sheet, skuRow.rowIdx, block.pctCol),
+            referenceRatio: metaKg > 0 ? ventaKg / metaKg : void 0,
+            tracker: qualityTracker,
+            context: `${cellCtx}:pct`
+          }) : null;
           if (metaKg !== 0 || ventaKg !== 0) {
             tabMetric.validRecordsRead++;
             const ccVol = normalizeCuentasClavesVendor(block.rawVendorName);
@@ -8340,17 +8792,17 @@ function parseWorkbookFull(XLSX2, workbook, options) {
                 zona: "General"
               });
             } else {
-              existingSupa.meta_kg = +(existingSupa.meta_kg + metaKg).toFixed(2);
-              existingSupa.venta_bruta_kg = +(existingSupa.venta_bruta_kg + brutaDelta).toFixed(2);
-              existingSupa.devoluciones_kg = +(existingSupa.devoluciones_kg + devDelta).toFixed(2);
-              existingSupa.venta_neta_kg = +(existingSupa.venta_neta_kg + ventaKg).toFixed(2);
+              existingSupa.meta_kg = sumDecimalExact([existingSupa.meta_kg, metaKg], 2);
+              existingSupa.venta_bruta_kg = sumDecimalExact([existingSupa.venta_bruta_kg, brutaDelta], 2);
+              existingSupa.devoluciones_kg = sumDecimalExact([existingSupa.devoluciones_kg, devDelta], 2);
+              existingSupa.venta_neta_kg = sumDecimalExact([existingSupa.venta_neta_kg, ventaKg], 2);
               existingSupa.ejecutado_kg = existingSupa.venta_neta_kg;
-              existingSupa.porcentaje_cumplimiento = existingSupa.meta_kg > 0 ? +(existingSupa.venta_neta_kg / existingSupa.meta_kg * 100).toFixed(4) : pctVal;
+              existingSupa.porcentaje_cumplimiento = existingSupa.meta_kg > 0 ? roundToDecimals(existingSupa.venta_neta_kg / existingSupa.meta_kg * 100, 4) : pctVal;
             }
             const display = formatVolumenVendorDisplay(block.rawVendorName);
             const existingApi = apiVolMap.get(mapKey);
             if (!existingApi) {
-              apiVolMap.set(mapKey, {
+              const candidateApi = {
                 id: String(idCounter++),
                 vendedorId: display.finalVendedorId,
                 vendedorKey: block.vendorKey,
@@ -8372,18 +8824,21 @@ function parseWorkbookFull(XLSX2, workbook, options) {
                 zona: "General",
                 lat: 10.6427,
                 lng: -71.6125
-              });
+              };
+              if (isValidVolumenRecord(candidateApi)) {
+                apiVolMap.set(mapKey, candidateApi);
+              }
             } else {
-              const nextMeta = +(existingApi.meta + metaKg).toFixed(2);
-              const nextNeta = +(existingApi.ejecutado + ventaKg).toFixed(2);
+              const nextMeta = sumDecimalExact([existingApi.meta, metaKg], 2);
+              const nextNeta = sumDecimalExact([existingApi.ejecutado, ventaKg], 2);
               existingApi.meta = nextMeta;
               existingApi.metaKg = nextMeta;
               existingApi.ejecutado = nextNeta;
               existingApi.ejecutadoKg = nextNeta;
-              existingApi.ventaBrutaKg = +((existingApi.ventaBrutaKg || 0) + brutaDelta).toFixed(2);
-              existingApi.devolucionesKg = +((existingApi.devolucionesKg || 0) + devDelta).toFixed(2);
+              existingApi.ventaBrutaKg = sumDecimalExact([existingApi.ventaBrutaKg || 0, brutaDelta], 2);
+              existingApi.devolucionesKg = sumDecimalExact([existingApi.devolucionesKg || 0, devDelta], 2);
               existingApi.ventaNetaKg = nextNeta;
-              existingApi.porcentajeCumplimiento = nextMeta > 0 ? +(nextNeta / nextMeta * 100).toFixed(4) : pctVal;
+              existingApi.porcentajeCumplimiento = nextMeta > 0 ? roundToDecimals(nextNeta / nextMeta * 100, 4) : pctVal;
             }
           }
         }
@@ -8430,9 +8885,22 @@ function parseWorkbookFull(XLSX2, workbook, options) {
           tabMetric.emptyRowsSkipped++;
           continue;
         }
-        const { rawClean, canonical } = normalizeClientCode(row[cols.codigo]);
+        const rawCodeText = sanitizeSheetText(row[cols.codigo]);
+        const cliStr = sanitizeSheetText(row[cols.cliente]);
+        if (isSummaryOrHeaderLabel(rawCodeText, ["ID CLIENTE", "CODIGO", "COD CLIENTE", "CLIENTE CODIGO", "ID", "COD"]) || !rawCodeText && isSummaryOrHeaderLabel(cliStr, ["CLIENTE", "RAZON SOCIAL", "NOMBRE CLIENTE", "NOMBRE"])) {
+          tabMetric.summaryRowsSkipped++;
+          auditLogs.push({
+            severity: "INFO",
+            sheet_name: resolved.sheetName,
+            row_number: r + 1,
+            event_code: "SUMMARY_OR_REPEATED_HEADER_SKIPPED",
+            entity_key: rawCodeText || cliStr || `ROW_${r + 1}`,
+            message: `Fila resumen o encabezado repetido ("${rawCodeText || cliStr}") excluida en "${resolved.sheetName}".`
+          });
+          continue;
+        }
+        const { rawClean, canonical } = normalizeClientCode(rawCodeText);
         if (!canonical) {
-          const cliStr = String(row[cols.cliente] ?? "").trim();
           const rawCj = row[cols.cajas];
           if (!cliStr && (rawCj === null || rawCj === void 0 || String(rawCj).trim() === "")) {
             tabMetric.emptyRowsSkipped++;
@@ -8458,10 +8926,11 @@ function parseWorkbookFull(XLSX2, workbook, options) {
         let cajas = 0;
         if (rawCajasCell !== null && rawCajasCell !== void 0 && String(rawCajasCell).trim() !== "") {
           if (!isBlankOrZeroMarker(rawCajasCell) && !isValidNumericCell(rawCajasCell)) {
+            qualityTracker.recordIssue("invalid_text", rawCajasCell, `${resolved.sheetName}:R${r + 1}:cajas`);
             warnings.push({
               sheet: resolved.sheetName,
               row: r + 1,
-              reason: `Texto residual no num\xE9rico "${String(rawCajasCell).trim()}" ignorado en columna Cajas (Id Cliente=${rawClean})`
+              reason: `Texto residual no num\xE9rico "${sanitizeSheetText(rawCajasCell)}" ignorado en columna Cajas (Id Cliente=${rawClean})`
             });
             auditLogs.push({
               severity: "WARN",
@@ -8469,12 +8938,12 @@ function parseWorkbookFull(XLSX2, workbook, options) {
               row_number: r + 1,
               event_code: "RESIDUAL_TEXT_IN_CAJAS",
               entity_key: canonical,
-              message: `Texto residual "${String(rawCajasCell).trim()}" ignorado en columna Cajas de "${resolved.sheetName}".`,
-              payload: { rawCajas: String(rawCajasCell), clientCode: rawClean }
+              message: `Texto residual "${sanitizeSheetText(rawCajasCell)}" ignorado en columna Cajas de "${resolved.sheetName}".`,
+              payload: { rawCajas: sanitizeSheetText(rawCajasCell), clientCode: rawClean }
             });
             cajas = 0;
           } else {
-            cajas = parseLocaleNumber(rawCajasCell, 0);
+            cajas = parseLocaleNumber(rawCajasCell, 0, qualityTracker, `${resolved.sheetName}:R${r + 1}:cajas`);
           }
         }
         if (!loggedResetAnomaly && tabMetric.validRecordsRead >= 50 && prevCajas >= 50 && cajas > 0 && cajas <= prevCajas * 0.02) {
@@ -8493,7 +8962,7 @@ function parseWorkbookFull(XLSX2, workbook, options) {
           prevCajas = cajas;
         }
         tabMetric.validRecordsRead++;
-        const nextTotal = +((clientMap.get(canonical) || 0) + cajas).toFixed(2);
+        const nextTotal = sumDecimalExact([clientMap.get(canonical) || 0, cajas], 2);
         clientMap.set(canonical, nextTotal);
         if (rawClean && rawClean !== canonical) {
           clientMap.set(rawClean, nextTotal);
@@ -8594,9 +9063,22 @@ function parseWorkbookFull(XLSX2, workbook, options) {
           tabMetric.emptyRowsSkipped++;
           continue;
         }
-        const { rawClean, canonical } = normalizeClientCode(row[cols.codigo]);
-        const razonSocial = String(row[cols.razonSocial] ?? "").trim();
-        const rawVendor = String(row[cols.vendedor] ?? "").replace(/\s+/g, " ").trim();
+        const rawCodeText = sanitizeSheetText(row[cols.codigo]);
+        const razonSocial = sanitizeSheetText(row[cols.razonSocial]);
+        const rawVendor = sanitizeSheetText(row[cols.vendedor]);
+        if (isSummaryOrHeaderLabel(rawCodeText, ["CODIGO", "ID CLIENTE", "CLIENTE CODIGO", "COD", "ID"]) || isSummaryOrHeaderLabel(rawVendor, ["VENDEDOR", "RUTA", "EJECUTIVO", "VENDEDOR NOMBRE"]) || !rawCodeText && isSummaryOrHeaderLabel(razonSocial, ["RAZON SOCIAL", "CLIENTE", "NOMBRE CLIENTE"])) {
+          tabMetric.summaryRowsSkipped++;
+          auditLogs.push({
+            severity: "INFO",
+            sheet_name: actResolved.sheetName,
+            row_number: r + 1,
+            event_code: "SUMMARY_OR_REPEATED_HEADER_SKIPPED",
+            entity_key: rawCodeText || razonSocial || rawVendor || `ROW_${r + 1}`,
+            message: `Fila resumen o encabezado repetido ("${rawCodeText || razonSocial || rawVendor}") excluida en "${actResolved.sheetName}".`
+          });
+          continue;
+        }
+        const { rawClean, canonical } = normalizeClientCode(rawCodeText);
         if (!canonical || !rawVendor) {
           tabMetric.incompleteRowsLogged++;
           warnings.push({
@@ -8826,13 +9308,13 @@ function parseWorkbookFull(XLSX2, workbook, options) {
     const isJohnatanOrMikel = vendUpper.includes("JOHNATAN") || vendUpper.includes("MIKELANGELO") || vendUpper.includes("SOTO");
     const displayVendedorNombre = ccAct ? ccAct.display : isJohnatanOrMikel ? isVilla ? "Mikelangelo Diaz (Villa del Rosario)" : "Mikelangelo Diaz (Principal)" : c.vendedorNombre;
     const displayEmail = isJohnatanOrMikel ? "Mikelangelodiaz@gmail.com" : void 0;
-    activacionApiRows.push({
+    const candidateActRow = {
       id: String(c.codigo),
       vendedorId: c.vendedorId,
       vendedorKey: c.vendedorKey,
       vendedorNombre: displayVendedorNombre,
       vendedorEmail: displayEmail,
-      cliente: c.razonSocial,
+      cliente: sanitizeSheetText(c.razonSocial),
       status: isActivo ? "ACTIVO" : "INACTIVO",
       cats: {
         ACEITE: hasAceite,
@@ -8857,7 +9339,11 @@ function parseWorkbookFull(XLSX2, workbook, options) {
         MORTADELA_ASTURIAS: cMortAst,
         SALPICAO: cSalpNuevo
       }
-    });
+    };
+    candidateActRow.status = isClientActiveInAnyFocusProduct(candidateActRow) ? "ACTIVO" : "INACTIVO";
+    if (isValidActivacionRecord(candidateActRow)) {
+      activacionApiRows.push(candidateActRow);
+    }
   }
   const metasSupabaseRows = [];
   const metasApiRows = [];
@@ -8878,31 +9364,46 @@ function parseWorkbookFull(XLSX2, workbook, options) {
       validRecordsRead: 0
     };
     if (rows.length >= 2) {
-      const h0 = (rows[0] || []).map(normalizeHeaderKey);
+      const gridMergeSpans = getMergedHeaderSpansForRow(gridResolved.sheet, 0);
+      const expandedRow0 = expandMergedRowValues(gridResolved.sheet, rows[0] || [], 0);
+      const h0Raw = (rows[0] || []).map(normalizeHeaderKey);
+      const h0Expanded = expandedRow0.map(normalizeHeaderKey);
       const h1 = (rows[1] || []).map(normalizeHeaderKey);
       const vendorCol = h1.findIndex((h) => h === "vendedor" || h === "ruta" || h === "ejecutivo");
       const carteraCol = h1.findIndex((h) => h === "cartera" || h === "clientes");
       const resolvedVendorCol = vendorCol !== -1 ? vendorCol : 0;
       const resolvedCarteraCol = carteraCol !== -1 ? carteraCol : 1;
       const findCategoryColsFromRow1 = (catKeywords, fallbackMeta, fallbackAct) => {
-        for (let c = 0; c < h0.length; c++) {
-          const cell0 = h0[c] || "";
+        const searchArr = h0Raw.some(Boolean) ? h0Raw : h0Expanded;
+        for (let c = 0; c < searchArr.length; c++) {
+          const cell0 = searchArr[c] || "";
           if (cell0 && catKeywords.some((kw) => cell0 === kw || cell0.includes(kw))) {
-            return { metaIdx: c, actIdx: c + 1 };
+            const spanEnd = gridMergeSpans.get(c) || c + 2;
+            let metaIdx = c;
+            let actIdx = c + 1;
+            for (let subC = c; subC < spanEnd; subC++) {
+              const sub = h1[subC] || "";
+              if (sub.includes("meta") || sub.includes("cuota") || sub.includes("objetivo")) {
+                metaIdx = subC;
+              } else if (sub.includes("activado") || sub.includes("ejecutado") || sub.includes("real") || sub.includes("logro")) {
+                actIdx = subC;
+              }
+            }
+            if (metaIdx === actIdx) {
+              actIdx = metaIdx === c ? c + 1 : c;
+            }
+            return { metaIdx, actIdx };
           }
         }
         return { metaIdx: fallbackMeta, actIdx: fallbackAct };
       };
-      const GRID_KEYWORDS = {
-        AZUCAR: { kw: ["azucar"], fallbackMeta: 2, fallbackAct: 3 },
-        LECHE_VENCAMPO: { kw: ["leche_vencampo", "leche_en_polvo_vencampo", "leche"], fallbackMeta: 4, fallbackAct: 5 },
-        POLLO: { kw: ["pollo"], fallbackMeta: 6, fallbackAct: 7 },
-        ESTANDAR_ASTURIAS: { kw: ["estandar_y_superior_asturias", "estandar", "superior"], fallbackMeta: 8, fallbackAct: 9 },
-        MORTADELA_SALPICAO: { kw: ["mortadela_salpicao_y_asturias", "mortadela_salpicao", "mortadela", "salpicao"], fallbackMeta: 10, fallbackAct: 11 }
-      };
       const catDefs = RUBROS_ACTIVOS_CONFIG.map((r) => {
-        const g = GRID_KEYWORDS[r.codigo] || { kw: [normalizeHeaderKey(r.categoriaServidor)], fallbackMeta: -1, fallbackAct: -1 };
-        return { name: r.categoriaServidor, ...findCategoryColsFromRow1(g.kw, g.fallbackMeta, g.fallbackAct) };
+        const g = GRID_CATEGORY_HEADER_KEYWORDS[r.codigo] || {
+          keywords: [normalizeHeaderKey(r.categoriaServidor)],
+          fallbackMeta: -1,
+          fallbackAct: -1
+        };
+        return { name: r.categoriaServidor, ...findCategoryColsFromRow1(g.keywords, g.fallbackMeta, g.fallbackAct) };
       });
       const sumByCat = /* @__PURE__ */ new Map();
       catDefs.forEach((c) => sumByCat.set(c.name, { meta: 0, activados: 0 }));
@@ -8913,29 +9414,56 @@ function parseWorkbookFull(XLSX2, workbook, options) {
           continue;
         }
         const rawVendor = row[resolvedVendorCol];
-        const rawVName = rawVendor !== null && rawVendor !== void 0 ? String(rawVendor).replace(/\s+/g, " ").trim() : "";
-        if (!rawVName) {
+        const rawVName = sanitizeSheetText(rawVendor);
+        const isRepeatedHeader = rawVName ? ["vendedor", "ruta", "ejecutivo", "vendedor_nombre"].includes(normalizeHeaderKey(rawVName)) : false;
+        const isLabeledSummary = rawVName ? isSummaryOrHeaderLabel(rawVName) : false;
+        if (isRepeatedHeader) {
           tabMetric.summaryRowsSkipped++;
-          for (const cDef of catDefs) {
-            const footerMeta = Math.round(parseLocaleNumber(row[cDef.metaIdx], 0));
-            const footerAct = Math.round(parseLocaleNumber(row[cDef.actIdx], 0));
-            const computed = sumByCat.get(cDef.name);
-            if (footerMeta !== computed.meta || footerAct !== computed.activados) {
-              auditLogs.push({
-                severity: "WARN",
-                sheet_name: gridResolved.sheetName,
-                row_number: r + 1,
-                event_code: "GRID_FOOTER_MISMATCH",
-                entity_key: cDef.name,
-                message: `Descuadre en fila total del Grid para "${cDef.name}": fila=${footerMeta}/${footerAct} vs suma=${computed.meta}/${computed.activados}.`,
-                payload: {
-                  categoria: cDef.name,
-                  footerMeta,
-                  computedMeta: computed.meta,
-                  footerActivados: footerAct,
-                  computedActivados: computed.activados
-                }
-              });
+          auditLogs.push({
+            severity: "INFO",
+            sheet_name: gridResolved.sheetName,
+            row_number: r + 1,
+            event_code: "SUMMARY_OR_REPEATED_HEADER_SKIPPED",
+            entity_key: rawVName,
+            message: `Encabezado repetido ("${rawVName}") excluido en "${gridResolved.sheetName}".`
+          });
+          continue;
+        }
+        if (!rawVName || isLabeledSummary) {
+          tabMetric.summaryRowsSkipped++;
+          const isPromedio = /PROMEDIO|MEDIA/i.test(rawVName);
+          if (isLabeledSummary) {
+            auditLogs.push({
+              severity: "INFO",
+              sheet_name: gridResolved.sheetName,
+              row_number: r + 1,
+              event_code: "SUMMARY_OR_REPEATED_HEADER_SKIPPED",
+              entity_key: rawVName,
+              message: `Fila resumen etiquetada ("${rawVName}") excluida en "${gridResolved.sheetName}" para evitar doble conteo.`
+            });
+          }
+          if (!isPromedio) {
+            for (const cDef of catDefs) {
+              const footerMeta = Math.round(parseLocaleNumber(row[cDef.metaIdx], 0));
+              const footerAct = Math.round(parseLocaleNumber(row[cDef.actIdx], 0));
+              const computed = sumByCat.get(cDef.name);
+              if (footerMeta !== computed.meta || footerAct !== computed.activados) {
+                auditLogs.push({
+                  severity: "WARN",
+                  sheet_name: gridResolved.sheetName,
+                  row_number: r + 1,
+                  event_code: "GRID_FOOTER_MISMATCH",
+                  entity_key: cDef.name,
+                  message: `Descuadre en fila total del Grid para "${cDef.name}": fila=${footerMeta}/${footerAct} vs suma=${computed.meta}/${computed.activados}.`,
+                  payload: {
+                    categoria: cDef.name,
+                    footerMeta,
+                    computedMeta: computed.meta,
+                    footerActivados: footerAct,
+                    computedActivados: computed.activados
+                  }
+                });
+              }
             }
           }
           continue;
@@ -8948,11 +9476,20 @@ function parseWorkbookFull(XLSX2, workbook, options) {
         const vName = normalizeVendorKey(rawVName) === "LUIS GUANIPA" ? "VICTORIA VARGAS" : rawVName;
         const vKey = normalizeVendorKey(vName);
         const routeLookupKey = resolveCanonicalRouteKey(vKey);
-        const cartera = Math.round(parseLocaleNumber(row[resolvedCarteraCol], 0));
+        const cartera = Math.max(
+          0,
+          Math.round(parseLocaleNumber(row[resolvedCarteraCol], 0, qualityTracker, `${gridResolved.sheetName}:R${r + 1}:cartera`))
+        );
         const detailCounts = clientActByVendorKey.get(vKey) || clientActByVendorKey.get(routeLookupKey);
         for (const cDef of catDefs) {
-          const meta = Math.round(parseLocaleNumber(row[cDef.metaIdx], 0));
-          const activados = Math.round(parseLocaleNumber(row[cDef.actIdx], 0));
+          const meta = Math.max(
+            0,
+            Math.round(parseLocaleNumber(row[cDef.metaIdx], 0, qualityTracker, `${gridResolved.sheetName}:R${r + 1}:${cDef.name}:meta`))
+          );
+          const activados = Math.max(
+            0,
+            Math.round(parseLocaleNumber(row[cDef.actIdx], 0, qualityTracker, `${gridResolved.sheetName}:R${r + 1}:${cDef.name}:act`))
+          );
           const acc = sumByCat.get(cDef.name);
           acc.meta += meta;
           acc.activados += activados;
@@ -8972,23 +9509,26 @@ function parseWorkbookFull(XLSX2, workbook, options) {
               }
             });
           }
-          metasSupabaseRows.push({
-            periodo,
-            vendedor_id: vName,
-            vendedor_key: vKey,
-            categoria: cDef.name,
-            cartera,
-            meta,
-            activados
-          });
-          metasApiRows.push({
+          const candidateMetaApi = {
             vendedorId: vName,
             vendedorKey: vKey,
             categoria: cDef.name,
             cartera,
             meta,
             activados
-          });
+          };
+          if (isValidMetaRecord(candidateMetaApi)) {
+            metasSupabaseRows.push({
+              periodo,
+              vendedor_id: vName,
+              vendedor_key: vKey,
+              categoria: cDef.name,
+              cartera,
+              meta,
+              activados
+            });
+            metasApiRows.push(candidateMetaApi);
+          }
         }
       }
     }
@@ -9181,31 +9721,55 @@ function parseWorkbookFull(XLSX2, workbook, options) {
         const rawProductos = String(row[cols.productos] ?? "").trim();
         const parsedProductos = rawProductos ? (parseCsvRfc4180(rawProductos)[0] || []).map((p) => p.trim()).filter(Boolean) : [];
         degustacionesRows.push({
-          id,
-          createdAt: parseSheetDate(row[cols.fechaRegistro]) || String(row[cols.fechaRegistro] ?? "").trim(),
-          vendedorNombre,
-          vendedorId: ruta || vendedorNombre,
+          id: sanitizeSheetText(id),
+          createdAt: parseSheetDate(row[cols.fechaRegistro]) || sanitizeSheetText(row[cols.fechaRegistro]),
+          vendedorNombre: sanitizeSheetText(vendedorNombre),
+          vendedorId: sanitizeSheetText(ruta || vendedorNombre),
           vendedorKey,
-          ruta,
+          ruta: sanitizeSheetText(ruta),
           clienteCodigo: normalizeClientCode(row[cols.clienteCodigo]).rawClean || "PDV",
-          clienteNombre,
+          clienteNombre: sanitizeSheetText(clienteNombre),
           fecha: fechaDeg,
-          turno: String(row[cols.turno] ?? "MA\xD1ANA").trim().toUpperCase(),
-          hora: String(row[cols.horario] ?? "").trim(),
-          productos: parsedProductos,
-          kilosEstimados: +parseLocaleNumber(row[cols.kilosEstimados], 0).toFixed(2),
-          personasEstimadas: Math.round(parseLocaleNumber(row[cols.personasEstimadas], 0)),
+          turno: sanitizeSheetText(row[cols.turno] ?? "MA\xD1ANA").toUpperCase(),
+          hora: sanitizeSheetText(row[cols.horario]),
+          productos: parsedProductos.map((p) => sanitizeSheetText(p)).filter(Boolean),
+          kilosEstimados: roundToDecimals(
+            parseLocaleNumber(row[cols.kilosEstimados], 0, qualityTracker, `${degResolved.sheetName}:R${r + 1}:kilos`),
+            2
+          ),
+          personasEstimadas: Math.max(
+            0,
+            Math.round(
+              parseLocaleNumber(row[cols.personasEstimadas], 0, qualityTracker, `${degResolved.sheetName}:R${r + 1}:personas`)
+            )
+          ),
           requierePromotora: parseTruthySheetFlag(row[cols.requierePromotora]),
           materialPop: parseTruthySheetFlag(row[cols.materialPop]),
-          contactoPunto: String(row[cols.contactoPunto] ?? "").trim(),
-          telefonoContacto: String(row[cols.telefonoContacto] ?? "").trim(),
-          estado: String(row[cols.estado] ?? "SOLICITADA").trim().toUpperCase(),
-          promotoraAsignada: String(row[cols.promotoraAsignada] ?? "").trim(),
-          notasTradeMarketing: String(row[cols.notasTradeMarketing] ?? "").trim()
+          contactoPunto: sanitizeSheetText(row[cols.contactoPunto]),
+          telefonoContacto: sanitizeSheetText(row[cols.telefonoContacto]),
+          estado: sanitizeSheetText(row[cols.estado] ?? "SOLICITADA").toUpperCase(),
+          promotoraAsignada: sanitizeSheetText(row[cols.promotoraAsignada]),
+          notasTradeMarketing: sanitizeSheetText(row[cols.notasTradeMarketing])
         });
       }
     }
     metrics[degResolved.sheetName] = tabMetric;
+  }
+  const dataQuality = qualityTracker.snapshot();
+  if (dataQuality.sheetErrors > 0 || dataQuality.invalidText > 0) {
+    auditLogs.push({
+      severity: "WARN",
+      sheet_name: "WORKBOOK_QUALITY",
+      row_number: null,
+      event_code: "DATA_QUALITY_COERCIONS",
+      message: `Calidad de datos num\xE9ricos: ${dataQuality.sheetErrors} errores de f\xF3rmula (#N/A/#DIV/0!) y ${dataQuality.invalidText} textos no num\xE9ricos saneados a 0.`,
+      payload: {
+        totalParsed: dataQuality.totalParsed,
+        sheetErrors: dataQuality.sheetErrors,
+        invalidText: dataQuality.invalidText,
+        samples: dataQuality.samples.slice(0, 15)
+      }
+    });
   }
   return {
     periodo,
@@ -9221,7 +9785,8 @@ function parseWorkbookFull(XLSX2, workbook, options) {
     degustacionesRows,
     metrics,
     warnings,
-    auditLogs
+    auditLogs,
+    dataQuality
   };
 }
 
@@ -9449,6 +10014,8 @@ var lastSheetSource = "memory";
 var lastSheetMetrics = {};
 var lastSheetWarnings = [];
 var lastSheetAuditLogs = [];
+var lastSheetDataQuality = null;
+var lastLiveProductMaps = null;
 var lastSyncedSha256ByPeriod = /* @__PURE__ */ new Map();
 var cachedLocalMasterSeed = null;
 function loadLocalMasterClientSeed() {
@@ -9485,12 +10052,13 @@ function setNoCacheSyncHeaders(res, source) {
   }
 }
 async function fetchGoogleSheetWithRetry(url, maxAttempts = 3) {
+  const safeUrl = validateGoogleSheetsUrl(url);
   let lastError = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 15e3);
     try {
-      const fetchRes = await fetch(url, {
+      const fetchRes = await fetch(safeUrl, {
         signal: controller.signal,
         headers: {
           "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -12712,41 +13280,56 @@ async function startServer() {
   };
   app2.get("/api/bcv-rate", handleBcvRateRequest);
   app2.get("/api/tasa-bcv", handleBcvRateRequest);
-  app2.get("/api/sheets-structure", async (req, res) => {
+  app2.get("/api/sheets-structure", authenticateToken, requireAdmin, async (req, res) => {
     try {
-      const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith("Bearer ")) {
-        return res.status(401).json({ error: "Missing or invalid Authorization header" });
+      const googleToken = String(req.headers["x-google-access-token"] || "").trim();
+      if (!googleToken) {
+        return res.status(400).json({ error: "Header x-google-access-token requerido para inspecci\xF3n de Google Sheets API." });
       }
-      const token = authHeader.split(" ")[1];
       const spreadsheetId = getGoogleSheetId();
-      const metaRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}`, {
+      if (!spreadsheetId) {
+        return res.status(400).json({ error: "GOOGLE_SHEET_ID no est\xE1 configurado o es inv\xE1lido." });
+      }
+      const metaUrl = new URL(`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}`);
+      if (metaUrl.origin !== "https://sheets.googleapis.com") {
+        return res.status(403).json({ error: "URL fuera de allowlist de Google Sheets API." });
+      }
+      const metaRes = await fetch(metaUrl.toString(), {
         headers: {
-          "Authorization": `Bearer ${token}`
+          "Authorization": `Bearer ${googleToken}`
         }
       });
       if (!metaRes.ok) {
         return res.status(metaRes.status).json({ error: "Failed to fetch spreadsheet structure" });
       }
       const metaData = await metaRes.json();
-      const sheets = metaData.sheets.map((s) => ({
-        title: s.properties.title,
-        sheetId: s.properties.sheetId
-      }));
-      const result = { sheets };
+      const sheets = Array.isArray(metaData?.sheets) ? metaData.sheets.map((s) => ({
+        title: String(s?.properties?.title || ""),
+        sheetId: s?.properties?.sheetId
+      })) : [];
+      const summary = [];
       for (const sheet of sheets) {
-        const dataRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/'${sheet.title}'!A1:Z100`, {
-          headers: { "Authorization": `Bearer ${token}` }
+        const rangeEncoded = encodeURIComponent(`'${sheet.title.replace(/'/g, "''")}'!A1:Z5`);
+        const valuesUrl = new URL(
+          `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${rangeEncoded}`
+        );
+        const dataRes = await fetch(valuesUrl.toString(), {
+          headers: { "Authorization": `Bearer ${googleToken}` }
         });
         if (dataRes.ok) {
           const data = await dataRes.json();
-          result[sheet.title] = data.values || [];
+          const vals = Array.isArray(data?.values) ? data.values : [];
+          summary.push({
+            title: sheet.title,
+            sheetId: sheet.sheetId,
+            previewRowsCount: vals.length,
+            headers: Array.isArray(vals[0]) ? vals[0] : []
+          });
         }
       }
-      import_fs.default.writeFileSync(import_path.default.join(process.cwd(), "sheets_dump.json"), JSON.stringify(result, null, 2));
-      return res.json({ success: true, message: "Data guardada en sheets_dump.json" });
+      return res.json({ success: true, sheets: summary });
     } catch (err) {
-      console.error("Structure lookup error:", err);
+      console.error("Structure lookup error:", err?.message || "unknown");
       return res.status(500).json({ error: "Internal server error" });
     }
   });
@@ -13078,6 +13661,8 @@ async function startServer() {
     lastSheetMetrics = parsed.metrics;
     lastSheetWarnings = parsed.warnings;
     lastSheetAuditLogs = parsed.auditLogs;
+    lastSheetDataQuality = parsed.dataQuality || null;
+    lastLiveProductMaps = parsed.productMaps;
     if (parsed.warnings.length > 0) {
       console.warn(
         `[SHEET QA] ${parsed.warnings.length} advertencia(s) y ${parsed.auditLogs.length} evento(s) de auditor\xEDa registrados sin cortar carga.`
@@ -13305,6 +13890,7 @@ async function startServer() {
       lastSyncAt: lastSuccessfulSheetSyncAt || null,
       source: lastSheetSource,
       metrics: lastSheetMetrics,
+      dataQuality: lastSheetDataQuality,
       warningsCount: lastSheetWarnings.length,
       auditLogsCount: lastSheetAuditLogs.length,
       ...isPrivileged ? {
@@ -14200,22 +14786,31 @@ async function startServer() {
       histFail(res, e);
     }
   });
-  const hydrateParsedCachesFromWorkbookFallback = async () => {
+  const hydrateParsedCachesFromWorkbookFallback = async (scope = "all") => {
     const workbook = await getWorkbook(false);
     const XLSX2 = await import("xlsx");
     const parsed = parseWorkbookFull(XLSX2, workbook, {
       periodo: metasPeriodoActual(),
       masterClients: loadLocalMasterClientSeed()
     });
-    cachedVolumenParsed = parsed.volumenApiRows;
-    lastVolumenParsedTime = Date.now();
-    cachedActivacionParsed = parsed.activacionApiRows;
-    lastActivacionParsedTime = Date.now();
-    cachedMetasParsed = parsed.metasApiRows;
-    lastMetasParsedTime = Date.now();
+    const updateAll = scope === "all" || lastSheetSource === "live_google_sheet";
+    if (updateAll || scope === "volumen") {
+      cachedVolumenParsed = parsed.volumenApiRows;
+      lastVolumenParsedTime = Date.now();
+    }
+    if (updateAll || scope === "activacion") {
+      cachedActivacionParsed = parsed.activacionApiRows;
+      lastActivacionParsedTime = Date.now();
+    }
+    if (updateAll || scope === "metas") {
+      cachedMetasParsed = parsed.metasApiRows;
+      lastMetasParsedTime = Date.now();
+    }
     lastSheetMetrics = parsed.metrics;
     lastSheetWarnings = parsed.warnings;
     lastSheetAuditLogs = parsed.auditLogs;
+    lastSheetDataQuality = parsed.dataQuality || null;
+    lastLiveProductMaps = parsed.productMaps;
     return parsed;
   };
   const resolveDataFilter = (user, queryVendedor) => {
@@ -14315,11 +14910,11 @@ async function startServer() {
           }
           if (Array.isArray(supaRows) && supaRows.length > 0) {
             const mapped = supaRows.map((r) => {
-              const metaKg = Number(r.meta_kg) || 0;
-              const ventaNetaKg = r.venta_neta_kg !== void 0 && r.venta_neta_kg !== null ? Number(r.venta_neta_kg) : Number(r.ejecutado_kg) || 0;
-              const ventaBrutaKg = r.venta_bruta_kg !== void 0 && r.venta_bruta_kg !== null ? Number(r.venta_bruta_kg) : ventaNetaKg > 0 ? ventaNetaKg : 0;
-              const devolucionesKg = r.devoluciones_kg !== void 0 && r.devoluciones_kg !== null ? Number(r.devoluciones_kg) : ventaNetaKg < 0 ? ventaNetaKg : 0;
-              const pctCumpl = r.porcentaje_cumplimiento !== void 0 && r.porcentaje_cumplimiento !== null ? Number(r.porcentaje_cumplimiento) : null;
+              const metaKg = parseSafeNumber(r.meta_kg, 0);
+              const ventaNetaKg = r.venta_neta_kg !== void 0 && r.venta_neta_kg !== null ? parseSafeNumber(r.venta_neta_kg, 0) : parseSafeNumber(r.ejecutado_kg, 0);
+              const ventaBrutaKg = r.venta_bruta_kg !== void 0 && r.venta_bruta_kg !== null ? parseSafeNumber(r.venta_bruta_kg, 0) : ventaNetaKg > 0 ? ventaNetaKg : 0;
+              const devolucionesKg = r.devoluciones_kg !== void 0 && r.devoluciones_kg !== null ? parseSafeNumber(r.devoluciones_kg, 0) : ventaNetaKg < 0 ? ventaNetaKg : 0;
+              const pctCumpl = r.porcentaje_cumplimiento !== void 0 && r.porcentaje_cumplimiento !== null ? parseSafeNumber(r.porcentaje_cumplimiento, Number.NaN) : null;
               return {
                 id: String(r.id),
                 sku: r.sku,
@@ -14338,7 +14933,7 @@ async function startServer() {
                 ventaBrutaKg,
                 devolucionesKg,
                 ventaNetaKg,
-                porcentajeCumplimiento: pctCumpl,
+                porcentajeCumplimiento: pctCumpl !== null && Number.isFinite(pctCumpl) ? pctCumpl : null,
                 zona: r.zona || "General"
               };
             });
@@ -14350,7 +14945,7 @@ async function startServer() {
         } catch (e) {
         }
       }
-      const parsed = await hydrateParsedCachesFromWorkbookFallback();
+      const parsed = await hydrateParsedCachesFromWorkbookFallback("volumen");
       setNoCacheSyncHeaders(res);
       res.json(filterByVendor(parsed.volumenApiRows));
     } catch (err) {
@@ -14380,13 +14975,14 @@ async function startServer() {
         setNoCacheSyncHeaders(res, "memory");
         return res.json(filterByVendor(cachedActivacionParsed));
       }
-      if (supabase && await activacionTieneColumnasNuevas()) {
+      if (supabase) {
         try {
+          const colsNuevasOk = await activacionTieneColumnasNuevas();
           let supaRows = [];
           let from = 0;
           const pageSize = 1e3;
           while (from < 1e4) {
-            const { data, error } = await supabase.from("activacion_clientes").select("*").range(from, from + pageSize - 1);
+            const { data, error } = await supabase.from("activacion_clientes").select("*").order("id", { ascending: true }).range(from, from + pageSize - 1);
             if (error || !data || data.length === 0) break;
             supaRows.push(...data);
             if (data.length < pageSize) break;
@@ -14401,32 +14997,46 @@ async function startServer() {
               }
               const cid = String(r.cliente_codigo || "").replace(/#\d+$/, "").trim();
               if (!cid) continue;
+              const canonicalCid = cid.replace(/^0+/, "") || "0";
               const vNorm = normalizeVendorName(r.vendedor_nombre || r.vendedor_id);
+              const vKey = r.vendedor_key || normalizeVendorKey(r.vendedor_nombre || r.vendedor_id);
               const compKey = `${vNorm}::${cid}`;
-              const hasAceite = Boolean(r.has_aceite) || (Number(r.cajas_aceite) || 0) > 0;
-              const hasAzucar = Boolean(r.has_azucar) || (Number(r.cajas_azucar) || 0) > 0;
-              const hasPollo = Boolean(r.has_pollo) || (Number(r.cajas_pollo) || 0) > 0;
-              const hasAsturias = Boolean(r.has_estandar_asturias) || (Number(r.cajas_estandar_asturias) || 0) > 0;
-              const hasSalpicao = Boolean(r.has_mortadela_salpicao) || (Number(r.cajas_mortadela_salpicao) || 0) > 0;
-              const hasLeche = Boolean(r.has_leche_vencampo) || (Number(r.cajas_leche_vencampo) || 0) > 0;
-              const hasMortAst = Boolean(r.has_mortadela_asturias) || (Number(r.cajas_mortadela_asturias) || 0) > 0;
-              const hasSalpNuevo = Boolean(r.has_salpicao) || (Number(r.cajas_salpicao) || 0) > 0;
+              const liveLecheCajas = !colsNuevasOk && lastLiveProductMaps?.LECHE_VENCAMPO ? lastLiveProductMaps.LECHE_VENCAMPO.get(canonicalCid) ?? lastLiveProductMaps.LECHE_VENCAMPO.get(cid) ?? 0 : 0;
+              const liveMortAstCajas = !colsNuevasOk && lastLiveProductMaps?.MORTADELA_ASTURIAS ? lastLiveProductMaps.MORTADELA_ASTURIAS.get(canonicalCid) ?? lastLiveProductMaps.MORTADELA_ASTURIAS.get(cid) ?? 0 : 0;
+              const liveSalpNuevoCajas = !colsNuevasOk && lastLiveProductMaps?.SALPICAO ? lastLiveProductMaps.SALPICAO.get(canonicalCid) ?? lastLiveProductMaps.SALPICAO.get(cid) ?? 0 : 0;
+              const cAceite = parseSafeNumber(r.cajas_aceite, 0);
+              const cAzucar = parseSafeNumber(r.cajas_azucar, 0);
+              const cPollo = parseSafeNumber(r.cajas_pollo, 0);
+              const cAsturias = parseSafeNumber(r.cajas_estandar_asturias, 0);
+              const cSalpicao = parseSafeNumber(r.cajas_mortadela_salpicao, 0);
+              const cLeche = colsNuevasOk ? parseSafeNumber(r.cajas_leche_vencampo, 0) : liveLecheCajas;
+              const cMortAst = colsNuevasOk ? parseSafeNumber(r.cajas_mortadela_asturias, 0) : liveMortAstCajas;
+              const cSalpNuevo = colsNuevasOk ? parseSafeNumber(r.cajas_salpicao, 0) : liveSalpNuevoCajas;
+              const hasAceite = Boolean(r.has_aceite) || cAceite > 0;
+              const hasAzucar = Boolean(r.has_azucar) || cAzucar > 0;
+              const hasPollo = Boolean(r.has_pollo) || cPollo > 0;
+              const hasAsturias = Boolean(r.has_estandar_asturias) || cAsturias > 0;
+              const hasSalpicao = Boolean(r.has_mortadela_salpicao) || cSalpicao > 0;
+              const hasLeche = colsNuevasOk && Boolean(r.has_leche_vencampo) || cLeche > 0;
+              const hasMortAst = colsNuevasOk && Boolean(r.has_mortadela_asturias) || cMortAst > 0;
+              const hasSalpNuevo = colsNuevasOk && Boolean(r.has_salpicao) || cSalpNuevo > 0;
               if (!byClientMap.has(compKey)) {
-                byClientMap.set(compKey, {
+                const entry = {
                   id: cid,
                   cliente: r.cliente_nombre,
                   vendedorId: r.vendedor_id,
+                  vendedorKey: vKey,
                   vendedorNombre: r.vendedor_nombre,
-                  status: hasAzucar || hasLeche || hasPollo || hasAsturias || hasSalpicao || r.status === "ACTIVO" ? "ACTIVO" : "INACTIVO",
+                  status: "INACTIVO",
                   cajas: {
-                    ACEITE: Number(r.cajas_aceite) || 0,
-                    AZUCAR: Number(r.cajas_azucar) || 0,
-                    POLLO: Number(r.cajas_pollo) || 0,
-                    ESTANDAR_ASTURIAS: Number(r.cajas_estandar_asturias) || 0,
-                    MORTADELA_SALPICAO: Number(r.cajas_mortadela_salpicao) || 0,
-                    LECHE_VENCAMPO: Number(r.cajas_leche_vencampo) || 0,
-                    MORTADELA_ASTURIAS: Number(r.cajas_mortadela_asturias) || 0,
-                    SALPICAO: Number(r.cajas_salpicao) || 0
+                    ACEITE: cAceite,
+                    AZUCAR: cAzucar,
+                    POLLO: cPollo,
+                    ESTANDAR_ASTURIAS: cAsturias,
+                    MORTADELA_SALPICAO: cSalpicao,
+                    LECHE_VENCAMPO: cLeche,
+                    MORTADELA_ASTURIAS: cMortAst,
+                    SALPICAO: cSalpNuevo
                   },
                   cats: {
                     ACEITE: hasAceite,
@@ -14441,7 +15051,9 @@ async function startServer() {
                     ENTERO: hasAsturias,
                     LIGEROS: hasSalpicao
                   }
-                });
+                };
+                entry.status = isClientActiveInAnyFocusProduct(entry) || r.status === "ACTIVO" ? "ACTIVO" : "INACTIVO";
+                byClientMap.set(compKey, entry);
               } else {
                 const prev = byClientMap.get(compKey);
                 prev.cats.ACEITE = prev.cats.ACEITE || hasAceite;
@@ -14455,15 +15067,15 @@ async function startServer() {
                 prev.cats.ARROZ = prev.cats.POLLO;
                 prev.cats.ENTERO = prev.cats.ESTANDAR_ASTURIAS;
                 prev.cats.LIGEROS = prev.cats.MORTADELA_SALPICAO;
-                prev.cajas.ACEITE = Math.max(prev.cajas.ACEITE, Number(r.cajas_aceite) || 0);
-                prev.cajas.AZUCAR = Math.max(prev.cajas.AZUCAR, Number(r.cajas_azucar) || 0);
-                prev.cajas.POLLO = Math.max(prev.cajas.POLLO, Number(r.cajas_pollo) || 0);
-                prev.cajas.ESTANDAR_ASTURIAS = Math.max(prev.cajas.ESTANDAR_ASTURIAS, Number(r.cajas_estandar_asturias) || 0);
-                prev.cajas.MORTADELA_SALPICAO = Math.max(prev.cajas.MORTADELA_SALPICAO, Number(r.cajas_mortadela_salpicao) || 0);
-                prev.cajas.LECHE_VENCAMPO = Math.max(prev.cajas.LECHE_VENCAMPO || 0, Number(r.cajas_leche_vencampo) || 0);
-                prev.cajas.MORTADELA_ASTURIAS = Math.max(prev.cajas.MORTADELA_ASTURIAS || 0, Number(r.cajas_mortadela_asturias) || 0);
-                prev.cajas.SALPICAO = Math.max(prev.cajas.SALPICAO || 0, Number(r.cajas_salpicao) || 0);
-                if (prev.cats.AZUCAR || prev.cats.LECHE_VENCAMPO || prev.cats.POLLO || prev.cats.ESTANDAR_ASTURIAS || prev.cats.MORTADELA_SALPICAO) {
+                prev.cajas.ACEITE = Math.max(prev.cajas.ACEITE, cAceite);
+                prev.cajas.AZUCAR = Math.max(prev.cajas.AZUCAR, cAzucar);
+                prev.cajas.POLLO = Math.max(prev.cajas.POLLO, cPollo);
+                prev.cajas.ESTANDAR_ASTURIAS = Math.max(prev.cajas.ESTANDAR_ASTURIAS, cAsturias);
+                prev.cajas.MORTADELA_SALPICAO = Math.max(prev.cajas.MORTADELA_SALPICAO, cSalpicao);
+                prev.cajas.LECHE_VENCAMPO = Math.max(prev.cajas.LECHE_VENCAMPO || 0, cLeche);
+                prev.cajas.MORTADELA_ASTURIAS = Math.max(prev.cajas.MORTADELA_ASTURIAS || 0, cMortAst);
+                prev.cajas.SALPICAO = Math.max(prev.cajas.SALPICAO || 0, cSalpNuevo);
+                if (isClientActiveInAnyFocusProduct(prev)) {
                   prev.status = "ACTIVO";
                 }
               }
@@ -14477,7 +15089,7 @@ async function startServer() {
         } catch (e) {
         }
       }
-      const parsed = await hydrateParsedCachesFromWorkbookFallback();
+      const parsed = await hydrateParsedCachesFromWorkbookFallback("activacion");
       setNoCacheSyncHeaders(res);
       res.json(filterByVendor(parsed.activacionApiRows));
     } catch (err) {
@@ -14610,9 +15222,9 @@ async function startServer() {
               vendedorId: r.vendedor_id,
               vendedorKey: r.vendedor_key || normalizeVendorKey(r.vendedor_id),
               categoria: r.categoria,
-              cartera: Number(r.cartera) || 0,
-              meta: Number(r.meta) || 0,
-              activados: Number(r.activados) || 0
+              cartera: Math.round(parseSafeNumber(r.cartera, 0)),
+              meta: Math.round(parseSafeNumber(r.meta, 0)),
+              activados: Math.round(parseSafeNumber(r.activados, 0))
             }));
             cachedMetasParsed = mapped;
             lastMetasParsedTime = Date.now();
@@ -14622,7 +15234,7 @@ async function startServer() {
         } catch (e) {
         }
       }
-      const parsed = await hydrateParsedCachesFromWorkbookFallback();
+      const parsed = await hydrateParsedCachesFromWorkbookFallback("metas");
       setNoCacheSyncHeaders(res);
       res.json(filterByVendor(parsed.metasApiRows));
     } catch (err) {
