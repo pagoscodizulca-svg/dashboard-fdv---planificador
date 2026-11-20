@@ -2,6 +2,7 @@ import React, { useEffect, useState, useMemo, useCallback, useRef, Suspense, laz
 import { Role, VolumenData, ActivacionData } from './types';
 import {
   DEFAULT_SHEETS_CACHE_TTL_MS,
+  SHEETS_AUTO_REFRESH_INTERVAL_MS,
   fetchVolumenData,
   fetchActivacionData,
   fetchMetasActivacion,
@@ -356,7 +357,7 @@ export default function App() {
 
   const loadAbortRef = useRef<AbortController | null>(null);
 
-  const loadData = useCallback(async (force = false, showLoader = false) => {
+  const loadData = useCallback(async (force = false, showLoader = false, customTtlMs?: number) => {
     if (!localStorage.getItem('dashboard_fdv_token')) {
       setLoading(false);
       setIsSyncing(false);
@@ -392,11 +393,12 @@ export default function App() {
 
     // 2. Revalidar contra Google Sheets / Servidor con deduplicación in-flight y AbortSignal
     setIsSyncing(true);
+    const effectiveTtlMs = typeof customTtlMs === 'number' ? customTtlMs : DEFAULT_SHEETS_CACHE_TTL_MS;
     try {
       const [vol, act, metas] = await Promise.all([
-        fetchVolumenData({ forceRefresh: force, vendorId: targetVendor, signal: controller.signal }),
-        fetchActivacionData({ forceRefresh: force, vendorId: targetVendor, signal: controller.signal }),
-        fetchMetasActivacion({ forceRefresh: force, vendorId: targetVendor, signal: controller.signal })
+        fetchVolumenData({ forceRefresh: force, vendorId: targetVendor, signal: controller.signal, ttlMs: effectiveTtlMs }),
+        fetchActivacionData({ forceRefresh: force, vendorId: targetVendor, signal: controller.signal, ttlMs: effectiveTtlMs }),
+        fetchMetasActivacion({ forceRefresh: force, vendorId: targetVendor, signal: controller.signal, ttlMs: effectiveTtlMs })
       ]);
       if (controller.signal.aborted) return;
       setVolumenData(vol);
@@ -486,8 +488,9 @@ export default function App() {
 
     loadData(false, false);
     const syncInterval = setInterval(() => {
-      loadData(false, false);
-    }, DEFAULT_SHEETS_CACHE_TTL_MS);
+      // TTL 50s en el tick de 60s para garantizar lectura fresca del servidor sin saltarse un ciclo por milisegundos
+      loadData(false, false, 50000);
+    }, SHEETS_AUTO_REFRESH_INTERVAL_MS);
     return () => {
       catalogController.abort();
       clearInterval(syncInterval);

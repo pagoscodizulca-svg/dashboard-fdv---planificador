@@ -1,7 +1,8 @@
 import { VolumenData } from '../types';
 import { isClientActiveInAnyFocusProduct } from '../config/sheetsConfig';
 
-export const DEFAULT_SHEETS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutos (configurable)
+export const DEFAULT_SHEETS_CACHE_TTL_MS = 60 * 1000; // 60 segundos (alineado al ciclo de sincronización de Google Sheets)
+export const SHEETS_AUTO_REFRESH_INTERVAL_MS = 60 * 1000; // 60 segundos
 let cacheTtlMs = DEFAULT_SHEETS_CACHE_TTL_MS;
 
 export const getSheetsCacheTtlMs = (): number => cacheTtlMs;

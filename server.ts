@@ -264,6 +264,11 @@ let cachedWorkbook: any = null;
 let lastWorkbookSha256: string = '';
 let lastFetchTime = 0;
 const CACHE_TTL = 30000; // 30 seconds
+const SHEETS_AUTO_SYNC_INTERVAL_MS = (() => {
+  const parsed = Number(process.env.SHEETS_SYNC_INTERVAL_MS);
+  if (Number.isFinite(parsed) && parsed >= 30000) return Math.round(parsed);
+  return 60000; // Sincronización automática con Google Sheet cada 60 segundos
+})();
 let lastSuccessfulSheetSyncAt: string = '';
 let lastSheetSource: 'live_google_sheet' | 'local_backup' | 'supabase' | 'memory' = 'memory';
 let lastSheetMetrics: Record<string, SheetTabMetrics> = {};
@@ -4294,7 +4299,7 @@ async function startServer() {
   let lastActivacionParsedTime = 0;
   let cachedMetasParsed: any[] | null = null;
   let lastMetasParsedTime = 0;
-  const PARSED_DATA_TTL = 60000; // 60 seconds
+  const PARSED_DATA_TTL = 50000; // 50s (alineado al ciclo de auto-sincronización de 60s)
 
   app.get("/api/usuarios", (_req, res) => {
     return res.status(403).json({
@@ -4891,6 +4896,7 @@ async function startServer() {
           cachedActivacionParsed &&
           cachedMetasParsed
         ) {
+          lastFullSheetsSyncCompletedAt = Date.now();
           return {
             status: 'SKIPPED_UNCHANGED' as const,
             countVolumen: cachedVolumenParsed.length,
@@ -4958,6 +4964,7 @@ async function startServer() {
       periodo: metasPeriodoActual(),
       lastSyncAt: lastSuccessfulSheetSyncAt || null,
       source: lastSheetSource,
+      syncIntervalSeconds: Math.round(SHEETS_AUTO_SYNC_INTERVAL_MS / 1000),
       metrics: lastSheetMetrics,
       dataQuality: lastSheetDataQuality,
       warningsCount: lastSheetWarnings.length,
@@ -6693,7 +6700,8 @@ async function startServer() {
     const serverInstance = app.listen(portToTry, "0.0.0.0", () => {
       console.log(`Server running on port ${portToTry}`);
 
-      // Auto-sincronización híbrida con verificación SHA-256 (sin escrituras redundantes si el Sheet no cambió)
+      // Auto-sincronización híbrida cada 60s con verificación SHA-256 (sin escrituras redundantes si el Sheet no cambió)
+      let autoSyncTimer: ReturnType<typeof setTimeout> | null = null;
       const runAutoSync = async () => {
         try {
           const res = await runCoalescedSheetsSync(false, 'CRON');
@@ -6702,13 +6710,19 @@ async function startServer() {
           }
         } catch (err: any) {
           console.warn("[SYNC AUTO] Error en sincronización periódica desde Google Sheet:", err?.message);
+        } finally {
+          autoSyncTimer = setTimeout(runAutoSync, SHEETS_AUTO_SYNC_INTERVAL_MS);
+          if (typeof (autoSyncTimer as any)?.unref === 'function') {
+            (autoSyncTimer as any).unref();
+          }
         }
       };
 
-      // Disparar verificación inicial 3 segundos después del arranque y luego cada 5 min con jitter (±15s)
-      setTimeout(runAutoSync, 3000);
-      const jitterMs = Math.floor((Math.random() * 30 - 15) * 1000);
-      setInterval(runAutoSync, 5 * 60 * 1000 + jitterMs);
+      // Disparar verificación inicial 3 segundos después del arranque y luego repetir cada 60 segundos sin solapamiento
+      autoSyncTimer = setTimeout(runAutoSync, 3000);
+      if (typeof (autoSyncTimer as any)?.unref === 'function') {
+        (autoSyncTimer as any).unref();
+      }
     });
 
     serverInstance.on('error', (err: any) => {
