@@ -4900,7 +4900,7 @@ var import_vite = require("vite");
 var import_dotenv = __toESM(require("dotenv"), 1);
 init_alkostoOcParser();
 init_productosCodizulca();
-var import_crypto2 = __toESM(require("crypto"), 1);
+var import_crypto3 = __toESM(require("crypto"), 1);
 
 // src/lib/rubros.ts
 init_define_import_meta_env();
@@ -8211,6 +8211,307 @@ function isValidActivacionRecord(rec) {
   return true;
 }
 
+// src/services/sheetSyncService.ts
+init_define_import_meta_env();
+var import_crypto = __toESM(require("crypto"), 1);
+init_vendorKeyNormalizer();
+init_vendorRoutes();
+function parseSheetNumber(rawValue) {
+  if (rawValue === null || rawValue === void 0) return 0;
+  if (typeof rawValue === "number") {
+    if (!Number.isFinite(rawValue)) return 0;
+    return Object.is(rawValue, -0) ? 0 : rawValue;
+  }
+  if (typeof rawValue === "boolean") return 0;
+  const trimmed = String(rawValue).replace(/[\u00A0\u202F\u2007\u200B-\u200D\uFEFF\t\r\n]+/g, " ").trim();
+  if (!trimmed || /^[-–—]+$/.test(trimmed) || /^(?:#?n\/?a|#?n\/?d|#div\/0!|#value!|#ref!|#name\?|#num!|#null!|#error!|null|undefined|nan)$/i.test(trimmed)) {
+    return 0;
+  }
+  const strippedQuick = trimmed.replace(/(?:^|[\s(])(?:US\$|USD|VES|EUR|BS\.?\s*[SD]?|BS\.?)(?=[\s\d+\-(]|$)/gi, " ").replace(/[$€£%\s]/g, "");
+  if (/^-?\d{1,3}(?:,\d{3})+(?:\.\d+)?$/.test(strippedQuick)) {
+    const num = Number(strippedQuick.replace(/,/g, ""));
+    return Number.isFinite(num) ? Object.is(num, -0) ? 0 : num : 0;
+  }
+  const parsed = parseSafeNumber(trimmed, { fallback: 0, allowThreeDecimals: false });
+  return Number.isFinite(parsed) ? Object.is(parsed, -0) ? 0 : parsed : 0;
+}
+function normalizeSellerKey(raw) {
+  return normalizeVendorKey(raw);
+}
+function cleanClientCode(raw) {
+  if (raw === null || raw === void 0) return { rawClean: "", canonical: "" };
+  let cleaned = sanitizeSheetText(raw).replace(/^[#\s]+/, "").trim();
+  if (/^\d+\.0+$/.test(cleaned)) {
+    cleaned = cleaned.replace(/\.0+$/, "");
+  }
+  cleaned = cleaned.replace(/\s+/g, "");
+  if (!cleaned) return { rawClean: "", canonical: "" };
+  const canonical = cleaned.replace(/^0+/, "") || "0";
+  return { rawClean: cleaned, canonical };
+}
+function consolidateSellerToMasterKey(rawSellerName, usuariosMaster = []) {
+  const baseKey = normalizeSellerKey(rawSellerName);
+  if (!baseKey) return "";
+  const routeCanonical = resolveCanonicalRouteKey(baseKey);
+  if (usuariosMaster.length > 0) {
+    const normalizedUsers = usuariosMaster.map((u) => ({
+      userKey: normalizeSellerKey(u.usuario),
+      vendorIdKey: normalizeSellerKey(u.vendorId),
+      rol: normalizeSellerKey(u.rol)
+    })).filter((u) => Boolean(u.userKey) && u.rol !== "ADMIN");
+    for (const u of normalizedUsers) {
+      if (u.userKey === baseKey || u.userKey === routeCanonical || u.vendorIdKey && u.vendorIdKey === baseKey) {
+        return u.userKey;
+      }
+    }
+    const prefixBase = baseKey.split(" - ")[0].trim();
+    for (const u of normalizedUsers) {
+      if (u.userKey === prefixBase || baseKey.startsWith(`${u.userKey} - `) || baseKey.startsWith(`${u.userKey} `)) {
+        return u.userKey;
+      }
+    }
+  }
+  for (const prof of Object.values(VENDOR_PROFILES)) {
+    const profKey = normalizeSellerKey(prof.canonicalUsername);
+    const allAliases = [
+      prof.canonicalUsername,
+      prof.displayName,
+      ...prof.routes.flatMap((r) => [r.id, r.label, ...r.aliases])
+    ];
+    if (matchesVendorAlias(allAliases, baseKey) || matchesVendorAlias(allAliases, routeCanonical)) {
+      return profKey;
+    }
+  }
+  if (baseKey.includes(" - ") && !baseKey.startsWith("CUENTAS CLAVE")) {
+    const prefix = baseKey.split(" - ")[0].trim();
+    if (prefix.length >= 4) {
+      return prefix;
+    }
+  }
+  return routeCanonical || baseKey;
+}
+function normColHeader(raw) {
+  return sanitizeSheetText(raw).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+function forwardFillMergedHeaderRow(row1, row2 = [], merges = []) {
+  const maxMergeEnd = merges.reduce((max, m) => m && m.s?.r <= 0 && m.e?.r >= 0 ? Math.max(max, m.e.c + 1) : max, 0);
+  const totalCols = Math.max(row1.length, row2.length, maxMergeEnd);
+  const filled = new Array(totalCols).fill("");
+  const mergedCols = /* @__PURE__ */ new Set();
+  for (const m of merges) {
+    if (m && m.s && m.e && m.s.r <= 0 && m.e.r >= 0 && m.e.c >= m.s.c) {
+      const anchor = sanitizeSheetText(row1[m.s.c]);
+      if (anchor) {
+        for (let c = m.s.c; c <= m.e.c && c < totalCols; c++) {
+          filled[c] = anchor;
+          mergedCols.add(c);
+        }
+      }
+    }
+  }
+  let activeVendor = "";
+  let remainingTriplet = 0;
+  for (let c = 0; c < totalCols; c++) {
+    if (mergedCols.has(c)) {
+      activeVendor = filled[c];
+      remainingTriplet = 0;
+      continue;
+    }
+    const rawCell = sanitizeSheetText(row1[c]);
+    if (rawCell) {
+      filled[c] = rawCell;
+      activeVendor = rawCell;
+      remainingTriplet = 2;
+    } else if (activeVendor && remainingTriplet > 0) {
+      const subNorm = normColHeader(row2[c]);
+      const isDataSubheader = row2.length === 0 || subNorm === "" || subNorm === "cuota" || subNorm === "cuota_kg" || subNorm === "meta" || subNorm === "meta_kg" || subNorm === "kg" || subNorm === "venta_kg" || subNorm === "venta" || subNorm === "ejecutado" || subNorm === "ejecutado_kg" || sanitizeSheetText(row2[c]) === "%" || subNorm === "pct" || subNorm === "porcentaje" || subNorm === "cumplimiento";
+      if (isDataSubheader) {
+        filled[c] = activeVendor;
+        remainingTriplet--;
+      } else {
+        activeVendor = "";
+        remainingTriplet = 0;
+      }
+    }
+  }
+  return filled;
+}
+function stableNumericStringify(value) {
+  if (value === null || value === void 0) return "null";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return "0";
+    return String(Object.is(value, -0) ? 0 : value);
+  }
+  if (typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableNumericStringify(item)).join(",")}]`;
+  }
+  const obj = value;
+  const keys = Object.keys(obj).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableNumericStringify(obj[k])}`).join(",")}}`;
+}
+function computeNumericSha256(numericPayload) {
+  return import_crypto.default.createHash("sha256").update(stableNumericStringify(numericPayload)).digest("hex");
+}
+var SellerNumericSyncTracker = class {
+  constructor(nowFn = () => Date.now()) {
+    this.sellerSyncState = /* @__PURE__ */ new Map();
+    this.nowFn = nowFn;
+  }
+  resolveBucketKeysForRow(rawVendor, usuariosMaster) {
+    const keys = /* @__PURE__ */ new Set();
+    const routeKey = normalizeSellerKey(rawVendor);
+    const masterKey = consolidateSellerToMasterKey(rawVendor, usuariosMaster);
+    if (routeKey) keys.add(routeKey);
+    if (masterKey) keys.add(masterKey);
+    for (const sup of Object.values(SUPERVISOR_PROFILES)) {
+      const supVendors = sup.supervisedVendors.map((v) => normalizeSellerKey(v));
+      if (supVendors.includes(masterKey) || supVendors.includes(routeKey)) {
+        keys.add(`SUPERVISOR:${normalizeSellerKey(sup.canonicalUsername)}`);
+      }
+    }
+    keys.add("ADMIN");
+    return Array.from(keys);
+  }
+  getOrCreateBucket(map, key) {
+    let bucket = map.get(key);
+    if (!bucket) {
+      bucket = { grid: [], volumen: [], clientes: [] };
+      map.set(key, bucket);
+    }
+    return bucket;
+  }
+  /**
+   * Igual que `applyParsedWorkbook`, pero devuelve por separado los vendedores inicializados por
+   * primera vez (`initialized`, versión 1 silenciosa sin toast) y los que tuvieron cambio numérico real (`changed`).
+   */
+  applyParsedWorkbookDetailed(parsed) {
+    const usuariosMaster = parsed.usuariosRows || [];
+    const buckets = /* @__PURE__ */ new Map();
+    for (const m of parsed.metasApiRows || []) {
+      const targetKeys = this.resolveBucketKeysForRow(m.vendedorKey || m.vendedorId, usuariosMaster);
+      const item = {
+        categoria: sanitizeSheetText(m.categoria).toUpperCase(),
+        cartera: Math.round(parseSheetNumber(m.cartera)),
+        meta: Math.round(parseSheetNumber(m.meta)),
+        activados: Math.round(parseSheetNumber(m.activados))
+      };
+      for (const key of targetKeys) {
+        this.getOrCreateBucket(buckets, key).grid.push(item);
+      }
+    }
+    for (const v of parsed.volumenApiRows || []) {
+      const routeKey = normalizeSellerKey(v.vendedorKey || v.vendedorId);
+      const targetKeys = this.resolveBucketKeysForRow(v.vendedorKey || v.vendedorId, usuariosMaster);
+      const metaKg = roundToDecimals(parseSheetNumber(v.metaKg ?? v.meta), 2);
+      const ventaKg = roundToDecimals(parseSheetNumber(v.ventaNetaKg ?? v.ejecutadoKg ?? v.ejecutado), 2);
+      const pct = metaKg > 0 ? roundToDecimals(ventaKg / metaKg * 100, 2) : roundToDecimals(parseSheetNumber(v.porcentajeCumplimiento ?? 0), 2);
+      const item = {
+        routeKey,
+        sku: cleanClientCode(v.skuId || v.sku).rawClean || sanitizeSheetText(v.skuId || v.sku),
+        metaKg,
+        ventaKg,
+        pct
+      };
+      for (const key of targetKeys) {
+        this.getOrCreateBucket(buckets, key).volumen.push(item);
+      }
+    }
+    for (const c of parsed.activacionApiRows || []) {
+      const targetKeys = this.resolveBucketKeysForRow(c.vendedorKey || c.vendedorId, usuariosMaster);
+      const code = cleanClientCode(c.id).canonical;
+      if (!code) continue;
+      const cajasClean = {};
+      if (c.cajas && typeof c.cajas === "object") {
+        for (const catKey of Object.keys(c.cajas).sort()) {
+          const val = roundToDecimals(parseSheetNumber(c.cajas[catKey]), 2);
+          if (val !== 0) {
+            cajasClean[catKey] = val;
+          }
+        }
+      }
+      const activeFlagsCount = c.cats && typeof c.cats === "object" ? Object.values(c.cats).filter((v) => v === true || typeof v === "number" && v > 0).length : 0;
+      const item = {
+        code,
+        activo: c.status === "ACTIVO" || activeFlagsCount > 0 ? 1 : 0,
+        cajas: cajasClean
+      };
+      for (const key of targetKeys) {
+        this.getOrCreateBucket(buckets, key).clientes.push(item);
+      }
+    }
+    const now = this.nowFn();
+    const initialized = [];
+    const changed = [];
+    for (const [sellerKey, bucket] of buckets.entries()) {
+      bucket.grid.sort((a, b) => a.categoria.localeCompare(b.categoria) || a.meta - b.meta || a.activados - b.activados);
+      bucket.volumen.sort(
+        (a, b) => a.routeKey.localeCompare(b.routeKey) || a.sku.localeCompare(b.sku) || a.metaKg - b.metaKg
+      );
+      bucket.clientes.sort((a, b) => a.code.localeCompare(b.code) || a.activo - b.activo);
+      const newHash = computeNumericSha256(bucket);
+      const prev = this.sellerSyncState.get(sellerKey);
+      if (!prev) {
+        this.sellerSyncState.set(sellerKey, {
+          sellerId: sellerKey,
+          numericHash: newHash,
+          version: 1,
+          updatedAt: now
+        });
+        initialized.push({
+          sellerId: sellerKey,
+          version: 1,
+          updatedAt: now
+        });
+      } else if (prev.numericHash !== newHash) {
+        const nextVersion = prev.version + 1;
+        this.sellerSyncState.set(sellerKey, {
+          sellerId: sellerKey,
+          numericHash: newHash,
+          version: nextVersion,
+          updatedAt: now
+        });
+        changed.push({
+          sellerId: sellerKey,
+          version: nextVersion,
+          updatedAt: now
+        });
+      }
+    }
+    return { initialized, changed };
+  }
+  /**
+   * Procesa el resultado parseado del libro, calcula el hash SHA-256 numérico de cada vendedor,
+   * actualiza `sellerSyncState` y devuelve ÚNICAMENTE los vendedores con cambio numérico real
+   * (excluyendo la carga inicial tras reinicio del servidor).
+   */
+  applyParsedWorkbook(parsed) {
+    return this.applyParsedWorkbookDetailed(parsed).changed;
+  }
+  /**
+   * Consulta el estado ligero `{ sellerId, version, updatedAt }` de un vendedor o perfil.
+   */
+  getSellerStatus(rawSellerId) {
+    const clean = String(rawSellerId || "").trim();
+    const normalized = clean.toUpperCase().startsWith("SUPERVISOR:") ? `SUPERVISOR:${normalizeSellerKey(clean.replace(/^SUPERVISOR:/i, ""))}` : clean.toUpperCase() === "ADMIN" ? "ADMIN" : normalizeSellerKey(clean);
+    const direct = this.sellerSyncState.get(normalized);
+    if (direct) {
+      return { sellerId: direct.sellerId, version: direct.version, updatedAt: direct.updatedAt };
+    }
+    const consolidated = consolidateSellerToMasterKey(normalized);
+    const masterMatch = this.sellerSyncState.get(consolidated);
+    if (masterMatch) {
+      return { sellerId: masterMatch.sellerId, version: masterMatch.version, updatedAt: masterMatch.updatedAt };
+    }
+    return { sellerId: normalized || "UNKNOWN", version: 0, updatedAt: 0 };
+  }
+  getStateSize() {
+    return this.sellerSyncState.size;
+  }
+};
+
 // src/services/googleSheetsParser.ts
 function buildGoogleSheetExportUrl(sheetId, format = "xlsx", gid) {
   return buildValidatedGoogleSheetUrl({
@@ -8295,11 +8596,7 @@ function isRowCompletelyEmpty(row) {
   return true;
 }
 function normalizeClientCode(raw) {
-  if (raw === null || raw === void 0) return { rawClean: "", canonical: "" };
-  const rawClean = String(raw).replace(/^[#\s]+/, "").trim();
-  if (!rawClean) return { rawClean: "", canonical: "" };
-  const canonical = rawClean.replace(/^0+/, "") || "0";
-  return { rawClean, canonical };
+  return cleanClientCode(raw);
 }
 function isBlankOrZeroMarker(raw) {
   return isBlankOrDashMarker(raw) || isSheetErrorMarker(raw);
@@ -8566,9 +8863,12 @@ function parseWorkbookFull(XLSX2, workbook, options) {
       const header0 = rows[0] || [];
       const header1 = rows[1] || [];
       const row0MergeSpans = getMergedHeaderSpansForRow(volResolved.sheet, 0);
+      const sheetMerges = Array.isArray(volResolved.sheet?.["!merges"]) ? volResolved.sheet["!merges"] : [];
+      const filledHeader0 = forwardFillMergedHeaderRow(header0, header1, sheetMerges);
       const maxHeaderCols = Math.max(
         header0.length,
         header1.length,
+        filledHeader0.length,
         ...Array.from(row0MergeSpans.values(), (end) => end)
       );
       const baseCols = mapHeaderColumns(
@@ -8591,11 +8891,16 @@ function parseWorkbookFull(XLSX2, workbook, options) {
       const supervisorOccurrences = /* @__PURE__ */ new Map();
       for (let bIdx = 0; bIdx < headerStarts.length; bIdx++) {
         const startCol = headerStarts[bIdx];
-        const mergedEnd = row0MergeSpans.get(startCol);
-        const nextStart = bIdx + 1 < headerStarts.length ? headerStarts[bIdx + 1] : Math.min(startCol + 3, maxHeaderCols);
-        const endCol = mergedEnd && mergedEnd > startCol ? Math.min(mergedEnd, nextStart) : nextStart;
         const rawVendorName = sanitizeSheetText(header0[startCol]);
         if (!rawVendorName) continue;
+        const mergedEnd = row0MergeSpans.get(startCol);
+        const nextStart = bIdx + 1 < headerStarts.length ? headerStarts[bIdx + 1] : maxHeaderCols;
+        let forwardFilledEnd = startCol + 1;
+        while (forwardFilledEnd < nextStart && filledHeader0[forwardFilledEnd] === rawVendorName) {
+          forwardFilledEnd++;
+        }
+        const computedEnd = Math.max(forwardFilledEnd, Math.min(startCol + 3, nextStart));
+        const endCol = mergedEnd && mergedEnd > startCol ? Math.min(mergedEnd, nextStart) : Math.min(computedEnd, nextStart);
         const vendorKey = normalizeVendorKey(rawVendorName);
         if (isSupervisorSummaryHeader(rawVendorName)) {
           const occ = (supervisorOccurrences.get(vendorKey) || 0) + 1;
@@ -8783,12 +9088,13 @@ function parseWorkbookFull(XLSX2, workbook, options) {
             parseLocaleNumber(row[block.ejecutadoCol], 0, qualityTracker, `${cellCtx}:venta`),
             2
           );
-          const pctVal = block.pctCol >= 0 ? parseOfficialSheetPercentage(row[block.pctCol], {
+          const rawPctVal = block.pctCol >= 0 ? parseOfficialSheetPercentage(row[block.pctCol], {
             hasPercentFormat: sheetCellHasPercentageFormat(XLSX2, volResolved.sheet, skuRow.rowIdx, block.pctCol),
             referenceRatio: metaKg > 0 ? ventaKg / metaKg : void 0,
             tracker: qualityTracker,
             context: `${cellCtx}:pct`
           }) : null;
+          const pctVal = rawPctVal !== null ? rawPctVal : metaKg > 0 ? roundToDecimals(ventaKg / metaKg * 100, 2) : null;
           if (metaKg !== 0 || ventaKg !== 0) {
             tabMetric.validRecordsRead++;
             const ccVol = normalizeCuentasClavesVendor(block.rawVendorName);
@@ -10080,14 +10386,14 @@ init_vendorKeyNormalizer();
 
 // src/services/monthlySyncEngine.ts
 init_define_import_meta_env();
-var import_crypto = __toESM(require("crypto"), 1);
+var import_crypto2 = __toESM(require("crypto"), 1);
 var import_bcryptjs = __toESM(require("bcryptjs"), 1);
 init_vendorKeyNormalizer();
 function computeBufferSha256(bytes) {
-  return import_crypto.default.createHash("sha256").update(bytes).digest("hex");
+  return import_crypto2.default.createHash("sha256").update(bytes).digest("hex");
 }
 var userBcryptMemo = /* @__PURE__ */ new Map();
-var PROCESS_HMAC_KEY = import_crypto.default.randomBytes(32);
+var PROCESS_HMAC_KEY = import_crypto2.default.randomBytes(32);
 async function buildHashedUsersForSupabase(rawUsers, supervisorSet) {
   const out = [];
   for (const u of rawUsers) {
@@ -10102,7 +10408,7 @@ async function buildHashedUsersForSupabase(rawUsers, supervisorSet) {
     if (rawPwd.startsWith("$2")) {
       passwordHash = rawPwd;
     } else {
-      const fingerprint = import_crypto.default.createHmac("sha256", PROCESS_HMAC_KEY).update(`${username}:${rawPwd}`).digest("hex");
+      const fingerprint = import_crypto2.default.createHmac("sha256", PROCESS_HMAC_KEY).update(`${username}:${rawPwd}`).digest("hex");
       const cached = userBcryptMemo.get(fingerprint);
       if (cached) {
         passwordHash = cached;
@@ -10210,7 +10516,7 @@ var metasPeriodoActual = (d = /* @__PURE__ */ new Date()) => getCaracasYearMonth
 if (process.env.NODE_ENV === "production" && !process.env.JWT_SECRET) {
   throw new Error("[SECURITY] JWT_SECRET es obligatorio en producci\xF3n.");
 }
-var JWT_SECRET = process.env.JWT_SECRET || import_crypto2.default.randomBytes(32).toString("hex");
+var JWT_SECRET = process.env.JWT_SECRET || import_crypto3.default.randomBytes(32).toString("hex");
 function authenticateToken(req, res, next) {
   const authHeader = req.headers["authorization"];
   const token = authHeader && authHeader.startsWith("Bearer ") ? authHeader.split(" ")[1] : null;
@@ -10305,7 +10611,6 @@ function rateLimiter(windowMs, maxRequests, label) {
     next();
   };
 }
-var cachedWorkbook = null;
 var lastWorkbookSha256 = "";
 var lastFetchTime = 0;
 var CACHE_TTL = DEFAULT_SERVER_CACHE_TTL_MS;
@@ -10402,44 +10707,54 @@ async function fetchGoogleSheetWithRetry(url, maxAttempts = 3) {
   }
   throw lastError || new Error("Fallo al descargar Google Sheet");
 }
-async function getWorkbook(force = false, options = {}) {
-  if (!force && cachedWorkbook && Date.now() - lastFetchTime < CACHE_TTL) {
-    return cachedWorkbook;
-  }
+async function loadWorkbookTransient(forceLive = false, options = {}) {
   const XLSX2 = await import("xlsx");
   const sheetId = getGoogleSheetId();
+  const localPath = import_path.default.join(process.cwd(), "sheet.xlsx");
   let liveDownloadError = null;
+  if (!forceLive && Date.now() - lastFetchTime < CACHE_TTL && import_fs.default.existsSync(localPath)) {
+    try {
+      const localBuf = import_fs.default.readFileSync(localPath);
+      const sha = computeBufferSha256(localBuf);
+      const wb = XLSX2.read(localBuf, { type: "buffer", raw: true });
+      return {
+        workbook: wb,
+        sha256: sha,
+        source: lastSheetSource === "live_google_sheet" ? "live_google_sheet" : "local_backup"
+      };
+    } catch {
+    }
+  }
   if (sheetId) {
     try {
       const exportUrl = buildGoogleSheetExportUrl(sheetId, "xlsx");
-      const buffer = await fetchGoogleSheetWithRetry(exportUrl, 3);
-      const nodeBuf = Buffer.from(buffer);
-      lastWorkbookSha256 = computeBufferSha256(nodeBuf);
-      cachedWorkbook = XLSX2.read(buffer, { type: "array", raw: true });
+      const arrayBuf = await fetchGoogleSheetWithRetry(exportUrl, 3);
+      const nodeBuf = Buffer.from(arrayBuf);
+      const sha = computeBufferSha256(nodeBuf);
+      lastWorkbookSha256 = sha;
       lastFetchTime = Date.now();
       lastSuccessfulSheetSyncAt = (/* @__PURE__ */ new Date()).toISOString();
       lastSheetSource = "live_google_sheet";
       lastSheetDegraded = false;
-      const localPath2 = import_path.default.join(process.cwd(), "sheet.xlsx");
       try {
-        import_fs.default.writeFileSync(localPath2, nodeBuf);
+        import_fs.default.writeFileSync(localPath, nodeBuf);
       } catch (_) {
       }
-      return cachedWorkbook;
+      const wb = XLSX2.read(nodeBuf, { type: "buffer", raw: true });
+      return { workbook: wb, sha256: sha, source: "live_google_sheet" };
     } catch (err) {
       liveDownloadError = err instanceof Error ? err : new Error("Fallo descargando Google Sheet");
       console.warn("[SERVER] No se pudo obtener XLSX en vivo desde Google Sheets (se preserva Last-Known-Good si existe).");
     }
   }
-  if (options.strictLive && liveDownloadError && cachedWorkbook) {
+  if (options.strictLive && liveDownloadError && options.hasLiveSnapshot) {
     throw liveDownloadError;
   }
-  const localPath = import_path.default.join(process.cwd(), "sheet.xlsx");
   if (import_fs.default.existsSync(localPath)) {
     try {
       const localBuf = import_fs.default.readFileSync(localPath);
-      lastWorkbookSha256 = computeBufferSha256(localBuf);
-      cachedWorkbook = XLSX2.read(localBuf, { type: "buffer", raw: true });
+      const sha = computeBufferSha256(localBuf);
+      lastWorkbookSha256 = sha;
       lastFetchTime = Date.now();
       lastSheetSource = "local_backup";
       if (!lastSuccessfulSheetSyncAt) {
@@ -10449,12 +10764,12 @@ async function getWorkbook(force = false, options = {}) {
           lastSuccessfulSheetSyncAt = (/* @__PURE__ */ new Date()).toISOString();
         }
       }
-      return cachedWorkbook;
+      const wb = XLSX2.read(localBuf, { type: "buffer", raw: true });
+      return { workbook: wb, sha256: sha, source: "local_backup" };
     } catch (fsErr) {
       console.warn("[SERVER] Error leyendo archivo local sheet.xlsx:", fsErr?.message);
     }
   }
-  if (cachedWorkbook) return cachedWorkbook;
   throw liveDownloadError || new Error("No se pudo cargar el libro de datos ni en l\xEDnea ni desde el respaldo local.");
 }
 async function startServer() {
@@ -10494,7 +10809,7 @@ async function startServer() {
       if (isOriginAllowed(requestOrigin)) {
         res.header("Access-Control-Allow-Origin", requestOrigin);
         res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
-        res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, Pragma, X-Idempotency-Key");
+        res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, Pragma, X-Idempotency-Key, X-Sync-Token");
         res.header("Access-Control-Expose-Headers", "X-Last-Sync, X-Last-Sync-Caracas, X-Sync-Source, X-Sync-Degraded, X-Sync-Cooldown-Remaining");
       } else if (req.method === "OPTIONS") {
         return res.status(403).json({ success: false, error: "Origen CORS no autorizado." });
@@ -13733,18 +14048,21 @@ async function startServer() {
         }
       }
       if (!clientFound) {
+        let transientWb = null;
         try {
-          const workbook = await getWorkbook(false);
+          const loaded = await loadWorkbookTransient(false);
+          transientWb = loaded.workbook;
           const XLSX2 = await import("xlsx");
-          const sheetName = workbook.SheetNames.find((s) => /activacion|clientes/i.test(s));
+          const sheetName = transientWb.SheetNames.find((s) => /activacion|clientes/i.test(s));
           if (sheetName) {
-            const sheet = workbook.Sheets[sheetName];
+            const sheet = transientWb.Sheets[sheetName];
             const rows = XLSX2.utils.sheet_to_json(sheet, { header: 1 });
             for (let r = 1; r < rows.length; r++) {
               const row = rows[r];
               if (!row || !row[0]) continue;
-              const rCode = String(row[0]).replace(/^[#\s]+/, "").trim();
-              const rNoZeros = rCode.replace(/^0+/, "");
+              const cleanedRowCode = cleanClientCode(row[0]);
+              const rCode = cleanedRowCode.rawClean;
+              const rNoZeros = cleanedRowCode.canonical;
               if (rCode === cleanCode || codeNoZeros && rNoZeros === codeNoZeros) {
                 clientFound = {
                   cliente_nombre: String(row[1] || "").trim(),
@@ -13757,6 +14075,8 @@ async function startServer() {
           }
         } catch (wbErr) {
           console.warn("[SERVER] Fallback workbook client lookup error:", wbErr?.message);
+        } finally {
+          transientWb = null;
         }
       }
       if (!clientFound) {
@@ -13791,7 +14111,7 @@ async function startServer() {
     return {
       bytes,
       archivoNombre: String(body?.archivo || "maestra.csv").slice(0, 200),
-      sha256: import_crypto2.default.createHash("sha256").update(bytes).digest("hex")
+      sha256: import_crypto3.default.createHash("sha256").update(bytes).digest("hex")
     };
   }
   function responderErrorMaestra(res, err, contexto) {
@@ -13931,6 +14251,122 @@ async function startServer() {
       return [];
     }
   }
+  const sellerNumericTracker = new SellerNumericSyncTracker();
+  const sseSubscribers = /* @__PURE__ */ new Map();
+  const sseHeartbeats = /* @__PURE__ */ new Set();
+  const WEBHOOK_DEBOUNCE_MS = 2e3;
+  const SSE_HEARTBEAT_INTERVAL_MS = 25e3;
+  let webhookDebounceTimer = null;
+  let webhookPendingFollowUp = false;
+  const verifySyncSecretConstantTime = (candidate, expected) => {
+    if (!candidate || !expected) return false;
+    const hashA = import_crypto3.default.createHash("sha256").update(candidate, "utf8").digest();
+    const hashB = import_crypto3.default.createHash("sha256").update(expected, "utf8").digest();
+    return import_crypto3.default.timingSafeEqual(hashA, hashB);
+  };
+  const resolveAuthorizedSellerStreamKey = (user, rawRequestedSellerId) => {
+    if (!user) return null;
+    const supProfile = getSupervisorProfile(user.username);
+    const effectiveRole = supProfile ? "SUPERVISOR" : String(user.role || "").toUpperCase();
+    let decodedRaw = String(rawRequestedSellerId || "").trim();
+    try {
+      decodedRaw = decodeURIComponent(decodedRaw).trim();
+    } catch {
+    }
+    if (!decodedRaw) return null;
+    const upperRaw = decodedRaw.toUpperCase();
+    const isSupPrefixed = upperRaw.startsWith("SUPERVISOR:");
+    const normalizedReq = isSupPrefixed ? `SUPERVISOR:${normalizeSellerKey(decodedRaw.replace(/^SUPERVISOR:/i, ""))}` : upperRaw === "ADMIN" ? "ADMIN" : normalizeSellerKey(decodedRaw);
+    if (effectiveRole === "ADMIN") {
+      return normalizedReq || "ADMIN";
+    }
+    if (effectiveRole === "SUPERVISOR" && supProfile) {
+      const supCanonicalKey = `SUPERVISOR:${normalizeSellerKey(supProfile.canonicalUsername)}`;
+      const supPlainKey = normalizeSellerKey(supProfile.canonicalUsername);
+      if (normalizedReq === supCanonicalKey || normalizedReq === supPlainKey) {
+        return supCanonicalKey;
+      }
+      const allowedAliases = new Set(
+        [
+          ...supProfile.supervisedVendors,
+          ...getSupervisedAliases(user.username)
+        ].map((v) => normalizeSellerKey(v)).filter(Boolean)
+      );
+      const consolidatedReq = consolidateSellerToMasterKey(decodedRaw);
+      if (allowedAliases.has(normalizedReq) || allowedAliases.has(consolidatedReq)) {
+        return normalizedReq;
+      }
+      return null;
+    }
+    const userOwnKeys = /* @__PURE__ */ new Set();
+    const ownUserNorm = normalizeSellerKey(user.username);
+    const ownVendorIdNorm = normalizeSellerKey(user.vendorId);
+    const ownMasterKey = consolidateSellerToMasterKey(user.username || user.vendorId);
+    if (ownUserNorm) userOwnKeys.add(ownUserNorm);
+    if (ownVendorIdNorm) userOwnKeys.add(ownVendorIdNorm);
+    if (ownMasterKey) userOwnKeys.add(ownMasterKey);
+    const prof = getVendorProfile(user.username) || getVendorProfile(user.vendorId);
+    if (prof) {
+      userOwnKeys.add(normalizeSellerKey(prof.canonicalUsername));
+      for (const route of prof.routes) {
+        userOwnKeys.add(normalizeSellerKey(route.id));
+        for (const alias of route.aliases) {
+          userOwnKeys.add(normalizeSellerKey(alias));
+        }
+      }
+    }
+    const reqConsolidated = consolidateSellerToMasterKey(decodedRaw);
+    if (userOwnKeys.has(normalizedReq) || reqConsolidated && userOwnKeys.has(reqConsolidated)) {
+      const directStatus = sellerNumericTracker.getSellerStatus(normalizedReq);
+      if (directStatus.version > 0) return directStatus.sellerId;
+      return ownMasterKey || normalizedReq;
+    }
+    return null;
+  };
+  const emitSseEventToSeller = (sellerKey, eventName, payload) => {
+    const subscribers = sseSubscribers.get(sellerKey);
+    if (!subscribers || subscribers.size === 0) return;
+    const frame = `event: ${eventName}
+data: ${JSON.stringify(payload)}
+
+`;
+    for (const res of Array.from(subscribers)) {
+      if (res.writableEnded || res.destroyed) {
+        subscribers.delete(res);
+        continue;
+      }
+      try {
+        res.write(frame);
+      } catch {
+        subscribers.delete(res);
+      }
+    }
+    if (subscribers.size === 0) {
+      sseSubscribers.delete(sellerKey);
+    }
+  };
+  const applySellerNumericDiffAndBroadcast = (parsed) => {
+    const { initialized, changed } = sellerNumericTracker.applyParsedWorkbookDetailed({
+      metasApiRows: parsed.metasApiRows,
+      volumenApiRows: parsed.volumenApiRows,
+      activacionApiRows: parsed.activacionApiRows,
+      usuariosRows: parsed.usuariosRows.map((u) => ({
+        usuario: u.usuario,
+        rol: u.rol,
+        vendorId: u.vendorId
+      }))
+    });
+    for (const initEvt of initialized) {
+      emitSseEventToSeller(initEvt.sellerId, "baseline", initEvt);
+    }
+    for (const changeEvt of changed) {
+      emitSseEventToSeller(changeEvt.sellerId, "datos_actualizados", changeEvt);
+    }
+    if (changed.length > 0) {
+      console.log(`[SYNC SSE] Cambio num\xE9rico real detectado en ${changed.length} perfil(es) de vendedor/vista.`);
+    }
+    return changed;
+  };
   async function syncWorkbookToSupabase(workbook) {
     const XLSX2 = await import("xlsx");
     const periodo = metasPeriodoActual();
@@ -14016,6 +14452,7 @@ async function startServer() {
     lastSheetAuditLogs = parsed.auditLogs;
     lastSheetDataQuality = parsed.dataQuality || null;
     lastLiveProductMaps = parsed.productMaps;
+    applySellerNumericDiffAndBroadcast(parsed);
     if (parsed.warnings.length > 0) {
       console.warn(
         `[SHEET QA] ${parsed.warnings.length} advertencia(s) y ${parsed.auditLogs.length} evento(s) de auditor\xEDa registrados sin cortar carga.`
@@ -14173,41 +14610,49 @@ async function startServer() {
       const hasExistingLiveCache = Boolean(
         cachedVolumenParsed?.length && cachedActivacionParsed?.length && cachedMetasParsed?.length
       );
-      const workbook = await getWorkbook(true, { strictLive: hasExistingLiveCache });
-      const periodo = metasPeriodoActual();
-      const prevHash = lastSyncedSha256ByPeriod.get(periodo);
-      if (!forceRebuild && prevHash && lastWorkbookSha256 && prevHash === lastWorkbookSha256 && cachedVolumenParsed && cachedActivacionParsed && cachedMetasParsed) {
-        lastVolumenParsedTime = Date.now();
-        lastActivacionParsedTime = Date.now();
-        lastMetasParsedTime = Date.now();
+      let loaded = await loadWorkbookTransient(true, {
+        strictLive: hasExistingLiveCache,
+        hasLiveSnapshot: hasExistingLiveCache
+      });
+      try {
+        const periodo = metasPeriodoActual();
+        const prevHash = lastSyncedSha256ByPeriod.get(periodo);
+        if (!forceRebuild && prevHash && loaded.sha256 && prevHash === loaded.sha256 && cachedVolumenParsed && cachedActivacionParsed && cachedMetasParsed && sellerNumericTracker.getStateSize() > 0) {
+          lastVolumenParsedTime = Date.now();
+          lastActivacionParsedTime = Date.now();
+          lastMetasParsedTime = Date.now();
+          return {
+            unchanged: true,
+            syncedAt: lastSuccessfulSheetSyncAt || (/* @__PURE__ */ new Date()).toISOString(),
+            payload: {
+              countVolumen: cachedVolumenParsed.length,
+              countActivacion: cachedActivacionParsed.length,
+              countMetas: cachedMetasParsed.length,
+              countDegustaciones: 0,
+              warningsCount: lastSheetWarnings.length,
+              auditLogsCount: lastSheetAuditLogs.length,
+              metrics: lastSheetMetrics
+            }
+          };
+        }
+        const res = await syncWorkbookToSupabase(loaded.workbook);
         return {
-          unchanged: true,
+          unchanged: false,
           syncedAt: lastSuccessfulSheetSyncAt || (/* @__PURE__ */ new Date()).toISOString(),
           payload: {
-            countVolumen: cachedVolumenParsed.length,
-            countActivacion: cachedActivacionParsed.length,
-            countMetas: cachedMetasParsed.length,
-            countDegustaciones: 0,
-            warningsCount: lastSheetWarnings.length,
-            auditLogsCount: lastSheetAuditLogs.length,
-            metrics: lastSheetMetrics
+            countVolumen: res.countVolumen,
+            countActivacion: res.countActivacion,
+            countMetas: res.countMetas,
+            countDegustaciones: res.countDegustaciones ?? 0,
+            warningsCount: res.warningsCount,
+            auditLogsCount: res.auditLogsCount ?? lastSheetAuditLogs.length,
+            metrics: res.metrics
           }
         };
+      } finally {
+        if (loaded) loaded.workbook = null;
+        loaded = null;
       }
-      const res = await syncWorkbookToSupabase(workbook);
-      return {
-        unchanged: false,
-        syncedAt: lastSuccessfulSheetSyncAt || (/* @__PURE__ */ new Date()).toISOString(),
-        payload: {
-          countVolumen: res.countVolumen,
-          countActivacion: res.countActivacion,
-          countMetas: res.countMetas,
-          countDegustaciones: res.countDegustaciones ?? 0,
-          warningsCount: res.warningsCount,
-          auditLogsCount: res.auditLogsCount ?? lastSheetAuditLogs.length,
-          metrics: res.metrics
-        }
-      };
     }
   });
   getLiveSchedulerMeta = () => {
@@ -14320,6 +14765,150 @@ async function startServer() {
         warnings: lastSheetWarnings.slice(0, 50),
         auditLogs: lastSheetAuditLogs.slice(0, 50)
       } : {}
+    });
+  });
+  const scheduleDebouncedWebhookSync = () => {
+    if (webhookDebounceTimer) {
+      clearTimeout(webhookDebounceTimer);
+      webhookDebounceTimer = null;
+    }
+    webhookDebounceTimer = setTimeout(() => {
+      webhookDebounceTimer = null;
+      if (sheetsScheduler.getStatus().isSyncing) {
+        webhookPendingFollowUp = true;
+        return;
+      }
+      runCoalescedSheetsSync(false, "sheets_webhook", "webhook").catch((err) => {
+        console.warn("[SYNC WEBHOOK] Error ejecutando sincronizaci\xF3n consolidada:", err?.message || "sync_error");
+      }).finally(() => {
+        if (webhookPendingFollowUp) {
+          webhookPendingFollowUp = false;
+          scheduleDebouncedWebhookSync();
+        }
+      });
+    }, WEBHOOK_DEBOUNCE_MS);
+    if (typeof webhookDebounceTimer?.unref === "function") {
+      webhookDebounceTimer.unref();
+    }
+  };
+  app2.post("/api/sync/sheets-webhook", (req, res) => {
+    const configuredSecret = (process.env.SYNC_SECRET_TOKEN || "").trim();
+    if (!configuredSecret) {
+      return res.status(503).json({
+        success: false,
+        error: "Webhook no configurado: SYNC_SECRET_TOKEN ausente en el servidor."
+      });
+    }
+    const authHeader = typeof req.headers["authorization"] === "string" ? req.headers["authorization"].trim() : "";
+    const bearerToken = authHeader.toLowerCase().startsWith("bearer ") ? authHeader.slice(7).trim() : "";
+    const xSyncToken = typeof req.headers["x-sync-token"] === "string" ? req.headers["x-sync-token"].trim() : "";
+    const providedToken = bearerToken || xSyncToken;
+    if (!providedToken) {
+      return res.status(401).json({
+        success: false,
+        error: "Token de sincronizaci\xF3n requerido (Authorization: Bearer o x-sync-token)."
+      });
+    }
+    if (!verifySyncSecretConstantTime(providedToken, configuredSecret)) {
+      return res.status(403).json({
+        success: false,
+        error: "Token de sincronizaci\xF3n inv\xE1lido."
+      });
+    }
+    scheduleDebouncedWebhookSync();
+    return res.status(202).json({
+      success: true,
+      accepted: true,
+      queued: true,
+      debounceMs: WEBHOOK_DEBOUNCE_MS,
+      isSyncing: sheetsScheduler.getStatus().isSyncing
+    });
+  });
+  app2.get("/api/vendedor/:sellerId/stream", (req, res) => {
+    const authHeader = typeof req.headers["authorization"] === "string" ? req.headers["authorization"].trim() : "";
+    const headerToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+    const queryToken = typeof req.query?.token === "string" ? req.query.token.trim() : "";
+    const token = headerToken || queryToken;
+    if (!token) {
+      return res.status(401).json({ success: false, error: "Token de autenticaci\xF3n requerido para el canal en tiempo real." });
+    }
+    let decodedUser = null;
+    try {
+      decodedUser = import_jsonwebtoken.default.verify(token, JWT_SECRET);
+    } catch {
+      return res.status(403).json({ success: false, error: "Token inv\xE1lido o expirado." });
+    }
+    const authorizedKey = resolveAuthorizedSellerStreamKey(decodedUser, String(req.params.sellerId || ""));
+    if (!authorizedKey) {
+      return res.status(403).json({
+        success: false,
+        error: "No autorizado para suscribirse a actualizaciones de otro vendedor."
+      });
+    }
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    if (typeof res.flushHeaders === "function") {
+      res.flushHeaders();
+    }
+    let subSet = sseSubscribers.get(authorizedKey);
+    if (!subSet) {
+      subSet = /* @__PURE__ */ new Set();
+      sseSubscribers.set(authorizedKey, subSet);
+    }
+    subSet.add(res);
+    const currentStatus = sellerNumericTracker.getSellerStatus(authorizedKey);
+    res.write(
+      `event: connected
+data: ${JSON.stringify({
+        sellerId: authorizedKey,
+        version: currentStatus.version,
+        updatedAt: currentStatus.updatedAt
+      })}
+
+`
+    );
+    const heartbeatTimer = setInterval(() => {
+      if (res.writableEnded || res.destroyed) return;
+      try {
+        res.write(": heartbeat\n\n");
+      } catch {
+      }
+    }, SSE_HEARTBEAT_INTERVAL_MS);
+    if (typeof heartbeatTimer?.unref === "function") {
+      heartbeatTimer.unref();
+    }
+    sseHeartbeats.add(heartbeatTimer);
+    const cleanup = () => {
+      clearInterval(heartbeatTimer);
+      sseHeartbeats.delete(heartbeatTimer);
+      const set = sseSubscribers.get(authorizedKey);
+      if (set) {
+        set.delete(res);
+        if (set.size === 0) {
+          sseSubscribers.delete(authorizedKey);
+        }
+      }
+    };
+    req.on("close", cleanup);
+    res.on("close", cleanup);
+  });
+  app2.get("/api/vendedor/:sellerId/sync-status", authenticateToken, (req, res) => {
+    const authorizedKey = resolveAuthorizedSellerStreamKey(req.user, String(req.params.sellerId || ""));
+    if (!authorizedKey) {
+      return res.status(403).json({
+        success: false,
+        error: "No autorizado para consultar el estado de sincronizaci\xF3n de otro vendedor."
+      });
+    }
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0");
+    res.setHeader("Pragma", "no-cache");
+    const status = sellerNumericTracker.getSellerStatus(authorizedKey);
+    return res.json({
+      sellerId: authorizedKey,
+      version: status.version,
+      updatedAt: status.updatedAt
     });
   });
   const normHist = (s) => String(s || "").replace(/Ã‘|Ã±/g, "N").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -15210,31 +15799,37 @@ async function startServer() {
     }
   });
   const hydrateParsedCachesFromWorkbookFallback = async (scope = "all") => {
-    const workbook = await getWorkbook(false);
-    const XLSX2 = await import("xlsx");
-    const parsed = parseWorkbookFull(XLSX2, workbook, {
-      periodo: metasPeriodoActual(),
-      masterClients: loadLocalMasterClientSeed()
-    });
-    const updateAll = scope === "all" || lastSheetSource === "live_google_sheet";
-    if (updateAll || scope === "volumen") {
-      cachedVolumenParsed = parsed.volumenApiRows;
-      lastVolumenParsedTime = Date.now();
+    let loaded = await loadWorkbookTransient(false);
+    try {
+      const XLSX2 = await import("xlsx");
+      const parsed = parseWorkbookFull(XLSX2, loaded.workbook, {
+        periodo: metasPeriodoActual(),
+        masterClients: loadLocalMasterClientSeed()
+      });
+      const updateAll = scope === "all" || lastSheetSource === "live_google_sheet";
+      if (updateAll || scope === "volumen") {
+        cachedVolumenParsed = parsed.volumenApiRows;
+        lastVolumenParsedTime = Date.now();
+      }
+      if (updateAll || scope === "activacion") {
+        cachedActivacionParsed = parsed.activacionApiRows;
+        lastActivacionParsedTime = Date.now();
+      }
+      if (updateAll || scope === "metas") {
+        cachedMetasParsed = parsed.metasApiRows;
+        lastMetasParsedTime = Date.now();
+      }
+      lastSheetMetrics = parsed.metrics;
+      lastSheetWarnings = parsed.warnings;
+      lastSheetAuditLogs = parsed.auditLogs;
+      lastSheetDataQuality = parsed.dataQuality || null;
+      lastLiveProductMaps = parsed.productMaps;
+      applySellerNumericDiffAndBroadcast(parsed);
+      return parsed;
+    } finally {
+      if (loaded) loaded.workbook = null;
+      loaded = null;
     }
-    if (updateAll || scope === "activacion") {
-      cachedActivacionParsed = parsed.activacionApiRows;
-      lastActivacionParsedTime = Date.now();
-    }
-    if (updateAll || scope === "metas") {
-      cachedMetasParsed = parsed.metasApiRows;
-      lastMetasParsedTime = Date.now();
-    }
-    lastSheetMetrics = parsed.metrics;
-    lastSheetWarnings = parsed.warnings;
-    lastSheetAuditLogs = parsed.auditLogs;
-    lastSheetDataQuality = parsed.dataQuality || null;
-    lastLiveProductMaps = parsed.productMaps;
-    return parsed;
   };
   const resolveDataFilter = (user, queryVendedor) => {
     const supProfile = getSupervisorProfile(user?.username);
@@ -15854,8 +16449,25 @@ async function startServer() {
     if (shutdownRegistered) return;
     shutdownRegistered = true;
     const handleSignal = (signal) => {
-      console.log(`[SERVER] Se\xF1al ${signal} recibida. Deteniendo planificador 60s y cerrando conexiones HTTP...`);
+      console.log(`[SERVER] Se\xF1al ${signal} recibida. Deteniendo planificador 60s, SSE y conexiones HTTP...`);
       sheetsScheduler.stop();
+      if (webhookDebounceTimer) {
+        clearTimeout(webhookDebounceTimer);
+        webhookDebounceTimer = null;
+      }
+      for (const hb of sseHeartbeats) {
+        clearInterval(hb);
+      }
+      sseHeartbeats.clear();
+      for (const subscribers of sseSubscribers.values()) {
+        for (const sseRes of subscribers) {
+          try {
+            sseRes.end();
+          } catch {
+          }
+        }
+      }
+      sseSubscribers.clear();
       if (activeHttpServer) {
         const forceExit = setTimeout(() => process.exit(0), 5e3);
         if (typeof forceExit?.unref === "function") forceExit.unref();
