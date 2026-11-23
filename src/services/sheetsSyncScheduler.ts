@@ -17,7 +17,7 @@ export const DEFAULT_SYNC_INTERVAL_MS = 60_000;
 export const DEFAULT_SERVER_CACHE_TTL_MS = 55_000;
 export const DEFAULT_MANUAL_COOLDOWN_MS = 15_000;
 
-export type SyncTriggerSource = 'startup' | 'interval' | 'manual';
+export type SyncTriggerSource = 'startup' | 'interval' | 'manual' | 'webhook';
 
 export type SyncExecutionStatus =
   | 'OK'

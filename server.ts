@@ -147,6 +147,13 @@ import {
   buildHashedUsersForSupabase,
   SyncAuditLogEntry
 } from './src/services/monthlySyncEngine';
+import {
+  SellerNumericSyncTracker,
+  type SellerNumericChangeEvent,
+  cleanClientCode,
+  consolidateSellerToMasterKey,
+  normalizeSellerKey
+} from './src/services/sheetSyncService';
 import { DEFAULT_VENDOR_BCRYPT_CREDENTIALS } from './src/services/defaultUserHashes';
 import { canAccessAlkosto, ALKOSTO_ACCESS_DENIED_MESSAGE } from './src/utils/alkostoPermissions';
 import { collection, doc, getDocs, setDoc, getDoc, deleteDoc } from 'firebase/firestore';
@@ -288,7 +295,8 @@ export function rateLimiter(windowMs: number, maxRequests: number, label: string
   };
 }
 
-let cachedWorkbook: any = null;
+// Optimización de memoria para Render: NO retener jamás el libro crudo de SheetJS en RAM permanente.
+// Solo conservamos hashes SHA-256 ligeros y arreglos tipados procesados; el libro temporal se libera tras parsear.
 let lastWorkbookSha256: string = '';
 let lastFetchTime = 0;
 const CACHE_TTL = DEFAULT_SERVER_CACHE_TTL_MS; // 55 segundos (TTL centralizado de servidor)
@@ -397,50 +405,70 @@ async function fetchGoogleSheetWithRetry(url: string, maxAttempts = 3): Promise<
   throw lastError || new Error('Fallo al descargar Google Sheet');
 }
 
-async function getWorkbook(force = false, options: { strictLive?: boolean } = {}) {
-  if (!force && cachedWorkbook && (Date.now() - lastFetchTime < CACHE_TTL)) {
-    return cachedWorkbook;
-  }
+/**
+ * Carga transitoria del libro Excel de Google Sheets (sin retención en RAM permanente).
+ * El caller DEBE extraer los rangos tipados y liberar la referencia al objeto devuelto inmediatamente.
+ */
+async function loadWorkbookTransient(
+  forceLive = false,
+  options: { strictLive?: boolean; hasLiveSnapshot?: boolean } = {}
+): Promise<{ workbook: any; sha256: string; source: 'live_google_sheet' | 'local_backup' }> {
   const XLSX = await import('xlsx');
   const sheetId = getGoogleSheetId();
+  const localPath = path.join(process.cwd(), 'sheet.xlsx');
   let liveDownloadError: Error | null = null;
+
+  // Si no se fuerza descarga en vivo y el respaldo local reciente aún está dentro de TTL, evitar descarga redundante
+  if (!forceLive && Date.now() - lastFetchTime < CACHE_TTL && fs.existsSync(localPath)) {
+    try {
+      const localBuf = fs.readFileSync(localPath);
+      const sha = computeBufferSha256(localBuf);
+      const wb = XLSX.read(localBuf, { type: 'buffer', raw: true });
+      return {
+        workbook: wb,
+        sha256: sha,
+        source: lastSheetSource === 'live_google_sheet' ? 'live_google_sheet' : 'local_backup'
+      };
+    } catch {
+      // Continuar a descarga en vivo
+    }
+  }
 
   // 1. Intentar descargar en caliente desde Google Sheets (solo lectura) si GOOGLE_SHEET_ID está parametrizado en el servidor
   if (sheetId) {
     try {
       const exportUrl = buildGoogleSheetExportUrl(sheetId, 'xlsx');
-      const buffer = await fetchGoogleSheetWithRetry(exportUrl, 3);
-      const nodeBuf = Buffer.from(buffer);
-      lastWorkbookSha256 = computeBufferSha256(nodeBuf);
-      cachedWorkbook = XLSX.read(buffer, { type: 'array', raw: true });
+      const arrayBuf = await fetchGoogleSheetWithRetry(exportUrl, 3);
+      const nodeBuf = Buffer.from(arrayBuf);
+      const sha = computeBufferSha256(nodeBuf);
+      lastWorkbookSha256 = sha;
       lastFetchTime = Date.now();
       lastSuccessfulSheetSyncAt = new Date().toISOString();
       lastSheetSource = 'live_google_sheet';
       lastSheetDegraded = false;
-      const localPath = path.join(process.cwd(), 'sheet.xlsx');
       try {
         fs.writeFileSync(localPath, nodeBuf);
       } catch (_) {}
-      return cachedWorkbook;
+      const wb = XLSX.read(nodeBuf, { type: 'buffer', raw: true });
+      return { workbook: wb, sha256: sha, source: 'live_google_sheet' };
     } catch (err: any) {
       liveDownloadError = err instanceof Error ? err : new Error('Fallo descargando Google Sheet');
       console.warn('[SERVER] No se pudo obtener XLSX en vivo desde Google Sheets (se preserva Last-Known-Good si existe).');
     }
   }
 
-  // Last-Known-Good estricto: si ya existe una instantánea viva reciente y el caller pidió validación en vivo,
+  // Last-Known-Good estricto: si ya existe una instantánea viva procesada y el caller pidió validación en vivo,
   // NO sobrescribirla con respaldo local estático — propagar el fallo al scheduler para activar estado degradado limpio.
-  if (options.strictLive && liveDownloadError && cachedWorkbook) {
+  if (options.strictLive && liveDownloadError && options.hasLiveSnapshot) {
     throw liveDownloadError;
   }
 
-  // 2. Fallback inicial (cold boot) a copia local de respaldo sheet.xlsx
-  const localPath = path.join(process.cwd(), 'sheet.xlsx');
+  // 2. Fallback inicial (cold boot) a copia local de respaldo sheet.xlsx (carga transitoria sin caché global)
   if (fs.existsSync(localPath)) {
     try {
       const localBuf = fs.readFileSync(localPath);
-      lastWorkbookSha256 = computeBufferSha256(localBuf);
-      cachedWorkbook = XLSX.read(localBuf, { type: 'buffer', raw: true });
+      const sha = computeBufferSha256(localBuf);
+      lastWorkbookSha256 = sha;
       lastFetchTime = Date.now();
       lastSheetSource = 'local_backup';
       if (!lastSuccessfulSheetSyncAt) {
@@ -450,14 +478,14 @@ async function getWorkbook(force = false, options: { strictLive?: boolean } = {}
           lastSuccessfulSheetSyncAt = new Date().toISOString();
         }
       }
-      return cachedWorkbook;
+      const wb = XLSX.read(localBuf, { type: 'buffer', raw: true });
+      return { workbook: wb, sha256: sha, source: 'local_backup' };
     } catch (fsErr: any) {
-      console.warn("[SERVER] Error leyendo archivo local sheet.xlsx:", fsErr?.message);
+      console.warn('[SERVER] Error leyendo archivo local sheet.xlsx:', fsErr?.message);
     }
   }
 
-  if (cachedWorkbook) return cachedWorkbook;
-  throw liveDownloadError || new Error("No se pudo cargar el libro de datos ni en línea ni desde el respaldo local.");
+  throw liveDownloadError || new Error('No se pudo cargar el libro de datos ni en línea ni desde el respaldo local.');
 }
 
 
@@ -511,7 +539,7 @@ async function startServer() {
       if (isOriginAllowed(requestOrigin)) {
         res.header('Access-Control-Allow-Origin', requestOrigin);
         res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-        res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, Pragma, X-Idempotency-Key');
+        res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, Pragma, X-Idempotency-Key, X-Sync-Token');
         res.header('Access-Control-Expose-Headers', 'X-Last-Sync, X-Last-Sync-Caracas, X-Sync-Source, X-Sync-Degraded, X-Sync-Cooldown-Remaining');
       } else if (req.method === 'OPTIONS') {
         return res.status(403).json({ success: false, error: 'Origen CORS no autorizado.' });
@@ -4446,18 +4474,21 @@ async function startServer() {
       }
 
       if (!clientFound) {
+        let transientWb: any = null;
         try {
-          const workbook = await getWorkbook(false);
+          const loaded = await loadWorkbookTransient(false);
+          transientWb = loaded.workbook;
           const XLSX = await import('xlsx');
-          const sheetName = workbook.SheetNames.find((s: string) => /activacion|clientes/i.test(s));
+          const sheetName = transientWb.SheetNames.find((s: string) => /activacion|clientes/i.test(s));
           if (sheetName) {
-            const sheet = workbook.Sheets[sheetName];
+            const sheet = transientWb.Sheets[sheetName];
             const rows: any[] = XLSX.utils.sheet_to_json(sheet, { header: 1 });
             for (let r = 1; r < rows.length; r++) {
               const row = rows[r];
               if (!row || !row[0]) continue;
-              const rCode = String(row[0]).replace(/^[#\s]+/, '').trim();
-              const rNoZeros = rCode.replace(/^0+/, '');
+              const cleanedRowCode = cleanClientCode(row[0]);
+              const rCode = cleanedRowCode.rawClean;
+              const rNoZeros = cleanedRowCode.canonical;
               if (rCode === cleanCode || (codeNoZeros && rNoZeros === codeNoZeros)) {
                 clientFound = {
                   cliente_nombre: String(row[1] || '').trim(),
@@ -4470,6 +4501,8 @@ async function startServer() {
           }
         } catch (wbErr: any) {
           console.warn("[SERVER] Fallback workbook client lookup error:", wbErr?.message);
+        } finally {
+          transientWb = null;
         }
       }
 
@@ -4677,6 +4710,153 @@ async function startServer() {
     }
   }
 
+  // ============================================================================
+  // DETECCIÓN EXACTA DE CAMBIOS NUMÉRICOS POR VENDEDOR (SHA-256) + SSE + WEBHOOK
+  // ============================================================================
+  const sellerNumericTracker = new SellerNumericSyncTracker();
+  const sseSubscribers = new Map<string, Set<express.Response>>();
+  const sseHeartbeats = new Set<ReturnType<typeof setInterval>>();
+  const WEBHOOK_DEBOUNCE_MS = 2000;
+  const SSE_HEARTBEAT_INTERVAL_MS = 25_000;
+  let webhookDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let webhookPendingFollowUp = false;
+
+  const verifySyncSecretConstantTime = (candidate: string, expected: string): boolean => {
+    if (!candidate || !expected) return false;
+    const hashA = crypto.createHash('sha256').update(candidate, 'utf8').digest();
+    const hashB = crypto.createHash('sha256').update(expected, 'utf8').digest();
+    return crypto.timingSafeEqual(hashA, hashB);
+  };
+
+  const resolveAuthorizedSellerStreamKey = (user: any, rawRequestedSellerId: string): string | null => {
+    if (!user) return null;
+    const supProfile = getSupervisorProfile(user.username);
+    const effectiveRole = supProfile ? 'SUPERVISOR' : String(user.role || '').toUpperCase();
+
+    let decodedRaw = String(rawRequestedSellerId || '').trim();
+    try {
+      decodedRaw = decodeURIComponent(decodedRaw).trim();
+    } catch {
+      // mantener valor original si ya viene decodificado
+    }
+    if (!decodedRaw) return null;
+
+    const upperRaw = decodedRaw.toUpperCase();
+    const isSupPrefixed = upperRaw.startsWith('SUPERVISOR:');
+    const normalizedReq = isSupPrefixed
+      ? `SUPERVISOR:${normalizeSellerKey(decodedRaw.replace(/^SUPERVISOR:/i, ''))}`
+      : upperRaw === 'ADMIN'
+        ? 'ADMIN'
+        : normalizeSellerKey(decodedRaw);
+
+    if (effectiveRole === 'ADMIN') {
+      return normalizedReq || 'ADMIN';
+    }
+
+    if (effectiveRole === 'SUPERVISOR' && supProfile) {
+      const supCanonicalKey = `SUPERVISOR:${normalizeSellerKey(supProfile.canonicalUsername)}`;
+      const supPlainKey = normalizeSellerKey(supProfile.canonicalUsername);
+      if (normalizedReq === supCanonicalKey || normalizedReq === supPlainKey) {
+        return supCanonicalKey;
+      }
+      const allowedAliases = new Set<string>(
+        [
+          ...supProfile.supervisedVendors,
+          ...getSupervisedAliases(user.username)
+        ]
+          .map((v) => normalizeSellerKey(v))
+          .filter(Boolean)
+      );
+      const consolidatedReq = consolidateSellerToMasterKey(decodedRaw);
+      if (allowedAliases.has(normalizedReq) || allowedAliases.has(consolidatedReq)) {
+        return normalizedReq;
+      }
+      return null;
+    }
+
+    // Rol VENDEDOR: aislamiento estricto por identidad autenticada (cero lectura cruzada)
+    const userOwnKeys = new Set<string>();
+    const ownUserNorm = normalizeSellerKey(user.username);
+    const ownVendorIdNorm = normalizeSellerKey(user.vendorId);
+    const ownMasterKey = consolidateSellerToMasterKey(user.username || user.vendorId);
+    if (ownUserNorm) userOwnKeys.add(ownUserNorm);
+    if (ownVendorIdNorm) userOwnKeys.add(ownVendorIdNorm);
+    if (ownMasterKey) userOwnKeys.add(ownMasterKey);
+
+    const prof = getVendorProfile(user.username) || getVendorProfile(user.vendorId);
+    if (prof) {
+      userOwnKeys.add(normalizeSellerKey(prof.canonicalUsername));
+      for (const route of prof.routes) {
+        userOwnKeys.add(normalizeSellerKey(route.id));
+        for (const alias of route.aliases) {
+          userOwnKeys.add(normalizeSellerKey(alias));
+        }
+      }
+    }
+
+    const reqConsolidated = consolidateSellerToMasterKey(decodedRaw);
+    if (userOwnKeys.has(normalizedReq) || (reqConsolidated && userOwnKeys.has(reqConsolidated))) {
+      // Resolver a la llave exacta que el tracker conoce (o llave maestra del vendedor)
+      const directStatus = sellerNumericTracker.getSellerStatus(normalizedReq);
+      if (directStatus.version > 0) return directStatus.sellerId;
+      return ownMasterKey || normalizedReq;
+    }
+
+    return null;
+  };
+
+  const emitSseEventToSeller = (
+    sellerKey: string,
+    eventName: 'datos_actualizados' | 'baseline',
+    payload: SellerNumericChangeEvent
+  ) => {
+    const subscribers = sseSubscribers.get(sellerKey);
+    if (!subscribers || subscribers.size === 0) return;
+    const frame = `event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`;
+    for (const res of Array.from(subscribers)) {
+      if (res.writableEnded || res.destroyed) {
+        subscribers.delete(res);
+        continue;
+      }
+      try {
+        res.write(frame);
+      } catch {
+        subscribers.delete(res);
+      }
+    }
+    if (subscribers.size === 0) {
+      sseSubscribers.delete(sellerKey);
+    }
+  };
+
+  const applySellerNumericDiffAndBroadcast = (parsed: ReturnType<typeof parseWorkbookFull>) => {
+    const { initialized, changed } = sellerNumericTracker.applyParsedWorkbookDetailed({
+      metasApiRows: parsed.metasApiRows,
+      volumenApiRows: parsed.volumenApiRows,
+      activacionApiRows: parsed.activacionApiRows,
+      usuariosRows: parsed.usuariosRows.map((u) => ({
+        usuario: u.usuario,
+        rol: u.rol,
+        vendorId: u.vendorId
+      }))
+    });
+
+    // Notificar silenciosamente línea base versión 1 solo a clientes ya conectados durante cold boot (sin toast)
+    for (const initEvt of initialized) {
+      emitSseEventToSeller(initEvt.sellerId, 'baseline', initEvt);
+    }
+
+    // Emitir `datos_actualizados` EXCLUSIVAMENTE a los vendedores cuyo hash numérico SHA-256 cambió
+    for (const changeEvt of changed) {
+      emitSseEventToSeller(changeEvt.sellerId, 'datos_actualizados', changeEvt);
+    }
+
+    if (changed.length > 0) {
+      console.log(`[SYNC SSE] Cambio numérico real detectado en ${changed.length} perfil(es) de vendedor/vista.`);
+    }
+    return changed;
+  };
+
   async function syncWorkbookToSupabase(workbook: any) {
     const XLSX = await import('xlsx');
     const periodo = metasPeriodoActual();
@@ -4783,6 +4963,9 @@ async function startServer() {
     lastSheetAuditLogs = parsed.auditLogs;
     lastSheetDataQuality = parsed.dataQuality || null;
     lastLiveProductMaps = parsed.productMaps;
+
+    // 3b. Evaluar hashes SHA-256 numéricos por vendedor y notificar en tiempo real (SSE) solo cambios reales
+    applySellerNumericDiffAndBroadcast(parsed);
 
     if (parsed.warnings.length > 0) {
       console.warn(
@@ -4966,49 +5149,60 @@ async function startServer() {
       const hasExistingLiveCache = Boolean(
         cachedVolumenParsed?.length && cachedActivacionParsed?.length && cachedMetasParsed?.length
       );
-      const workbook = await getWorkbook(true, { strictLive: hasExistingLiveCache });
-      const periodo = metasPeriodoActual();
-      const prevHash = lastSyncedSha256ByPeriod.get(periodo);
-      if (
-        !forceRebuild &&
-        prevHash &&
-        lastWorkbookSha256 &&
-        prevHash === lastWorkbookSha256 &&
-        cachedVolumenParsed &&
-        cachedActivacionParsed &&
-        cachedMetasParsed
-      ) {
-        lastVolumenParsedTime = Date.now();
-        lastActivacionParsedTime = Date.now();
-        lastMetasParsedTime = Date.now();
+      let loaded: { workbook: any; sha256: string; source: 'live_google_sheet' | 'local_backup' } | null =
+        await loadWorkbookTransient(true, {
+          strictLive: hasExistingLiveCache,
+          hasLiveSnapshot: hasExistingLiveCache
+        });
+      try {
+        const periodo = metasPeriodoActual();
+        const prevHash = lastSyncedSha256ByPeriod.get(periodo);
+        if (
+          !forceRebuild &&
+          prevHash &&
+          loaded.sha256 &&
+          prevHash === loaded.sha256 &&
+          cachedVolumenParsed &&
+          cachedActivacionParsed &&
+          cachedMetasParsed &&
+          sellerNumericTracker.getStateSize() > 0
+        ) {
+          lastVolumenParsedTime = Date.now();
+          lastActivacionParsedTime = Date.now();
+          lastMetasParsedTime = Date.now();
+          return {
+            unchanged: true,
+            syncedAt: lastSuccessfulSheetSyncAt || new Date().toISOString(),
+            payload: {
+              countVolumen: cachedVolumenParsed.length,
+              countActivacion: cachedActivacionParsed.length,
+              countMetas: cachedMetasParsed.length,
+              countDegustaciones: 0,
+              warningsCount: lastSheetWarnings.length,
+              auditLogsCount: lastSheetAuditLogs.length,
+              metrics: lastSheetMetrics
+            }
+          };
+        }
+        const res = await syncWorkbookToSupabase(loaded.workbook);
         return {
-          unchanged: true,
+          unchanged: false,
           syncedAt: lastSuccessfulSheetSyncAt || new Date().toISOString(),
           payload: {
-            countVolumen: cachedVolumenParsed.length,
-            countActivacion: cachedActivacionParsed.length,
-            countMetas: cachedMetasParsed.length,
-            countDegustaciones: 0,
-            warningsCount: lastSheetWarnings.length,
-            auditLogsCount: lastSheetAuditLogs.length,
-            metrics: lastSheetMetrics
+            countVolumen: res.countVolumen,
+            countActivacion: res.countActivacion,
+            countMetas: res.countMetas,
+            countDegustaciones: res.countDegustaciones ?? 0,
+            warningsCount: res.warningsCount,
+            auditLogsCount: res.auditLogsCount ?? lastSheetAuditLogs.length,
+            metrics: res.metrics
           }
         };
+      } finally {
+        // Liberar inmediatamente la referencia del libro XLSX crudo para GC en Render
+        if (loaded) loaded.workbook = null;
+        loaded = null;
       }
-      const res = await syncWorkbookToSupabase(workbook);
-      return {
-        unchanged: false,
-        syncedAt: lastSuccessfulSheetSyncAt || new Date().toISOString(),
-        payload: {
-          countVolumen: res.countVolumen,
-          countActivacion: res.countActivacion,
-          countMetas: res.countMetas,
-          countDegustaciones: res.countDegustaciones ?? 0,
-          warningsCount: res.warningsCount,
-          auditLogsCount: res.auditLogsCount ?? lastSheetAuditLogs.length,
-          metrics: res.metrics
-        }
-      };
     }
   });
 
@@ -5136,6 +5330,179 @@ async function startServer() {
             auditLogs: lastSheetAuditLogs.slice(0, 50)
           }
         : {})
+    });
+  });
+
+  // ============================================================================
+  // PARTE 3.1: WEBHOOK INSTANTÁNEO DESDE GOOGLE SHEETS (DEBOUNCE 2000ms + MUTEX)
+  // ============================================================================
+  const scheduleDebouncedWebhookSync = () => {
+    if (webhookDebounceTimer) {
+      clearTimeout(webhookDebounceTimer);
+      webhookDebounceTimer = null;
+    }
+
+    webhookDebounceTimer = setTimeout(() => {
+      webhookDebounceTimer = null;
+
+      if (sheetsScheduler.getStatus().isSyncing) {
+        // Si ya hay una sincronización en vuelo, marcar follow-up sin solapar peticiones a Google Sheets
+        webhookPendingFollowUp = true;
+        return;
+      }
+
+      runCoalescedSheetsSync(false, 'sheets_webhook', 'webhook')
+        .catch((err: any) => {
+          console.warn('[SYNC WEBHOOK] Error ejecutando sincronización consolidada:', err?.message || 'sync_error');
+        })
+        .finally(() => {
+          if (webhookPendingFollowUp) {
+            webhookPendingFollowUp = false;
+            scheduleDebouncedWebhookSync();
+          }
+        });
+    }, WEBHOOK_DEBOUNCE_MS);
+    if (typeof (webhookDebounceTimer as any)?.unref === 'function') {
+      (webhookDebounceTimer as any).unref();
+    }
+  };
+
+  app.post("/api/sync/sheets-webhook", (req: any, res: any) => {
+    const configuredSecret = (process.env.SYNC_SECRET_TOKEN || '').trim();
+    if (!configuredSecret) {
+      return res.status(503).json({
+        success: false,
+        error: 'Webhook no configurado: SYNC_SECRET_TOKEN ausente en el servidor.'
+      });
+    }
+
+    const authHeader = typeof req.headers['authorization'] === 'string' ? req.headers['authorization'].trim() : '';
+    const bearerToken = authHeader.toLowerCase().startsWith('bearer ') ? authHeader.slice(7).trim() : '';
+    const xSyncToken = typeof req.headers['x-sync-token'] === 'string' ? req.headers['x-sync-token'].trim() : '';
+    const providedToken = bearerToken || xSyncToken;
+
+    if (!providedToken) {
+      return res.status(401).json({
+        success: false,
+        error: 'Token de sincronización requerido (Authorization: Bearer o x-sync-token).'
+      });
+    }
+
+    if (!verifySyncSecretConstantTime(providedToken, configuredSecret)) {
+      return res.status(403).json({
+        success: false,
+        error: 'Token de sincronización inválido.'
+      });
+    }
+
+    scheduleDebouncedWebhookSync();
+
+    return res.status(202).json({
+      success: true,
+      accepted: true,
+      queued: true,
+      debounceMs: WEBHOOK_DEBOUNCE_MS,
+      isSyncing: sheetsScheduler.getStatus().isSyncing
+    });
+  });
+
+  // ============================================================================
+  // PARTE 3.2: CANAL EN TIEMPO REAL SSE + ENDPOINT DE RESPALDO POR VENDEDOR
+  // ============================================================================
+  app.get("/api/vendedor/:sellerId/stream", (req: any, res: any) => {
+    const authHeader = typeof req.headers['authorization'] === 'string' ? req.headers['authorization'].trim() : '';
+    const headerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const queryToken = typeof req.query?.token === 'string' ? req.query.token.trim() : '';
+    const token = headerToken || queryToken;
+
+    if (!token) {
+      return res.status(401).json({ success: false, error: 'Token de autenticación requerido para el canal en tiempo real.' });
+    }
+
+    let decodedUser: any = null;
+    try {
+      decodedUser = jwt.verify(token, JWT_SECRET);
+    } catch {
+      return res.status(403).json({ success: false, error: 'Token inválido o expirado.' });
+    }
+
+    const authorizedKey = resolveAuthorizedSellerStreamKey(decodedUser, String(req.params.sellerId || ''));
+    if (!authorizedKey) {
+      return res.status(403).json({
+        success: false,
+        error: 'No autorizado para suscribirse a actualizaciones de otro vendedor.'
+      });
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    if (typeof res.flushHeaders === 'function') {
+      res.flushHeaders();
+    }
+
+    let subSet = sseSubscribers.get(authorizedKey);
+    if (!subSet) {
+      subSet = new Set<express.Response>();
+      sseSubscribers.set(authorizedKey, subSet);
+    }
+    subSet.add(res);
+
+    const currentStatus = sellerNumericTracker.getSellerStatus(authorizedKey);
+    res.write(
+      `event: connected\ndata: ${JSON.stringify({
+        sellerId: authorizedKey,
+        version: currentStatus.version,
+        updatedAt: currentStatus.updatedAt
+      })}\n\n`
+    );
+
+    const heartbeatTimer = setInterval(() => {
+      if (res.writableEnded || res.destroyed) return;
+      try {
+        res.write(': heartbeat\n\n');
+      } catch {
+        // cerrado en cliente
+      }
+    }, SSE_HEARTBEAT_INTERVAL_MS);
+    if (typeof (heartbeatTimer as any)?.unref === 'function') {
+      (heartbeatTimer as any).unref();
+    }
+    sseHeartbeats.add(heartbeatTimer);
+
+    const cleanup = () => {
+      clearInterval(heartbeatTimer);
+      sseHeartbeats.delete(heartbeatTimer);
+      const set = sseSubscribers.get(authorizedKey);
+      if (set) {
+        set.delete(res);
+        if (set.size === 0) {
+          sseSubscribers.delete(authorizedKey);
+        }
+      }
+    };
+
+    req.on('close', cleanup);
+    res.on('close', cleanup);
+  });
+
+  app.get("/api/vendedor/:sellerId/sync-status", authenticateToken, (req: any, res: any) => {
+    const authorizedKey = resolveAuthorizedSellerStreamKey(req.user, String(req.params.sellerId || ''));
+    if (!authorizedKey) {
+      return res.status(403).json({
+        success: false,
+        error: 'No autorizado para consultar el estado de sincronización de otro vendedor.'
+      });
+    }
+
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    const status = sellerNumericTracker.getSellerStatus(authorizedKey);
+    return res.json({
+      sellerId: authorizedKey,
+      version: status.version,
+      updatedAt: status.updatedAt
     });
   });
 
@@ -6116,31 +6483,40 @@ async function startServer() {
   const hydrateParsedCachesFromWorkbookFallback = async (
     scope: 'all' | 'volumen' | 'activacion' | 'metas' = 'all'
   ) => {
-    const workbook = await getWorkbook(false);
-    const XLSX = await import('xlsx');
-    const parsed = parseWorkbookFull(XLSX, workbook, {
-      periodo: metasPeriodoActual(),
-      masterClients: loadLocalMasterClientSeed()
-    });
-    const updateAll = scope === 'all' || lastSheetSource === 'live_google_sheet';
-    if (updateAll || scope === 'volumen') {
-      cachedVolumenParsed = parsed.volumenApiRows;
-      lastVolumenParsedTime = Date.now();
+    let loaded: { workbook: any; sha256: string; source: 'live_google_sheet' | 'local_backup' } | null =
+      await loadWorkbookTransient(false);
+    try {
+      const XLSX = await import('xlsx');
+      const parsed = parseWorkbookFull(XLSX, loaded.workbook, {
+        periodo: metasPeriodoActual(),
+        masterClients: loadLocalMasterClientSeed()
+      });
+      const updateAll = scope === 'all' || lastSheetSource === 'live_google_sheet';
+      if (updateAll || scope === 'volumen') {
+        cachedVolumenParsed = parsed.volumenApiRows;
+        lastVolumenParsedTime = Date.now();
+      }
+      if (updateAll || scope === 'activacion') {
+        cachedActivacionParsed = parsed.activacionApiRows;
+        lastActivacionParsedTime = Date.now();
+      }
+      if (updateAll || scope === 'metas') {
+        cachedMetasParsed = parsed.metasApiRows;
+        lastMetasParsedTime = Date.now();
+      }
+      lastSheetMetrics = parsed.metrics;
+      lastSheetWarnings = parsed.warnings;
+      lastSheetAuditLogs = parsed.auditLogs;
+      lastSheetDataQuality = parsed.dataQuality || null;
+      lastLiveProductMaps = parsed.productMaps;
+
+      // Evaluar hashes SHA-256 numéricos por vendedor (en arranque frío solo registra versión 1 sin toast)
+      applySellerNumericDiffAndBroadcast(parsed);
+      return parsed;
+    } finally {
+      if (loaded) loaded.workbook = null;
+      loaded = null;
     }
-    if (updateAll || scope === 'activacion') {
-      cachedActivacionParsed = parsed.activacionApiRows;
-      lastActivacionParsedTime = Date.now();
-    }
-    if (updateAll || scope === 'metas') {
-      cachedMetasParsed = parsed.metasApiRows;
-      lastMetasParsedTime = Date.now();
-    }
-    lastSheetMetrics = parsed.metrics;
-    lastSheetWarnings = parsed.warnings;
-    lastSheetAuditLogs = parsed.auditLogs;
-    lastSheetDataQuality = parsed.dataQuality || null;
-    lastLiveProductMaps = parsed.productMaps;
-    return parsed;
   };
 
   const resolveDataFilter = (user: any, queryVendedor: any) => {
@@ -6865,8 +7241,26 @@ async function startServer() {
     shutdownRegistered = true;
 
     const handleSignal = (signal: 'SIGTERM' | 'SIGINT') => {
-      console.log(`[SERVER] Señal ${signal} recibida. Deteniendo planificador 60s y cerrando conexiones HTTP...`);
+      console.log(`[SERVER] Señal ${signal} recibida. Deteniendo planificador 60s, SSE y conexiones HTTP...`);
       sheetsScheduler.stop();
+      if (webhookDebounceTimer) {
+        clearTimeout(webhookDebounceTimer);
+        webhookDebounceTimer = null;
+      }
+      for (const hb of sseHeartbeats) {
+        clearInterval(hb);
+      }
+      sseHeartbeats.clear();
+      for (const subscribers of sseSubscribers.values()) {
+        for (const sseRes of subscribers) {
+          try {
+            sseRes.end();
+          } catch {
+            // no-op
+          }
+        }
+      }
+      sseSubscribers.clear();
       if (activeHttpServer) {
         const forceExit = setTimeout(() => process.exit(0), 5000);
         if (typeof (forceExit as any)?.unref === 'function') (forceExit as any).unref();

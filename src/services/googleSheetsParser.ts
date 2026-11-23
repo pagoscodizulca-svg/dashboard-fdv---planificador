@@ -27,6 +27,7 @@ import {
   isValidVolumenRecord,
   sanitizeGoogleSheetId
 } from '../config/sheetsConfig';
+import { cleanClientCode, forwardFillMergedHeaderRow } from './sheetSyncService';
 
 export { DEFAULT_GOOGLE_SHEET_ID, sanitizeGoogleSheetId, getGoogleSheetId };
 
@@ -151,14 +152,10 @@ export function isRowCompletelyEmpty(row: unknown[] | null | undefined): boolean
 }
 
 /**
- * Normaliza códigos de cliente eliminando prefijos `#`, espacios y ceros a la izquierda para cruce exacto.
+ * Normaliza códigos de cliente eliminando prefijos `#`, espacios, sufijos `.0` residuales y ceros a la izquierda para cruce exacto.
  */
 export function normalizeClientCode(raw: unknown): { rawClean: string; canonical: string } {
-  if (raw === null || raw === undefined) return { rawClean: '', canonical: '' };
-  const rawClean = String(raw).replace(/^[#\s]+/, '').trim();
-  if (!rawClean) return { rawClean: '', canonical: '' };
-  const canonical = rawClean.replace(/^0+/, '') || '0';
-  return { rawClean, canonical };
+  return cleanClientCode(raw);
 }
 
 /**
@@ -667,9 +664,12 @@ export function parseWorkbookFull(
       const header0 = rows[0] || [];
       const header1 = rows[1] || [];
       const row0MergeSpans = getMergedHeaderSpansForRow(volResolved.sheet, 0);
+      const sheetMerges = Array.isArray(volResolved.sheet?.['!merges']) ? volResolved.sheet['!merges'] : [];
+      const filledHeader0 = forwardFillMergedHeaderRow(header0, header1, sheetMerges);
       const maxHeaderCols = Math.max(
         header0.length,
         header1.length,
+        filledHeader0.length,
         ...Array.from(row0MergeSpans.values(), (end) => end)
       );
 
@@ -704,11 +704,17 @@ export function parseWorkbookFull(
       const supervisorOccurrences = new Map<string, number>();
       for (let bIdx = 0; bIdx < headerStarts.length; bIdx++) {
         const startCol = headerStarts[bIdx];
-        const mergedEnd = row0MergeSpans.get(startCol);
-        const nextStart = bIdx + 1 < headerStarts.length ? headerStarts[bIdx + 1] : Math.min(startCol + 3, maxHeaderCols);
-        const endCol = mergedEnd && mergedEnd > startCol ? Math.min(mergedEnd, nextStart) : nextStart;
         const rawVendorName = sanitizeSheetText(header0[startCol]);
         if (!rawVendorName) continue;
+
+        const mergedEnd = row0MergeSpans.get(startCol);
+        const nextStart = bIdx + 1 < headerStarts.length ? headerStarts[bIdx + 1] : maxHeaderCols;
+        let forwardFilledEnd = startCol + 1;
+        while (forwardFilledEnd < nextStart && filledHeader0[forwardFilledEnd] === rawVendorName) {
+          forwardFilledEnd++;
+        }
+        const computedEnd = Math.max(forwardFilledEnd, Math.min(startCol + 3, nextStart));
+        const endCol = mergedEnd && mergedEnd > startCol ? Math.min(mergedEnd, nextStart) : Math.min(computedEnd, nextStart);
 
         const vendorKey = normalizeVendorKey(rawVendorName);
         if (isSupervisorSummaryHeader(rawVendorName)) {
@@ -944,7 +950,7 @@ export function parseWorkbookFull(
             parseLocaleNumber(row[block.ejecutadoCol], 0, qualityTracker, `${cellCtx}:venta`),
             2
           );
-          const pctVal =
+          const rawPctVal =
             block.pctCol >= 0
               ? parseOfficialSheetPercentage(row[block.pctCol], {
                   hasPercentFormat: sheetCellHasPercentageFormat(XLSX, volResolved.sheet, skuRow.rowIdx, block.pctCol),
@@ -953,6 +959,12 @@ export function parseWorkbookFull(
                   context: `${cellCtx}:pct`
                 })
               : null;
+          const pctVal =
+            rawPctVal !== null
+              ? rawPctVal
+              : metaKg > 0
+                ? roundToDecimals((ventaKg / metaKg) * 100, 2)
+                : null;
 
           // Retener cualquier SKU con cuota != 0 o venta != 0 (INCLUYENDO notas de crédito / devoluciones negativas)
           if (metaKg !== 0 || ventaKg !== 0) {

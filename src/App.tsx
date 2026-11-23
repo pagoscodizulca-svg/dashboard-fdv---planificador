@@ -33,6 +33,9 @@ import {
 } from './utils/vendorRoutes';
 
 import { AlkostoTab } from './components/AlkostoTab';
+import { SyncSuccessToast } from './components/SyncSuccessToast';
+import { useSellerLiveSync } from './hooks/useSellerLiveSync';
+import { normalizeVendorKey } from './utils/vendorKeyNormalizer';
 import { subscribeDegustaciones } from './services/degustacionesService';
 import { Degustacion } from './types';
 import {
@@ -631,6 +634,28 @@ export default function App() {
     };
   }, [isLoggedIn, loadData, resetAutoSyncTimer]);
 
+  // Suscripción en tiempo real (SSE + respaldo de reconexión) por vendedor:
+  // solo actualiza y muestra "Tus datos han sido actualizados con éxito" (5000 ms exactos) cuando cambian sus números.
+  const liveSyncSellerId = useMemo(() => {
+    if (!isLoggedIn) return '';
+    if (userRole === 'ADMIN') return 'ADMIN';
+    if (userRole === 'SUPERVISOR') {
+      const supNorm = normalizeVendorKey(currentSupervisorProfile?.canonicalUsername || loggedInVendor);
+      return supNorm ? `SUPERVISOR:${supNorm}` : '';
+    }
+    return normalizeVendorKey(currentVendorProfile?.canonicalUsername || loggedInVendor);
+  }, [isLoggedIn, userRole, loggedInVendor, currentSupervisorProfile, currentVendorProfile]);
+
+  const handleLiveSellerDataUpdated = useCallback(() => {
+    return loadData(true, false, 0, 'background');
+  }, [loadData]);
+
+  const { showToast: showSyncSuccessToast } = useSellerLiveSync({
+    enabled: isLoggedIn && Boolean(liveSyncSellerId),
+    sellerId: liveSyncSellerId,
+    onDataUpdated: handleLiveSellerDataUpdated
+  });
+
   // Suscripción a degustaciones ESTRICTAMENTE tras iniciar sesión (evita llamadas no autenticadas en pantalla de login)
   useEffect(() => {
     if (!isLoggedIn) {
@@ -1182,6 +1207,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen overflow-x-hidden bg-black text-neutral-200 selection:bg-neutral-800 p-3 md:p-6 lg:p-8">
+      <SyncSuccessToast visible={showSyncSuccessToast} />
       
       {/* HEADER TABS & ROLE / ROUTE SELECTOR */}
       <header className="max-w-7xl mx-auto flex flex-col gap-3 md:gap-4 mb-6 md:mb-8">
