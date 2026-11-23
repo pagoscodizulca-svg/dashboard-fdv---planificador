@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { Calendar, RefreshCw, Clock, WifiOff } from 'lucide-react';
+import { Calendar, RefreshCw, Clock } from 'lucide-react';
 import { getMesLaboralInfo } from '../utils/calendar';
 
 interface RecorridoMesProps {
@@ -104,55 +104,18 @@ export const RecorridoMes: React.FC<RecorridoMesProps> = ({
         <div className="flex flex-wrap items-center gap-2.5">
           <div
             data-testid="last-sync-badge"
-            className={`flex items-center justify-center gap-2 text-xs md:text-sm font-sans font-medium px-3.5 py-2.5 rounded-lg border transition-colors ${
-              degraded
-                ? 'text-amber-300 bg-amber-950/30 border-amber-700/50'
-                : 'text-emerald-400 bg-emerald-950/30 border-emerald-800/40'
-            }`}
+            className="flex items-center justify-center gap-2 text-xs md:text-sm font-sans font-medium text-emerald-400 bg-emerald-950/30 border border-emerald-800/40 px-3.5 py-2.5 rounded-lg"
             title={badgeTooltip}
           >
-            <div
-              className={`w-2 h-2 rounded-full ${
-                loading || backgroundSyncing
-                  ? 'bg-amber-400 animate-ping'
-                  : degraded
-                    ? 'bg-amber-500'
-                    : 'bg-emerald-500 animate-pulse'
-              }`}
-            ></div>
-            <Clock className={`w-3.5 h-3.5 shrink-0 ${degraded ? 'text-amber-400' : 'text-emerald-400/90'}`} />
+            <div className={`w-2 h-2 rounded-full ${loading ? 'bg-amber-400 animate-ping' : 'bg-emerald-500 animate-pulse'}`}></div>
+            <Clock className="w-3.5 h-3.5 text-emerald-400/90 shrink-0" />
             <span>
               Última sincronización:{' '}
-              <strong data-testid="last-sync-time" className={`font-mono ${degraded ? 'text-amber-200' : 'text-emerald-300'}`}>
+              <strong data-testid="last-sync-time" className="font-mono text-emerald-300">
                 {formattedSyncTime}
               </strong>
             </span>
-            {backgroundSyncing && !loading && (
-              <span
-                data-testid="bg-sync-indicator"
-                className="ml-1 text-[10px] font-mono uppercase tracking-wider text-amber-300/90"
-              >
-                · Actualizando
-              </span>
-            )}
           </div>
-
-          {degraded && (
-            <span
-              data-testid="degraded-cache-badge"
-              className="inline-flex items-center gap-1.5 text-[11px] font-sans font-medium text-amber-300 bg-amber-950/40 border border-amber-800/50 px-2.5 py-1.5 rounded-lg"
-              title="Conectividad temporalmente inestable; mostrando última instantánea válida sin pérdida de datos"
-            >
-              <WifiOff className="w-3.5 h-3.5 shrink-0" />
-              Datos en caché
-            </span>
-          )}
-
-          {syncStatusHint && (
-            <span className="text-[11px] font-sans font-medium text-amber-300 bg-amber-950/40 border border-amber-800/50 px-2.5 py-1.5 rounded-lg">
-              {syncStatusHint}
-            </span>
-          )}
 
           {onSync && (
             <button
