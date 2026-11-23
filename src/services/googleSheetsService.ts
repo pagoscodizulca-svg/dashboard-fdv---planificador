@@ -1,8 +1,10 @@
 import { VolumenData } from '../types';
 import { isClientActiveInAnyFocusProduct } from '../config/sheetsConfig';
 
-export const DEFAULT_SHEETS_CACHE_TTL_MS = 60 * 1000; // 60 segundos (alineado al ciclo de sincronización de Google Sheets)
-export const SHEETS_AUTO_REFRESH_INTERVAL_MS = 60 * 1000; // 60 segundos
+export const SERVER_CACHE_TTL_MS = 55 * 1000; // 55 segundos (TTL centralizado en servidor)
+export const DEFAULT_SHEETS_CACHE_TTL_MS = SERVER_CACHE_TTL_MS;
+export const SHEETS_AUTO_REFRESH_INTERVAL_MS = 60 * 1000; // 60 segundos (refresco automático silencioso)
+export const MANUAL_SYNC_COOLDOWN_MS = 15 * 1000; // 15 segundos (cooldown anti-spam)
 let cacheTtlMs = DEFAULT_SHEETS_CACHE_TTL_MS;
 
 export const getSheetsCacheTtlMs = (): number => cacheTtlMs;
@@ -37,7 +39,10 @@ const SYNC_META_KEY = `${SESSION_PREFIX}sync_meta`;
 
 export interface SheetsSyncMeta {
   lastSyncAt: string | null;
+  lastSyncCaracas?: string | null;
   source: string | null;
+  degraded?: boolean;
+  cooldownRemainingSeconds?: number;
   updatedAt: number;
 }
 
@@ -144,19 +149,22 @@ const emitSyncMetaUpdate = (meta: SheetsSyncMeta): void => {
 export const getLastSyncMetadata = (): SheetsSyncMeta => {
   const storage = getSessionStorageSafe();
   if (!storage) {
-    return { lastSyncAt: null, source: null, updatedAt: 0 };
+    return { lastSyncAt: null, lastSyncCaracas: null, source: null, degraded: false, updatedAt: 0 };
   }
   try {
     const raw = storage.getItem(SYNC_META_KEY);
-    if (!raw) return { lastSyncAt: null, source: null, updatedAt: 0 };
+    if (!raw) return { lastSyncAt: null, lastSyncCaracas: null, source: null, degraded: false, updatedAt: 0 };
     const parsed = JSON.parse(raw);
     return {
       lastSyncAt: parsed?.lastSyncAt || null,
+      lastSyncCaracas: parsed?.lastSyncCaracas || null,
       source: parsed?.source || null,
+      degraded: Boolean(parsed?.degraded),
+      cooldownRemainingSeconds: Number(parsed?.cooldownRemainingSeconds) || 0,
       updatedAt: Number(parsed?.updatedAt) || 0
     };
   } catch {
-    return { lastSyncAt: null, source: null, updatedAt: 0 };
+    return { lastSyncAt: null, lastSyncCaracas: null, source: null, degraded: false, updatedAt: 0 };
   }
 };
 
@@ -338,14 +346,33 @@ export const fetchWithRetryBackoff = async (
   throw lastError || new Error('Error de red tras múltiples reintentos');
 };
 
-const recordResponseSyncHeaders = (response: Response, fallbackTimestamp?: string): void => {
+const recordResponseSyncHeaders = (
+  response: Response,
+  fallbackTimestamp?: string,
+  overrides?: Partial<SheetsSyncMeta>
+): void => {
   const headerSync = response.headers.get('X-Last-Sync');
+  const headerCaracas = response.headers.get('X-Last-Sync-Caracas');
   const headerSource = response.headers.get('X-Sync-Source');
+  const headerDegraded = response.headers.get('X-Sync-Degraded');
+  const headerCooldown = response.headers.get('X-Sync-Cooldown-Remaining');
   const current = getLastSyncMetadata();
   const nextSyncAt = headerSync || fallbackTimestamp || current.lastSyncAt || new Date().toISOString();
   emitSyncMetaUpdate({
     lastSyncAt: nextSyncAt,
-    source: headerSource || current.source || 'server',
+    lastSyncCaracas: overrides?.lastSyncCaracas ?? headerCaracas ?? current.lastSyncCaracas ?? null,
+    source: overrides?.source ?? headerSource ?? current.source ?? 'server',
+    degraded: overrides?.degraded ?? (headerDegraded === 'true'),
+    cooldownRemainingSeconds: overrides?.cooldownRemainingSeconds ?? (Number(headerCooldown) || 0),
+    updatedAt: Date.now()
+  });
+};
+
+const markDegradedCacheMeta = (): void => {
+  const current = getLastSyncMetadata();
+  emitSyncMetaUpdate({
+    ...current,
+    degraded: true,
     updatedAt: Date.now()
   });
 };
@@ -457,16 +484,19 @@ async function fetchDatasetWithDedup<T>(params: {
         { timeoutMs: force ? 18000 : 10000, maxAttempts: 3, signal: controller.signal }
       );
       if (!response.ok) {
-        return readFreshMemory(memMap, cacheKey, ttlMs) || readSessionCache<T[]>(storageKey, ttlMs) || [];
+        markDegradedCacheMeta();
+        return memMap.get(cacheKey)?.data || readSessionCache<T[]>(storageKey, ttlMs) || [];
       }
       const text = await response.text();
       const trimmed = text.trim();
       if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
-        return readFreshMemory(memMap, cacheKey, ttlMs) || readSessionCache<T[]>(storageKey, ttlMs) || [];
+        markDegradedCacheMeta();
+        return memMap.get(cacheKey)?.data || readSessionCache<T[]>(storageKey, ttlMs) || [];
       }
       const parsed: T[] = JSON.parse(trimmed);
       if (!Array.isArray(parsed)) {
-        return readFreshMemory(memMap, cacheKey, ttlMs) || readSessionCache<T[]>(storageKey, ttlMs) || [];
+        markDegradedCacheMeta();
+        return memMap.get(cacheKey)?.data || readSessionCache<T[]>(storageKey, ttlMs) || [];
       }
       memMap.set(cacheKey, { key: cacheKey, data: parsed, savedAt: Date.now() });
       writeSessionCache(storageKey, parsed);
@@ -476,7 +506,8 @@ async function fetchDatasetWithDedup<T>(params: {
       if (isAbortError(error) || controller.signal.aborted) {
         throw createAbortError();
       }
-      return readFreshMemory(memMap, cacheKey, ttlMs) || readSessionCache<T[]>(storageKey, ttlMs) || [];
+      markDegradedCacheMeta();
+      return memMap.get(cacheKey)?.data || readSessionCache<T[]>(storageKey, ttlMs) || [];
     } finally {
       inFlightRequests.delete(flightKey);
     }
@@ -577,11 +608,15 @@ export const triggerSheetsSync = async (
   signal?: AbortSignal
 ): Promise<{
   success: boolean;
+  status?: 'OK' | 'SKIPPED_UNCHANGED' | 'COOLDOWN_CACHED' | 'DEGRADED_FALLBACK';
+  degraded?: boolean;
+  cooldownRemainingSeconds?: number;
   message: string;
   countVolumen?: number;
   countActivacion?: number;
   countMetas?: number;
   timestamp?: string;
+  timestampCaracas?: string | null;
 }> => {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -609,7 +644,13 @@ export const triggerSheetsSync = async (
   }
 
   const data = await response.json();
-  clearSheetsCache(true);
-  recordResponseSyncHeaders(response, data?.timestamp);
+  if (data?.status !== 'COOLDOWN_CACHED' && !data?.degraded) {
+    clearSheetsCache(true);
+  }
+  recordResponseSyncHeaders(response, data?.timestamp, {
+    lastSyncCaracas: data?.timestampCaracas || undefined,
+    degraded: Boolean(data?.degraded),
+    cooldownRemainingSeconds: Number(data?.cooldownRemainingSeconds) || 0
+  });
   return data;
 };

@@ -3,6 +3,7 @@ import { Role, VolumenData, ActivacionData } from './types';
 import {
   DEFAULT_SHEETS_CACHE_TTL_MS,
   SHEETS_AUTO_REFRESH_INTERVAL_MS,
+  MANUAL_SYNC_COOLDOWN_MS,
   fetchVolumenData,
   fetchActivacionData,
   fetchMetasActivacion,
@@ -188,8 +189,12 @@ export default function App() {
   const [metasActivacion, setMetasActivacion] = useState<any[]>([]);
   const [degustacionesList, setDegustacionesList] = useState<Degustacion[]>([]);
   const [loading, setLoading] = useState(false);
-  const [isSyncing, setIsSyncing] = useState(false);
+  const [isManualSyncing, setIsManualSyncing] = useState(false);
+  const [isBackgroundSyncing, setIsBackgroundSyncing] = useState(false);
+  const [isSyncDegraded, setIsSyncDegraded] = useState<boolean>(() => Boolean(getLastSyncMetadata().degraded));
+  const [manualCooldownSeconds, setManualCooldownSeconds] = useState<number>(0);
   const [lastSyncAt, setLastSyncAt] = useState<string | null>(() => getLastSyncMetadata().lastSyncAt);
+  const [lastSyncCaracas, setLastSyncCaracas] = useState<string | null>(() => getLastSyncMetadata().lastSyncCaracas || null);
   const [syncStatusHint, setSyncStatusHint] = useState<string>('');
   const [session, setSession] = useState<any>(null);
   const [authUsuario, setAuthUsuario] = useState('');
@@ -350,17 +355,41 @@ export default function App() {
       if (custom?.detail?.lastSyncAt) {
         setLastSyncAt(custom.detail.lastSyncAt);
       }
+      if (custom?.detail?.lastSyncCaracas !== undefined) {
+        setLastSyncCaracas(custom.detail.lastSyncCaracas || null);
+      }
+      if (typeof custom?.detail?.degraded === 'boolean') {
+        setIsSyncDegraded(custom.detail.degraded);
+      }
     };
     window.addEventListener('fdv-sheets-sync-meta', onSyncMeta);
     return () => window.removeEventListener('fdv-sheets-sync-meta', onSyncMeta);
   }, []);
 
-  const loadAbortRef = useRef<AbortController | null>(null);
+  // Cuenta regresiva del cooldown preventivo de 15s para el botón "Sincronizar datos"
+  useEffect(() => {
+    if (manualCooldownSeconds <= 0) return;
+    const timer = setInterval(() => {
+      setManualCooldownSeconds((prev) => (prev <= 1 ? 0 : prev - 1));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [manualCooldownSeconds > 0]);
 
-  const loadData = useCallback(async (force = false, showLoader = false, customTtlMs?: number) => {
+  const loadAbortRef = useRef<AbortController | null>(null);
+  const lastSuccessfulRefreshAtRef = useRef<number>(0);
+  const autoSyncIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isLoggedInRef = useRef<boolean>(false);
+
+  const loadData = useCallback(async (
+    force = false,
+    showLoader = false,
+    customTtlMs?: number,
+    mode: 'initial' | 'background' | 'manual' = 'background'
+  ) => {
     if (!localStorage.getItem('dashboard_fdv_token')) {
       setLoading(false);
-      setIsSyncing(false);
+      setIsManualSyncing(false);
+      setIsBackgroundSyncing(false);
       return;
     }
 
@@ -377,8 +406,8 @@ export default function App() {
       ? `SUPERVISOR:${loggedInVendor}`
       : (loggedInVendor || undefined);
 
-    // Estrategia Stale-While-Revalidate (SWR) con TTL real de sesión:
-    // 1. Pintar al instante desde caché vigente (0 ms) para que el vendedor trabaje sin espera
+    // Estrategia Stale-While-Revalidate (SWR) Zero-Flicker:
+    // 1. Pintar al instante desde caché vigente (0 ms) sin mostrar spinners bloqueantes durante auto-refrescos
     const swrSnapshot = getCachedSheetsSnapshot(targetVendor);
     if (swrSnapshot.hasCache) {
       setVolumenData((prev) => (prev.length === 0 ? swrSnapshot.volumen : prev));
@@ -387,12 +416,17 @@ export default function App() {
       if (swrSnapshot.lastSyncAt) {
         setLastSyncAt((prev) => prev || swrSnapshot.lastSyncAt);
       }
-    } else if (showLoader) {
+    } else if (showLoader && mode === 'initial') {
       setLoading(true);
     }
 
-    // 2. Revalidar contra Google Sheets / Servidor con deduplicación in-flight y AbortSignal
-    setIsSyncing(true);
+    // 2. Revalidar silenciosamente contra el servidor (TTL 55s en caché centralizada) con AbortSignal
+    if (mode === 'manual') {
+      setIsManualSyncing(true);
+    } else {
+      setIsBackgroundSyncing(true);
+    }
+
     const effectiveTtlMs = typeof customTtlMs === 'number' ? customTtlMs : DEFAULT_SHEETS_CACHE_TTL_MS;
     try {
       const [vol, act, metas] = await Promise.all([
@@ -401,26 +435,60 @@ export default function App() {
         fetchMetasActivacion({ forceRefresh: force, vendorId: targetVendor, signal: controller.signal, ttlMs: effectiveTtlMs })
       ]);
       if (controller.signal.aborted) return;
-      setVolumenData(vol);
-      setActivacionData(act);
-      setMetasActivacion(metas);
+
       const latestMeta = getLastSyncMetadata();
-      setLastSyncAt(latestMeta.lastSyncAt || new Date().toISOString());
+      const responseDegraded = Boolean(latestMeta.degraded);
+      setIsSyncDegraded(responseDegraded);
+
+      // Last-Known-Good en UI: jamás vaciar tablas/KPIs visibles si una consulta degradada devolvió []
+      setVolumenData((prev) => (vol.length > 0 || (!responseDegraded && prev.length === 0) ? vol : prev));
+      setActivacionData((prev) => (act.length > 0 || (!responseDegraded && prev.length === 0) ? act : prev));
+      setMetasActivacion((prev) => (metas.length > 0 || (!responseDegraded && prev.length === 0) ? metas : prev));
+
+      if (latestMeta.lastSyncAt) {
+        setLastSyncAt(latestMeta.lastSyncAt);
+      } else if (!responseDegraded) {
+        setLastSyncAt(new Date().toISOString());
+      }
+      if (latestMeta.lastSyncCaracas) {
+        setLastSyncCaracas(latestMeta.lastSyncCaracas);
+      }
+      if (!responseDegraded) {
+        lastSuccessfulRefreshAtRef.current = Date.now();
+      }
     } catch (err: any) {
       if (err?.name !== 'AbortError') {
+        setIsSyncDegraded(true);
         console.warn("Error al sincronizar datos automáticamente:", err?.message || 'error');
       }
     } finally {
       if (loadAbortRef.current === controller) {
         setLoading(false);
-        setIsSyncing(false);
+        setIsManualSyncing(false);
+        setIsBackgroundSyncing(false);
       }
     }
   }, [userRole, loggedInVendor]);
 
+  const resetAutoSyncTimer = useCallback(() => {
+    if (autoSyncIntervalRef.current) {
+      clearInterval(autoSyncIntervalRef.current);
+      autoSyncIntervalRef.current = null;
+    }
+    if (!isLoggedInRef.current) return;
+    autoSyncIntervalRef.current = setInterval(() => {
+      // TTL 50s en el tick de 60s para leer siempre el nuevo estado del servidor (TTL servidor 55s)
+      loadData(false, false, 50_000, 'background');
+    }, SHEETS_AUTO_REFRESH_INTERVAL_MS);
+  }, [loadData]);
+
   useEffect(() => {
     return () => {
       loadAbortRef.current?.abort();
+      if (autoSyncIntervalRef.current) {
+        clearInterval(autoSyncIntervalRef.current);
+        autoSyncIntervalRef.current = null;
+      }
     };
   }, []);
 
@@ -435,9 +503,12 @@ export default function App() {
   }, [loading]);
 
   const handleManualSync = useCallback(async () => {
-    if (isSyncing) return;
-    setIsSyncing(true);
+    if (isManualSyncing || manualCooldownSeconds > 0) return;
+    const defaultCooldownSec = Math.ceil(MANUAL_SYNC_COOLDOWN_MS / 1000);
+    setIsManualSyncing(true);
     setSyncStatusHint(userRole === 'VENDEDOR' ? 'Actualizando vista espejo...' : 'Consultando Google Sheets...');
+    let nextCooldownSec = defaultCooldownSec;
+
     try {
       if (userRole === 'ADMIN' || userRole === 'SUPERVISOR') {
         const syncRes = await triggerSheetsSync((attempt, maxAttempts) => {
@@ -446,28 +517,60 @@ export default function App() {
         if (syncRes?.timestamp) {
           setLastSyncAt(syncRes.timestamp);
         }
+        if (syncRes?.timestampCaracas) {
+          setLastSyncCaracas(syncRes.timestampCaracas);
+        }
+        if (typeof syncRes?.degraded === 'boolean') {
+          setIsSyncDegraded(syncRes.degraded);
+        }
+        if (syncRes?.cooldownRemainingSeconds && syncRes.cooldownRemainingSeconds > 0) {
+          nextCooldownSec = Math.max(defaultCooldownSec, syncRes.cooldownRemainingSeconds);
+        }
+        if (syncRes?.status === 'COOLDOWN_CACHED') {
+          setSyncStatusHint(`Datos vigentes en caché · Próxima consulta en ${nextCooldownSec}s`);
+          await loadData(false, false, 0, 'manual');
+          setTimeout(() => setSyncStatusHint(''), 4000);
+        } else if (syncRes?.degraded) {
+          setSyncStatusHint('Google Sheets temporalmente no disponible · Datos en caché conservados');
+          await loadData(false, false, 0, 'manual');
+          setTimeout(() => setSyncStatusHint(''), 5000);
+        } else {
+          await loadData(true, false, 0, 'manual');
+          setSyncStatusHint('');
+        }
       } else {
         clearSheetsCache(false);
+        await loadData(true, false, 0, 'manual');
+        setSyncStatusHint('');
       }
-      await loadData(true, false);
-      setSyncStatusHint('');
-    } catch (e) {
-      console.warn("Manual sheets sync error:", e);
-      setSyncStatusHint('Sin señal estable: mostrando respaldo local');
-      await loadData(false, false);
+    } catch {
+      setIsSyncDegraded(true);
+      setSyncStatusHint('Sin señal estable: mostrando respaldo en caché');
+      await loadData(false, false, DEFAULT_SHEETS_CACHE_TTL_MS, 'manual');
       setTimeout(() => setSyncStatusHint(''), 5000);
     } finally {
-      setIsSyncing(false);
+      setIsManualSyncing(false);
+      setManualCooldownSeconds(nextCooldownSec);
+      // Reiniciar el contador automático de 60 segundos tras finalizar la sincronización manual
+      resetAutoSyncTimer();
     }
-  }, [isSyncing, loadData, userRole]);
+  }, [isManualSyncing, manualCooldownSeconds, loadData, userRole, resetAutoSyncTimer]);
 
   useEffect(() => {
     (window as any).refreshData = handleManualSync;
   }, [handleManualSync]);
 
-  // Cargar datos al estar autenticado y mantener sincronizado con el TTL de 5 minutos
+  // Cargar datos al estar autenticado, ciclo silencioso cada 60s y recuperación inteligente visibilitychange / online
   useEffect(() => {
-    if (!isLoggedIn) return;
+    isLoggedInRef.current = isLoggedIn;
+    if (!isLoggedIn) {
+      if (autoSyncIntervalRef.current) {
+        clearInterval(autoSyncIntervalRef.current);
+        autoSyncIntervalRef.current = null;
+      }
+      return;
+    }
+
     const catalogController = new AbortController();
     fetch('/api/catalog/vendors', { signal: catalogController.signal })
       .then((res) => (res.ok ? res.json() : null))
@@ -479,23 +582,54 @@ export default function App() {
           const prevSync = localStorage.getItem('fdv_master_catalog_sync_version');
           if (prevSync && prevSync !== cat.syncedAt) {
             clearSheetsCache(true);
-            loadData(true, false);
+            loadData(true, false, 0, 'background');
           }
           localStorage.setItem('fdv_master_catalog_sync_version', String(cat.syncedAt));
         }
       })
       .catch(() => {});
 
-    loadData(false, false);
-    const syncInterval = setInterval(() => {
-      // TTL 50s en el tick de 60s para garantizar lectura fresca del servidor sin saltarse un ciclo por milisegundos
-      loadData(false, false, 50000);
-    }, SHEETS_AUTO_REFRESH_INTERVAL_MS);
+    loadData(false, false, DEFAULT_SHEETS_CACHE_TTL_MS, 'initial');
+    resetAutoSyncTimer();
+
+    const triggerImmediateRecoveryIfStale = () => {
+      const elapsedSinceLast = Date.now() - lastSuccessfulRefreshAtRef.current;
+      if (elapsedSinceLast >= SHEETS_AUTO_REFRESH_INTERVAL_MS) {
+        loadData(false, false, 0, 'background');
+        resetAutoSyncTimer();
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        triggerImmediateRecoveryIfStale();
+      }
+    };
+
+    const handleOnline = () => {
+      setIsSyncDegraded(false);
+      triggerImmediateRecoveryIfStale();
+    };
+
+    const handleOffline = () => {
+      setIsSyncDegraded(true);
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
     return () => {
       catalogController.abort();
-      clearInterval(syncInterval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      if (autoSyncIntervalRef.current) {
+        clearInterval(autoSyncIntervalRef.current);
+        autoSyncIntervalRef.current = null;
+      }
     };
-  }, [isLoggedIn, loadData]);
+  }, [isLoggedIn, loadData, resetAutoSyncTimer]);
 
   // Suscripción a degustaciones ESTRICTAMENTE tras iniciar sesión (evita llamadas no autenticadas en pantalla de login)
   useEffect(() => {
@@ -1241,8 +1375,12 @@ export default function App() {
           {activeTab !== 'COBROS_OCR' && (
             <RecorridoMes
               onSync={handleManualSync}
-              loading={loading || isSyncing}
+              loading={isManualSyncing}
+              backgroundSyncing={isBackgroundSyncing}
+              degraded={isSyncDegraded}
+              cooldownSeconds={manualCooldownSeconds}
               lastSyncAt={lastSyncAt}
+              lastSyncCaracas={lastSyncCaracas}
               syncStatusHint={syncStatusHint}
             />
           )}

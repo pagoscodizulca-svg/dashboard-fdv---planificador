@@ -131,6 +131,14 @@ import {
   type DataQualitySnapshot
 } from './src/utils/safeNumber';
 import {
+  SheetsSyncScheduler,
+  DEFAULT_SYNC_INTERVAL_MS,
+  DEFAULT_SERVER_CACHE_TTL_MS,
+  DEFAULT_MANUAL_COOLDOWN_MS,
+  formatCaracasTimestamp,
+  type SyncTriggerSource
+} from './src/services/sheetsSyncScheduler';
+import {
   normalizeVendorKey,
   getCaracasYearMonth
 } from './src/utils/vendorKeyNormalizer';
@@ -237,25 +245,45 @@ export function requireAlkostoAccess(req: any, res: any, next: any) {
   return next();
 }
 
-// Control de rate limiting en memoria para evitar abusos o costos excesivos en APIs de IA
+// Control de rate limiting en memoria por usuario + IP para evitar abuso / Quota Exhaustion
 const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
 export function rateLimiter(windowMs: number, maxRequests: number, label: string) {
   return (req: any, res: any, next: any) => {
-    const userKey = (req.user?.username || req.ip || 'anon') + ':' + label;
     const now = Date.now();
-    const record = rateLimitMap.get(userKey);
-    if (!record || now > record.resetTime) {
-      rateLimitMap.set(userKey, { count: 1, resetTime: now + windowMs });
-      return next();
+    if (rateLimitMap.size > 5000) {
+      for (const [k, rec] of rateLimitMap.entries()) {
+        if (now > rec.resetTime) rateLimitMap.delete(k);
+      }
     }
-    if (record.count >= maxRequests) {
-      const waitSec = Math.ceil((record.resetTime - now) / 1000);
-      return res.status(429).json({
-        success: false,
-        error: `Límite de solicitudes alcanzado para ${label}. Por favor espera ${waitSec} segundos.`
-      });
+
+    const clientIp = String(req.headers?.['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || 'unknown')
+      .split(',')[0]
+      .trim();
+    const keys = [
+      `ip:${clientIp}:${label}`,
+      ...(req.user?.username ? [`usr:${String(req.user.username).toUpperCase()}:${label}`] : [])
+    ];
+
+    for (const key of keys) {
+      const record = rateLimitMap.get(key);
+      if (record && now <= record.resetTime && record.count >= maxRequests) {
+        const waitSec = Math.ceil((record.resetTime - now) / 1000);
+        res.setHeader('Retry-After', String(waitSec));
+        return res.status(429).json({
+          success: false,
+          error: `Límite de solicitudes alcanzado para ${label}. Por favor espera ${waitSec} segundos.`
+        });
+      }
     }
-    record.count++;
+
+    for (const key of keys) {
+      const record = rateLimitMap.get(key);
+      if (!record || now > record.resetTime) {
+        rateLimitMap.set(key, { count: 1, resetTime: now + windowMs });
+      } else {
+        record.count++;
+      }
+    }
     next();
   };
 }
@@ -263,13 +291,21 @@ export function rateLimiter(windowMs: number, maxRequests: number, label: string
 let cachedWorkbook: any = null;
 let lastWorkbookSha256: string = '';
 let lastFetchTime = 0;
-const CACHE_TTL = 30000; // 30 seconds
+const CACHE_TTL = DEFAULT_SERVER_CACHE_TTL_MS; // 55 segundos (TTL centralizado de servidor)
 const SHEETS_AUTO_SYNC_INTERVAL_MS = (() => {
   const parsed = Number(process.env.SHEETS_SYNC_INTERVAL_MS);
   if (Number.isFinite(parsed) && parsed >= 30000) return Math.round(parsed);
-  return 60000; // Sincronización automática con Google Sheet cada 60 segundos
+  return DEFAULT_SYNC_INTERVAL_MS; // Sincronización automática con Google Sheet cada 60 segundos
 })();
 let lastSuccessfulSheetSyncAt: string = '';
+let lastSheetDegraded = false;
+let lastSheetCooldownRemaining = 0;
+let getLiveSchedulerMeta: (() => {
+  degraded: boolean;
+  cooldownRemainingSeconds: number;
+  lastUpdated: string | null;
+  lastUpdatedCaracas: string | null;
+}) | null = null;
 let lastSheetSource: 'live_google_sheet' | 'local_backup' | 'supabase' | 'memory' = 'memory';
 let lastSheetMetrics: Record<string, SheetTabMetrics> = {};
 let lastSheetWarnings: SheetWarning[] = [];
@@ -303,16 +339,29 @@ function loadLocalMasterClientSeed(): MasterClientSeed[] {
   return [];
 }
 
-function setNoCacheSyncHeaders(res: any, source?: string) {
+function setNoCacheSyncHeaders(res: any, source?: string, options?: { degraded?: boolean; cooldownRemainingSeconds?: number }) {
+  const liveMeta = getLiveSchedulerMeta ? getLiveSchedulerMeta() : null;
+  const effectiveSyncAt = liveMeta?.lastUpdated || lastSuccessfulSheetSyncAt;
+  const effectiveCaracas = liveMeta?.lastUpdatedCaracas || formatCaracasTimestamp(effectiveSyncAt);
+  const isDegraded = options?.degraded ?? liveMeta?.degraded ?? lastSheetDegraded;
+  const cooldownRem = options?.cooldownRemainingSeconds ?? liveMeta?.cooldownRemainingSeconds ?? lastSheetCooldownRemaining;
+
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
   res.setHeader('Surrogate-Control', 'no-store');
-  if (lastSuccessfulSheetSyncAt) {
-    res.setHeader('X-Last-Sync', lastSuccessfulSheetSyncAt);
+  if (effectiveSyncAt) {
+    res.setHeader('X-Last-Sync', effectiveSyncAt);
+    if (effectiveCaracas) {
+      res.setHeader('X-Last-Sync-Caracas', effectiveCaracas);
+    }
   }
   if (source || lastSheetSource) {
     res.setHeader('X-Sync-Source', source || lastSheetSource);
+  }
+  res.setHeader('X-Sync-Degraded', isDegraded ? 'true' : 'false');
+  if (cooldownRem > 0) {
+    res.setHeader('X-Sync-Cooldown-Remaining', String(cooldownRem));
   }
 }
 
@@ -348,14 +397,15 @@ async function fetchGoogleSheetWithRetry(url: string, maxAttempts = 3): Promise<
   throw lastError || new Error('Fallo al descargar Google Sheet');
 }
 
-async function getWorkbook(force = false) {
+async function getWorkbook(force = false, options: { strictLive?: boolean } = {}) {
   if (!force && cachedWorkbook && (Date.now() - lastFetchTime < CACHE_TTL)) {
     return cachedWorkbook;
   }
   const XLSX = await import('xlsx');
   const sheetId = getGoogleSheetId();
+  let liveDownloadError: Error | null = null;
 
-  // 1. Intentar descargar en caliente desde Google Sheets si GOOGLE_SHEET_ID está parametrizado en el servidor
+  // 1. Intentar descargar en caliente desde Google Sheets (solo lectura) si GOOGLE_SHEET_ID está parametrizado en el servidor
   if (sheetId) {
     try {
       const exportUrl = buildGoogleSheetExportUrl(sheetId, 'xlsx');
@@ -366,17 +416,25 @@ async function getWorkbook(force = false) {
       lastFetchTime = Date.now();
       lastSuccessfulSheetSyncAt = new Date().toISOString();
       lastSheetSource = 'live_google_sheet';
+      lastSheetDegraded = false;
       const localPath = path.join(process.cwd(), 'sheet.xlsx');
       try {
         fs.writeFileSync(localPath, nodeBuf);
       } catch (_) {}
       return cachedWorkbook;
     } catch (err: any) {
-      console.warn('[SERVER] No se pudo obtener XLSX en vivo desde Google Sheets:', err?.message);
+      liveDownloadError = err instanceof Error ? err : new Error('Fallo descargando Google Sheet');
+      console.warn('[SERVER] No se pudo obtener XLSX en vivo desde Google Sheets (se preserva Last-Known-Good si existe).');
     }
   }
 
-  // 2. Fallback a copia local de respaldo sheet.xlsx
+  // Last-Known-Good estricto: si ya existe una instantánea viva reciente y el caller pidió validación en vivo,
+  // NO sobrescribirla con respaldo local estático — propagar el fallo al scheduler para activar estado degradado limpio.
+  if (options.strictLive && liveDownloadError && cachedWorkbook) {
+    throw liveDownloadError;
+  }
+
+  // 2. Fallback inicial (cold boot) a copia local de respaldo sheet.xlsx
   const localPath = path.join(process.cwd(), 'sheet.xlsx');
   if (fs.existsSync(localPath)) {
     try {
@@ -399,7 +457,7 @@ async function getWorkbook(force = false) {
   }
 
   if (cachedWorkbook) return cachedWorkbook;
-  throw new Error("No se pudo cargar el libro de datos ni en línea ni desde el respaldo local.");
+  throw liveDownloadError || new Error("No se pudo cargar el libro de datos ni en línea ni desde el respaldo local.");
 }
 
 
@@ -417,14 +475,51 @@ async function startServer() {
     next(err);
   });
 
-  // CORS Middleware para permitir sincronización directa con el dashboard de gerencia (https://dashboardgerencia01.ai.studio)
+  // CORS Middleware estricto por allowlist (Render oficial, Trade Marketing y localhost en desarrollo)
+  const allowedCorsOrigins = new Set<string>([
+    'https://dashboard-fdv-planificador.onrender.com',
+    'https://trade-marketing-qi6j.onrender.com',
+    ...String(process.env.ALLOWED_CORS_ORIGINS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+  ]);
+
+  const isOriginAllowed = (origin: string): boolean => {
+    if (allowedCorsOrigins.has(origin)) return true;
+    if (process.env.NODE_ENV !== 'production') {
+      try {
+        const parsed = new URL(origin);
+        if (
+          (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+          (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1')
+        ) {
+          return true;
+        }
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  };
+
   app.use((req, res, next) => {
-    res.header("Access-Control-Allow-Origin", "*");
-    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
-    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, Pragma, X-Idempotency-Key");
-    res.header("Access-Control-Expose-Headers", "X-Last-Sync, X-Sync-Source");
+    const requestOrigin = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+    res.header('Vary', 'Origin');
+
+    if (requestOrigin) {
+      if (isOriginAllowed(requestOrigin)) {
+        res.header('Access-Control-Allow-Origin', requestOrigin);
+        res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+        res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, Pragma, X-Idempotency-Key');
+        res.header('Access-Control-Expose-Headers', 'X-Last-Sync, X-Last-Sync-Caracas, X-Sync-Source, X-Sync-Degraded, X-Sync-Cooldown-Remaining');
+      } else if (req.method === 'OPTIONS') {
+        return res.status(403).json({ success: false, error: 'Origen CORS no autorizado.' });
+      }
+    }
+
     if (req.method === 'OPTIONS') {
-      return res.sendStatus(200);
+      return res.sendStatus(204);
     }
     next();
   });
@@ -4299,7 +4394,7 @@ async function startServer() {
   let lastActivacionParsedTime = 0;
   let cachedMetasParsed: any[] | null = null;
   let lastMetasParsedTime = 0;
-  const PARSED_DATA_TTL = 50000; // 50s (alineado al ciclo de auto-sincronización de 60s)
+  const PARSED_DATA_TTL = DEFAULT_SERVER_CACHE_TTL_MS; // 55s (caché centralizada alineada al ciclo de 60s)
 
   app.get("/api/usuarios", (_req, res) => {
     return res.status(403).json({
@@ -4848,96 +4943,145 @@ async function startServer() {
     };
   }
 
-  let inFlightSheetsSync: Promise<{
-    status: 'OK' | 'SKIPPED_UNCHANGED';
+  interface SyncPayloadSummary {
     countVolumen: number;
     countActivacion: number;
     countMetas: number;
-    countDegustaciones?: number;
+    countDegustaciones: number;
     warningsCount: number;
-    auditLogsCount?: number;
+    auditLogsCount: number;
     metrics: Record<string, SheetTabMetrics>;
-  }> | null = null;
-  let lastFullSheetsSyncCompletedAt = 0;
+  }
 
-  async function runCoalescedSheetsSync(forceRebuild = false, triggeredBy = 'system') {
-    if (inFlightSheetsSync) {
-      return inFlightSheetsSync;
-    }
-    if (
-      !forceRebuild &&
-      Date.now() - lastFullSheetsSyncCompletedAt < 4000 &&
-      cachedVolumenParsed &&
-      cachedActivacionParsed &&
-      cachedMetasParsed
-    ) {
-      return {
-        status: 'SKIPPED_UNCHANGED' as const,
-        countVolumen: cachedVolumenParsed.length,
-        countActivacion: cachedActivacionParsed.length,
-        countMetas: cachedMetasParsed.length,
-        warningsCount: lastSheetWarnings.length,
-        auditLogsCount: lastSheetAuditLogs.length,
-        metrics: lastSheetMetrics
-      };
-    }
-
-    inFlightSheetsSync = (async () => {
-      try {
-        const workbook = await getWorkbook(true);
-        const periodo = metasPeriodoActual();
-        const prevHash = lastSyncedSha256ByPeriod.get(periodo);
-        if (
-          !forceRebuild &&
-          prevHash &&
-          lastWorkbookSha256 &&
-          prevHash === lastWorkbookSha256 &&
-          cachedVolumenParsed &&
-          cachedActivacionParsed &&
-          cachedMetasParsed
-        ) {
-          lastFullSheetsSyncCompletedAt = Date.now();
-          return {
-            status: 'SKIPPED_UNCHANGED' as const,
+  const sheetsScheduler = new SheetsSyncScheduler<SyncPayloadSummary>({
+    syncIntervalMs: SHEETS_AUTO_SYNC_INTERVAL_MS,
+    cacheTtlMs: DEFAULT_SERVER_CACHE_TTL_MS,
+    manualCooldownMs: DEFAULT_MANUAL_COOLDOWN_MS,
+    maxRetries: 3,
+    baseBackoffMs: 500,
+    maxBackoffMs: 2_000,
+    isValidPayload: (p) =>
+      Boolean(p && (p.countVolumen > 0 || p.countActivacion > 0 || p.countMetas > 0)),
+    syncFn: async ({ forceRebuild }) => {
+      const hasExistingLiveCache = Boolean(
+        cachedVolumenParsed?.length && cachedActivacionParsed?.length && cachedMetasParsed?.length
+      );
+      const workbook = await getWorkbook(true, { strictLive: hasExistingLiveCache });
+      const periodo = metasPeriodoActual();
+      const prevHash = lastSyncedSha256ByPeriod.get(periodo);
+      if (
+        !forceRebuild &&
+        prevHash &&
+        lastWorkbookSha256 &&
+        prevHash === lastWorkbookSha256 &&
+        cachedVolumenParsed &&
+        cachedActivacionParsed &&
+        cachedMetasParsed
+      ) {
+        lastVolumenParsedTime = Date.now();
+        lastActivacionParsedTime = Date.now();
+        lastMetasParsedTime = Date.now();
+        return {
+          unchanged: true,
+          syncedAt: lastSuccessfulSheetSyncAt || new Date().toISOString(),
+          payload: {
             countVolumen: cachedVolumenParsed.length,
             countActivacion: cachedActivacionParsed.length,
             countMetas: cachedMetasParsed.length,
+            countDegustaciones: 0,
             warningsCount: lastSheetWarnings.length,
             auditLogsCount: lastSheetAuditLogs.length,
             metrics: lastSheetMetrics
-          };
-        }
-        const res = await syncWorkbookToSupabase(workbook);
-        lastFullSheetsSyncCompletedAt = Date.now();
-        return res;
-      } finally {
-        inFlightSheetsSync = null;
+          }
+        };
       }
-    })();
+      const res = await syncWorkbookToSupabase(workbook);
+      return {
+        unchanged: false,
+        syncedAt: lastSuccessfulSheetSyncAt || new Date().toISOString(),
+        payload: {
+          countVolumen: res.countVolumen,
+          countActivacion: res.countActivacion,
+          countMetas: res.countMetas,
+          countDegustaciones: res.countDegustaciones ?? 0,
+          warningsCount: res.warningsCount,
+          auditLogsCount: res.auditLogsCount ?? lastSheetAuditLogs.length,
+          metrics: res.metrics
+        }
+      };
+    }
+  });
 
-    return inFlightSheetsSync;
+  getLiveSchedulerMeta = () => {
+    const st = sheetsScheduler.getStatus();
+    return {
+      degraded: st.degraded,
+      cooldownRemainingSeconds: st.cooldownRemainingSeconds,
+      lastUpdated: st.lastUpdated,
+      lastUpdatedCaracas: st.lastUpdatedCaracas
+    };
+  };
+
+  async function runCoalescedSheetsSync(
+    forceRebuild = false,
+    _triggeredBy = 'system',
+    source: SyncTriggerSource = 'manual'
+  ) {
+    const outcome = await sheetsScheduler.triggerSync({ source, forceRebuild });
+    lastSheetDegraded = outcome.degraded;
+    lastSheetCooldownRemaining = outcome.cooldownRemainingSeconds;
+    if (outcome.lastUpdated) {
+      lastSuccessfulSheetSyncAt = outcome.lastUpdated;
+    }
+    const payload = outcome.payload || {
+      countVolumen: cachedVolumenParsed?.length || 0,
+      countActivacion: cachedActivacionParsed?.length || 0,
+      countMetas: cachedMetasParsed?.length || 0,
+      countDegustaciones: 0,
+      warningsCount: lastSheetWarnings.length,
+      auditLogsCount: lastSheetAuditLogs.length,
+      metrics: lastSheetMetrics
+    };
+    return {
+      status: outcome.status,
+      degraded: outcome.degraded,
+      cooldownRemainingSeconds: outcome.cooldownRemainingSeconds,
+      lastUpdated: outcome.lastUpdated,
+      lastUpdatedCaracas: outcome.lastUpdatedCaracas,
+      ...payload
+    };
   }
 
   // ENDPOINT DE SINCRONIZACIÓN BAJO DEMANDA PROTEGIDO (Exclusivo para ADMIN y SUPERVISOR)
+  // Rate limiting por IP + Usuario y Cooldown mínimo en servidor de 15s contra Quota Exhaustion
   app.post(
     "/api/sync/sheets",
     authenticateToken,
     requireSupervisorOrAdmin,
-    rateLimiter(60_000, 2, 'manual-sheets-sync'),
+    rateLimiter(60_000, 4, 'manual-sheets-sync'),
     async (req: any, res: any) => {
       try {
         const forceRebuild = req.body?.forceRebuild === true;
         console.log(`[SERVER] Sincronización manual solicitada por ${req.user?.username || 'supervisor/admin'} (forceRebuild=${forceRebuild})...`);
-        const result = await runCoalescedSheetsSync(forceRebuild, String(req.user?.username || 'ADMIN'));
-        setNoCacheSyncHeaders(res);
+        const result = await runCoalescedSheetsSync(forceRebuild, String(req.user?.username || 'ADMIN'), 'manual');
+        setNoCacheSyncHeaders(res, undefined, {
+          degraded: result.degraded,
+          cooldownRemainingSeconds: result.cooldownRemainingSeconds
+        });
+
+        const messageByStatus: Record<string, string> = {
+          SKIPPED_UNCHANGED: 'El libro de Google Sheets no presenta cambios (SHA-256 idéntico); cero escrituras redundantes.',
+          COOLDOWN_CACHED: `Última sincronización reciente. Usando caché vigente (próxima consulta directa habilitada en ${result.cooldownRemainingSeconds}s).`,
+          DEGRADED_FALLBACK: 'Google Sheets no respondió temporalmente. Se conserva el último estado válido en caché.',
+          OK: 'Sincronización con Google Sheets y Supabase completada con éxito'
+        };
 
         res.json({
           success: true,
           status: result.status,
-          message:
-            result.status === 'SKIPPED_UNCHANGED'
-              ? 'El libro de Google Sheets no presenta cambios (SHA-256 idéntico); cero escrituras redundantes.'
-              : 'Sincronización con Google Sheets y Supabase completada con éxito',
+          degraded: result.degraded,
+          cooldownRemainingSeconds: result.cooldownRemainingSeconds,
+          message: messageByStatus[result.status] || messageByStatus.OK,
           source: lastSheetSource,
           periodo: metasPeriodoActual(),
           countVolumen: result.countVolumen,
@@ -4946,25 +5090,42 @@ async function startServer() {
           countDegustaciones: result.countDegustaciones ?? 0,
           warningsCount: result.warningsCount,
           auditLogsCount: result.auditLogsCount ?? lastSheetAuditLogs.length,
-          timestamp: lastSuccessfulSheetSyncAt || new Date().toISOString()
+          timestamp: result.lastUpdated || lastSuccessfulSheetSyncAt || new Date().toISOString(),
+          timestampCaracas: result.lastUpdatedCaracas || formatCaracasTimestamp(lastSuccessfulSheetSyncAt || new Date())
         });
       } catch (err: any) {
-        console.error("[SERVER] Error en /api/sync/sheets:", err);
-        res.status(500).json({ success: false, error: "Error sincronizando datos de Google Sheets", details: err?.message });
+        console.error("[SERVER] Error en /api/sync/sheets:", err?.message || 'sync_error');
+        res.status(500).json({
+          success: false,
+          error: "Error temporal al sincronizar con Google Sheets. Se conserva la última instantánea válida."
+        });
       }
     }
   );
 
-  // ENDPOINT DE ESTADO Y AUDITORÍA CUANTITATIVA DE SINCRONIZACIÓN (Sin exponer GOOGLE_SHEET_ID)
+  // ENDPOINT DE ESTADO Y AUDITORÍA CUANTITATIVA DE SINCRONIZACIÓN (Sin exponer GOOGLE_SHEET_ID ni trazas internas)
   app.get("/api/sync/status", authenticateToken, (req: any, res: any) => {
-    setNoCacheSyncHeaders(res);
+    const sched = sheetsScheduler.getStatus();
+    setNoCacheSyncHeaders(res, undefined, {
+      degraded: sched.degraded,
+      cooldownRemainingSeconds: sched.cooldownRemainingSeconds
+    });
     const isPrivileged = req.user?.role === 'ADMIN' || Boolean(getSupervisorProfile(req.user?.username));
+    const effectiveUpdated = sched.lastUpdated || lastSuccessfulSheetSyncAt || null;
     res.json({
       success: true,
       periodo: metasPeriodoActual(),
-      lastSyncAt: lastSuccessfulSheetSyncAt || null,
+      isSyncing: sched.isSyncing,
+      degraded: sched.degraded,
+      lastSyncAt: effectiveUpdated,
+      lastUpdated: effectiveUpdated,
+      lastUpdatedCaracas: sched.lastUpdatedCaracas || formatCaracasTimestamp(effectiveUpdated),
       source: lastSheetSource,
-      syncIntervalSeconds: Math.round(SHEETS_AUTO_SYNC_INTERVAL_MS / 1000),
+      syncIntervalSeconds: Math.round(sched.syncIntervalMs / 1000),
+      cacheTtlSeconds: Math.round(sched.cacheTtlMs / 1000),
+      cooldownSeconds: Math.round(sched.manualCooldownMs / 1000),
+      cooldownRemainingSeconds: sched.cooldownRemainingSeconds,
+      consecutiveFailures: sched.consecutiveFailures,
       metrics: lastSheetMetrics,
       dataQuality: lastSheetDataQuality,
       warningsCount: lastSheetWarnings.length,
@@ -6696,33 +6857,40 @@ async function startServer() {
     }
   }
 
+  let activeHttpServer: ReturnType<typeof app.listen> | null = null;
+  let shutdownRegistered = false;
+
+  const registerGracefulShutdown = () => {
+    if (shutdownRegistered) return;
+    shutdownRegistered = true;
+
+    const handleSignal = (signal: 'SIGTERM' | 'SIGINT') => {
+      console.log(`[SERVER] Señal ${signal} recibida. Deteniendo planificador 60s y cerrando conexiones HTTP...`);
+      sheetsScheduler.stop();
+      if (activeHttpServer) {
+        const forceExit = setTimeout(() => process.exit(0), 5000);
+        if (typeof (forceExit as any)?.unref === 'function') (forceExit as any).unref();
+        activeHttpServer.close(() => {
+          clearTimeout(forceExit);
+          process.exit(0);
+        });
+      } else {
+        process.exit(0);
+      }
+    };
+
+    process.once('SIGTERM', () => handleSignal('SIGTERM'));
+    process.once('SIGINT', () => handleSignal('SIGINT'));
+  };
+
   const tryListen = (portToTry: number) => {
     const serverInstance = app.listen(portToTry, "0.0.0.0", () => {
+      activeHttpServer = serverInstance;
       console.log(`Server running on port ${portToTry}`);
+      registerGracefulShutdown();
 
-      // Auto-sincronización híbrida cada 60s con verificación SHA-256 (sin escrituras redundantes si el Sheet no cambió)
-      let autoSyncTimer: ReturnType<typeof setTimeout> | null = null;
-      const runAutoSync = async () => {
-        try {
-          const res = await runCoalescedSheetsSync(false, 'CRON');
-          if (res.status !== 'SKIPPED_UNCHANGED') {
-            console.log(`[SYNC AUTO] Sincronización espejo exitosa (${lastSheetSource}). Volumen: ${res.countVolumen}, Activación: ${res.countActivacion}, Metas: ${res.countMetas}`);
-          }
-        } catch (err: any) {
-          console.warn("[SYNC AUTO] Error en sincronización periódica desde Google Sheet:", err?.message);
-        } finally {
-          autoSyncTimer = setTimeout(runAutoSync, SHEETS_AUTO_SYNC_INTERVAL_MS);
-          if (typeof (autoSyncTimer as any)?.unref === 'function') {
-            (autoSyncTimer as any).unref();
-          }
-        }
-      };
-
-      // Disparar verificación inicial 3 segundos después del arranque y luego repetir cada 60 segundos sin solapamiento
-      autoSyncTimer = setTimeout(runAutoSync, 3000);
-      if (typeof (autoSyncTimer as any)?.unref === 'function') {
-        (autoSyncTimer as any).unref();
-      }
+      // Iniciar planificador centralizado (sincronización inicial a los 3s y luego cada 60s con mutex + Last-Known-Good)
+      sheetsScheduler.start({ initialDelayMs: 3000 });
     });
 
     serverInstance.on('error', (err: any) => {

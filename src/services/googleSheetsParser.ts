@@ -271,6 +271,38 @@ export function resolveSheetByAliases(
 }
 
 /**
+ * Resolución tolerante de las 3 pestañas críticas de sincronización cada 60s
+ * (`activacion por cliente`, `sku por volumen`, `activacion por rubro`), normalizando tildes,
+ * mayúsculas y espacios mediante `normalize('NFD')` y respetando los nombres históricos del libro.
+ */
+export function resolveCriticalSheetTabs(workbook: any): {
+  volumenSku: { sheetName: string; sheet: any } | null;
+  activacionCliente: { sheetName: string; sheet: any } | null;
+  activacionRubro: { sheetName: string; sheet: any } | null;
+} {
+  return {
+    volumenSku: resolveSheetByAliases(
+      workbook,
+      ['volumen_por_sku', 'sku_por_volumen', 'volumen_sku'],
+      ['sku_por_volumen', 'volumen_por_sku', 'volumen', 'sku'],
+      ['activacion', 'clientes', 'usuarios', 'degustaciones']
+    ),
+    activacionCliente: resolveSheetByAliases(
+      workbook,
+      ['activacion_por_cliente', 'activacion_clientes', 'clientes'],
+      ['activacion_por_cliente', 'activacion_cliente'],
+      ['rubro', 'vendedor', 'grid']
+    ),
+    activacionRubro: resolveSheetByAliases(
+      workbook,
+      ['grid_de_activacion_por_vendedor', 'activacion_por_rubro', 'activacion_rubro'],
+      ['grid_de_activacion', 'activacion_por_rubro', 'activacion_rubro', 'grid'],
+      ['activacion_por_cliente', 'activacion_cliente', 'clientes']
+    )
+  };
+}
+
+/**
  * Mapea encabezados de una fila a índices de columna mediante un diccionario de alias normalizados.
  */
 export function mapHeaderColumns<K extends string>(
@@ -610,13 +642,14 @@ export function parseWorkbookFull(
   const auditLogs: SyncAuditLogEntry[] = [];
   const metrics: Record<string, SheetTabMetrics> = {};
   const qualityTracker = new DataQualityTracker(50);
+  const criticalTabs = resolveCriticalSheetTabs(workbook);
 
   // ============================================================================
-  // 1. VOLUMEN POR SKU (Bloques resilientes con !merges, resta algebraica, % seguro y exclusión de totales)
+  // 1. VOLUMEN POR SKU / SKU POR VOLUMEN (Bloques resilientes con !merges, resta algebraica, % seguro y exclusión de totales)
   // ============================================================================
   const volumenSupabaseRows: ParsedWorkbookResult['volumenSupabaseRows'] = [];
   const volumenApiRows: VolumenData[] = [];
-  const volResolved = resolveSheetByAliases(workbook, ['volumen_por_sku'], ['volumen', 'sku']);
+  const volResolved = criticalTabs.volumenSku;
 
   if (volResolved) {
     const rows = extractSheetRows(XLSX, volResolved.sheet);
@@ -1204,11 +1237,7 @@ export function parseWorkbookFull(
   // ============================================================================
   // 3. ACTIVACIÓN POR CLIENTE + CRUCE EXACTO DE CODIGO CON ID CLIENTE
   // ============================================================================
-  const actResolved = resolveSheetByAliases(
-    workbook,
-    ['activacion_por_cliente', 'clientes'],
-    ['activacion_por_cliente', 'activacion_cliente']
-  );
+  const actResolved = criticalTabs.activacionCliente;
 
   interface SheetClientRow {
     rawCode: string;
@@ -1611,15 +1640,11 @@ export function parseWorkbookFull(
   }
 
   // ============================================================================
-  // 4. GRID DE ACTIVACIÓN POR VENDEDOR (Espejo exacto desde Fila 1 + !merges; excluye TOTAL/SUBTOTAL/encabezados repetidos)
+  // 4. GRID DE ACTIVACIÓN POR VENDEDOR / ACTIVACIÓN POR RUBRO (Espejo exacto desde Fila 1 + !merges; excluye TOTAL/SUBTOTAL/encabezados repetidos)
   // ============================================================================
   const metasSupabaseRows: ParsedWorkbookResult['metasSupabaseRows'] = [];
   const metasApiRows: ParsedWorkbookResult['metasApiRows'] = [];
-  const gridResolved = resolveSheetByAliases(
-    workbook,
-    ['grid_de_activacion_por_vendedor'],
-    ['grid_de_activacion', 'grid']
-  );
+  const gridResolved = criticalTabs.activacionRubro;
 
   if (gridResolved) {
     const rows = extractSheetRows(XLSX, gridResolved.sheet);

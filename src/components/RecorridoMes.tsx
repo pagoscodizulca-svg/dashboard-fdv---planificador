@@ -1,12 +1,43 @@
 import React, { useMemo } from 'react';
-import { Calendar, RefreshCw, Clock } from 'lucide-react';
+import { Calendar, RefreshCw, Clock, WifiOff } from 'lucide-react';
 import { getMesLaboralInfo } from '../utils/calendar';
 
 interface RecorridoMesProps {
   onSync?: () => void;
+  /** True solo durante sincronización manual disparada por el botón "Sincronizar datos". */
   loading?: boolean;
+  /** True durante el refresco automático silencioso cada 60s (no bloquea ni parpadea). */
+  backgroundSyncing?: boolean;
+  /** True si se muestran datos en caché por caída temporal de red o Google Sheets. */
+  degraded?: boolean;
+  /** Segundos restantes del cooldown anti-spam de 15s tras sincronización manual. */
+  cooldownSeconds?: number;
   lastSyncAt?: string | null;
+  lastSyncCaracas?: string | null;
   syncStatusHint?: string;
+}
+
+function getCaracasDateParts(date: Date): { day: string; month: string; year: string; hour: string; minute: string; second: string } {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'America/Caracas',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).formatToParts(date);
+
+  const pick = (type: string) => parts.find((p) => p.type === type)?.value || '00';
+  return {
+    day: pick('day'),
+    month: pick('month'),
+    year: pick('year'),
+    hour: pick('hour'),
+    minute: pick('minute'),
+    second: pick('second')
+  };
 }
 
 function formatSyncTimeLabel(isoTimestamp?: string | null): string {
@@ -14,28 +45,27 @@ function formatSyncTimeLabel(isoTimestamp?: string | null): string {
   const dt = new Date(isoTimestamp);
   if (Number.isNaN(dt.getTime())) return 'Pendiente';
 
-  const now = new Date();
-  const isSameDay =
-    dt.getFullYear() === now.getFullYear() &&
-    dt.getMonth() === now.getMonth() &&
-    dt.getDate() === now.getDate();
+  const target = getCaracasDateParts(dt);
+  const now = getCaracasDateParts(new Date());
+  const isSameCaracasDay =
+    target.year === now.year &&
+    target.month === now.month &&
+    target.day === now.day;
 
-  const hh = String(dt.getHours()).padStart(2, '0');
-  const mm = String(dt.getMinutes()).padStart(2, '0');
-  const ss = String(dt.getSeconds()).padStart(2, '0');
-
-  if (isSameDay) {
-    return `${hh}:${mm}:${ss}`;
+  if (isSameCaracasDay) {
+    return `${target.hour}:${target.minute}:${target.second}`;
   }
-  const dd = String(dt.getDate()).padStart(2, '0');
-  const mo = String(dt.getMonth() + 1).padStart(2, '0');
-  return `${dd}/${mo} ${hh}:${mm}`;
+  return `${target.day}/${target.month} ${target.hour}:${target.minute}`;
 }
 
 export const RecorridoMes: React.FC<RecorridoMesProps> = ({
   onSync,
-  loading,
+  loading = false,
+  backgroundSyncing = false,
+  degraded = false,
+  cooldownSeconds = 0,
   lastSyncAt,
+  lastSyncCaracas,
   syncStatusHint
 }) => {
   const { monthName, year, elapsed, remaining, total, percentage } = useMemo(() => {
@@ -51,6 +81,11 @@ export const RecorridoMes: React.FC<RecorridoMesProps> = ({
   }, []);
 
   const formattedSyncTime = useMemo(() => formatSyncTimeLabel(lastSyncAt), [lastSyncAt]);
+  const isButtonDisabled = Boolean(loading || cooldownSeconds > 0);
+
+  const badgeTooltip = lastSyncAt
+    ? `Sincronización automática cada 60s · ISO: ${lastSyncAt}${lastSyncCaracas ? ` · Venezuela: ${lastSyncCaracas}` : ''}`
+    : 'Sincronización automática cada 60s con Google Sheets';
 
   return (
     <div className="border border-neutral-800 bg-neutral-950 rounded-xl p-5 mb-6">
@@ -68,15 +103,50 @@ export const RecorridoMes: React.FC<RecorridoMesProps> = ({
         </div>
         <div className="flex flex-wrap items-center gap-2.5">
           <div
-            className="flex items-center justify-center gap-2 text-xs md:text-sm font-sans font-medium text-emerald-400 bg-emerald-950/30 border border-emerald-800/40 px-3.5 py-2.5 rounded-lg"
-            title={lastSyncAt ? `Marca exacta ISO: ${lastSyncAt}` : 'Sincronización automática con Google Sheets'}
+            data-testid="last-sync-badge"
+            className={`flex items-center justify-center gap-2 text-xs md:text-sm font-sans font-medium px-3.5 py-2.5 rounded-lg border transition-colors ${
+              degraded
+                ? 'text-amber-300 bg-amber-950/30 border-amber-700/50'
+                : 'text-emerald-400 bg-emerald-950/30 border-emerald-800/40'
+            }`}
+            title={badgeTooltip}
           >
-            <div className={`w-2 h-2 rounded-full ${loading ? 'bg-amber-400 animate-ping' : 'bg-emerald-500 animate-pulse'}`}></div>
-            <Clock className="w-3.5 h-3.5 text-emerald-400/90 shrink-0" />
+            <div
+              className={`w-2 h-2 rounded-full ${
+                loading || backgroundSyncing
+                  ? 'bg-amber-400 animate-ping'
+                  : degraded
+                    ? 'bg-amber-500'
+                    : 'bg-emerald-500 animate-pulse'
+              }`}
+            ></div>
+            <Clock className={`w-3.5 h-3.5 shrink-0 ${degraded ? 'text-amber-400' : 'text-emerald-400/90'}`} />
             <span>
-              Última sincronización: <strong className="font-mono text-emerald-300">{formattedSyncTime}</strong>
+              Última sincronización:{' '}
+              <strong data-testid="last-sync-time" className={`font-mono ${degraded ? 'text-amber-200' : 'text-emerald-300'}`}>
+                {formattedSyncTime}
+              </strong>
             </span>
+            {backgroundSyncing && !loading && (
+              <span
+                data-testid="bg-sync-indicator"
+                className="ml-1 text-[10px] font-mono uppercase tracking-wider text-amber-300/90"
+              >
+                · Actualizando
+              </span>
+            )}
           </div>
+
+          {degraded && (
+            <span
+              data-testid="degraded-cache-badge"
+              className="inline-flex items-center gap-1.5 text-[11px] font-sans font-medium text-amber-300 bg-amber-950/40 border border-amber-800/50 px-2.5 py-1.5 rounded-lg"
+              title="Conectividad temporalmente inestable; mostrando última instantánea válida sin pérdida de datos"
+            >
+              <WifiOff className="w-3.5 h-3.5 shrink-0" />
+              Datos en caché
+            </span>
+          )}
 
           {syncStatusHint && (
             <span className="text-[11px] font-sans font-medium text-amber-300 bg-amber-950/40 border border-amber-800/50 px-2.5 py-1.5 rounded-lg">
@@ -86,13 +156,25 @@ export const RecorridoMes: React.FC<RecorridoMesProps> = ({
 
           {onSync && (
             <button
+              type="button"
+              data-testid="manual-sync-button"
               onClick={onSync}
-              disabled={loading}
-              className="flex items-center gap-2 px-3.5 py-2.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-200 hover:text-white border border-neutral-700/60 rounded-lg text-xs md:text-sm font-medium transition-all shadow-sm active:scale-95 disabled:opacity-50 cursor-pointer"
-              title="Consultar Google Sheets en vivo con reintento automático"
+              disabled={isButtonDisabled}
+              className="flex items-center gap-2 px-3.5 py-2.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-200 hover:text-white border border-neutral-700/60 rounded-lg text-xs md:text-sm font-medium transition-all shadow-sm active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+              title={
+                cooldownSeconds > 0
+                  ? `Espera ${cooldownSeconds}s antes de volver a sincronizar manualmente`
+                  : 'Forzar actualización inmediata desde Google Sheets (auto-sync cada 60s activo)'
+              }
             >
               <RefreshCw className={`w-3.5 h-3.5 text-red-500 ${loading ? 'animate-spin' : ''}`} />
-              <span>{loading ? 'Sincronizando...' : 'Sincronizar datos'}</span>
+              <span>
+                {loading
+                  ? 'Sincronizando...'
+                  : cooldownSeconds > 0
+                    ? `Sincronizar (${cooldownSeconds}s)`
+                    : 'Sincronizar datos'}
+              </span>
             </button>
           )}
         </div>
