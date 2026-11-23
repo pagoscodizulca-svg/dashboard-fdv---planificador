@@ -8372,6 +8372,28 @@ function resolveSheetByAliases(workbook, exactAliases, substringAliases = [], ex
   }
   return null;
 }
+function resolveCriticalSheetTabs(workbook) {
+  return {
+    volumenSku: resolveSheetByAliases(
+      workbook,
+      ["volumen_por_sku", "sku_por_volumen", "volumen_sku"],
+      ["sku_por_volumen", "volumen_por_sku", "volumen", "sku"],
+      ["activacion", "clientes", "usuarios", "degustaciones"]
+    ),
+    activacionCliente: resolveSheetByAliases(
+      workbook,
+      ["activacion_por_cliente", "activacion_clientes", "clientes"],
+      ["activacion_por_cliente", "activacion_cliente"],
+      ["rubro", "vendedor", "grid"]
+    ),
+    activacionRubro: resolveSheetByAliases(
+      workbook,
+      ["grid_de_activacion_por_vendedor", "activacion_por_rubro", "activacion_rubro"],
+      ["grid_de_activacion", "activacion_por_rubro", "activacion_rubro", "grid"],
+      ["activacion_por_cliente", "activacion_cliente", "clientes"]
+    )
+  };
+}
 function mapHeaderColumns(headerRow, schema, fallbacks) {
   const normalizedHeaders = (headerRow || []).map(normalizeHeaderKey);
   const result = {};
@@ -8525,9 +8547,10 @@ function parseWorkbookFull(XLSX2, workbook, options) {
   const auditLogs = [];
   const metrics = {};
   const qualityTracker = new DataQualityTracker(50);
+  const criticalTabs = resolveCriticalSheetTabs(workbook);
   const volumenSupabaseRows = [];
   const volumenApiRows = [];
-  const volResolved = resolveSheetByAliases(workbook, ["volumen_por_sku"], ["volumen", "sku"]);
+  const volResolved = criticalTabs.volumenSku;
   if (volResolved) {
     const rows = extractSheetRows(XLSX2, volResolved.sheet);
     const tabMetric = {
@@ -9011,11 +9034,7 @@ function parseWorkbookFull(XLSX2, workbook, options) {
     MORTADELA_ASTURIAS: detailMortadelaAsturias.map,
     SALPICAO: detailSalpicaoSolo.map
   };
-  const actResolved = resolveSheetByAliases(
-    workbook,
-    ["activacion_por_cliente", "clientes"],
-    ["activacion_por_cliente", "activacion_cliente"]
-  );
+  const actResolved = criticalTabs.activacionCliente;
   const sheetClientsByCanonical = /* @__PURE__ */ new Map();
   if (actResolved) {
     const rows = extractSheetRows(XLSX2, actResolved.sheet);
@@ -9347,11 +9366,7 @@ function parseWorkbookFull(XLSX2, workbook, options) {
   }
   const metasSupabaseRows = [];
   const metasApiRows = [];
-  const gridResolved = resolveSheetByAliases(
-    workbook,
-    ["grid_de_activacion_por_vendedor"],
-    ["grid_de_activacion", "grid"]
-  );
+  const gridResolved = criticalTabs.activacionRubro;
   if (gridResolved) {
     const rows = extractSheetRows(XLSX2, gridResolved.sheet);
     const tabMetric = {
@@ -9790,6 +9805,276 @@ function parseWorkbookFull(XLSX2, workbook, options) {
   };
 }
 
+// src/services/sheetsSyncScheduler.ts
+init_define_import_meta_env();
+var DEFAULT_SYNC_INTERVAL_MS = 6e4;
+var DEFAULT_SERVER_CACHE_TTL_MS = 55e3;
+var DEFAULT_MANUAL_COOLDOWN_MS = 15e3;
+var defaultLogger = {
+  info: (event, meta) => {
+    console.log(JSON.stringify({ level: "INFO", component: "SheetsSyncScheduler", event, ...meta || {} }));
+  },
+  warn: (event, meta) => {
+    console.warn(JSON.stringify({ level: "WARN", component: "SheetsSyncScheduler", event, ...meta || {} }));
+  },
+  error: (event, meta) => {
+    console.error(JSON.stringify({ level: "ERROR", component: "SheetsSyncScheduler", event, ...meta || {} }));
+  }
+};
+function formatCaracasTimestamp(input) {
+  if (input === null || input === void 0) return null;
+  const date = input instanceof Date ? input : new Date(input);
+  if (Number.isNaN(date.getTime())) return null;
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "America/Caracas",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  }).formatToParts(date);
+  const pick = (type) => parts.find((p) => p.type === type)?.value || "00";
+  return `${pick("day")}/${pick("month")}/${pick("year")} ${pick("hour")}:${pick("minute")}:${pick("second")} VET`;
+}
+function classifySafeErrorCode(err) {
+  const msg = String(err?.message || "").toUpperCase();
+  const name = String(err?.name || "").toUpperCase();
+  if (name === "ABORTERROR" || msg.includes("ABORT") || msg.includes("TIMEOUT")) return "SHEETS_TIMEOUT";
+  if (msg.includes("429")) return "SHEETS_RATE_LIMITED_429";
+  if (/\b5\d{2}\b/.test(msg)) return "SHEETS_UPSTREAM_5XX";
+  if (msg.includes("ENOTFOUND") || msg.includes("ECONNREFUSED") || msg.includes("FETCH FAILED") || msg.includes("NETWORK")) {
+    return "SHEETS_NETWORK_ERROR";
+  }
+  if (msg.includes("EMPTY_PAYLOAD")) return "SHEETS_EMPTY_PAYLOAD";
+  return "SHEETS_SYNC_ERROR";
+}
+var SheetsSyncScheduler = class {
+  constructor(options) {
+    this.isRunning = false;
+    this.isSyncing = false;
+    this.inFlightPromise = null;
+    this.timerHandle = null;
+    this.startupHandle = null;
+    this.lastKnownGood = null;
+    this.lastUpdatedIso = null;
+    this.lastUpdatedCaracas = null;
+    this.lastSuccessMs = 0;
+    this.lastAttemptMs = 0;
+    this.degraded = false;
+    this.consecutiveFailures = 0;
+    this.lastErrorCode = null;
+    this.syncFn = options.syncFn;
+    this.isValidPayload = options.isValidPayload || ((p) => p !== null && p !== void 0);
+    this.syncIntervalMs = Math.max(1e4, Math.round(options.syncIntervalMs ?? DEFAULT_SYNC_INTERVAL_MS));
+    this.cacheTtlMs = Math.max(5e3, Math.round(options.cacheTtlMs ?? DEFAULT_SERVER_CACHE_TTL_MS));
+    this.manualCooldownMs = Math.max(1e3, Math.round(options.manualCooldownMs ?? DEFAULT_MANUAL_COOLDOWN_MS));
+    this.maxRetries = Math.max(1, Math.min(5, Math.round(options.maxRetries ?? 3)));
+    this.baseBackoffMs = Math.max(50, Math.round(options.baseBackoffMs ?? 500));
+    this.maxBackoffMs = Math.max(this.baseBackoffMs, Math.round(options.maxBackoffMs ?? 4e3));
+    this.nowFn = options.nowFn || (() => Date.now());
+    this.delayFn = options.delayFn || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.logger = options.logger || defaultLogger;
+  }
+  /**
+   * Permite precargar una instantánea inicial válida (ej. desde Supabase o respaldo local en arranque frío)
+   * sin perderla si la primera llamada a Google Sheets falla.
+   */
+  seedLastKnownGood(payload, updatedAtIso) {
+    if (!this.isValidPayload(payload)) return;
+    if (this.lastKnownGood !== null) return;
+    this.lastKnownGood = payload;
+    const iso = updatedAtIso || new Date(this.nowFn()).toISOString();
+    this.lastUpdatedIso = iso;
+    this.lastUpdatedCaracas = formatCaracasTimestamp(iso);
+    this.lastSuccessMs = this.nowFn();
+  }
+  getCooldownRemainingSeconds() {
+    if (this.lastSuccessMs <= 0) return 0;
+    const elapsed = this.nowFn() - this.lastSuccessMs;
+    if (elapsed >= this.manualCooldownMs) return 0;
+    return Math.ceil((this.manualCooldownMs - elapsed) / 1e3);
+  }
+  isCacheFresh() {
+    if (this.lastKnownGood === null || this.lastSuccessMs <= 0) return false;
+    return this.nowFn() - this.lastSuccessMs < this.cacheTtlMs;
+  }
+  getSnapshot() {
+    return {
+      payload: this.lastKnownGood,
+      lastUpdated: this.lastUpdatedIso,
+      lastUpdatedCaracas: this.lastUpdatedCaracas,
+      degraded: this.degraded,
+      isFresh: this.isCacheFresh()
+    };
+  }
+  getStatus() {
+    return {
+      isRunning: this.isRunning,
+      isSyncing: this.isSyncing,
+      degraded: this.degraded,
+      hasValidCache: this.lastKnownGood !== null,
+      isCacheFresh: this.isCacheFresh(),
+      lastUpdated: this.lastUpdatedIso,
+      lastUpdatedCaracas: this.lastUpdatedCaracas,
+      lastAttemptAt: this.lastAttemptMs > 0 ? new Date(this.lastAttemptMs).toISOString() : null,
+      syncIntervalMs: this.syncIntervalMs,
+      cacheTtlMs: this.cacheTtlMs,
+      manualCooldownMs: this.manualCooldownMs,
+      cooldownRemainingSeconds: this.getCooldownRemainingSeconds(),
+      consecutiveFailures: this.consecutiveFailures,
+      lastErrorCode: this.lastErrorCode
+    };
+  }
+  /**
+   * Inicia el planificador automático cada 60s con ejecución inicial configurable y sin solapamiento.
+   */
+  start(options = {}) {
+    if (this.isRunning) return;
+    this.isRunning = true;
+    const initialDelayMs = Math.max(0, Math.round(options.initialDelayMs ?? 3e3));
+    const scheduleNext = () => {
+      if (!this.isRunning) return;
+      this.timerHandle = setTimeout(async () => {
+        this.timerHandle = null;
+        if (!this.isRunning) return;
+        await this.triggerSync({ source: "interval" });
+        scheduleNext();
+      }, this.syncIntervalMs);
+      if (typeof this.timerHandle?.unref === "function") {
+        this.timerHandle.unref();
+      }
+    };
+    this.startupHandle = setTimeout(async () => {
+      this.startupHandle = null;
+      if (!this.isRunning) return;
+      await this.triggerSync({ source: "startup" });
+      scheduleNext();
+    }, initialDelayMs);
+    if (typeof this.startupHandle?.unref === "function") {
+      this.startupHandle.unref();
+    }
+  }
+  /**
+   * Detiene limpiamente todos los temporizadores activos (invocado en `SIGTERM` / `SIGINT` en Render).
+   */
+  stop() {
+    this.isRunning = false;
+    if (this.startupHandle) {
+      clearTimeout(this.startupHandle);
+      this.startupHandle = null;
+    }
+    if (this.timerHandle) {
+      clearTimeout(this.timerHandle);
+      this.timerHandle = null;
+    }
+  }
+  /**
+   * Dispara una sincronización con mutex de concurrencia (`isSyncing`), coalescencia de promesa en vuelo,
+   * cooldown de 15s para disparos manuales y preservación Last-Known-Good ante errores.
+   */
+  async triggerSync(params = {}) {
+    const source = params.source || "manual";
+    const forceRebuild = Boolean(params.forceRebuild);
+    if (this.inFlightPromise) {
+      return this.inFlightPromise;
+    }
+    if (source === "manual" && this.lastKnownGood !== null) {
+      const remainingSec = this.getCooldownRemainingSeconds();
+      if (remainingSec > 0) {
+        this.logger.info("MANUAL_SYNC_COOLDOWN_HIT", {
+          cooldownRemainingSeconds: remainingSec,
+          lastUpdated: this.lastUpdatedIso
+        });
+        return {
+          status: "COOLDOWN_CACHED",
+          payload: this.lastKnownGood,
+          unchanged: true,
+          degraded: this.degraded,
+          lastUpdated: this.lastUpdatedIso,
+          lastUpdatedCaracas: this.lastUpdatedCaracas,
+          cooldownRemainingSeconds: remainingSec,
+          source
+        };
+      }
+    }
+    this.isSyncing = true;
+    this.lastAttemptMs = this.nowFn();
+    this.inFlightPromise = (async () => {
+      let lastErr = null;
+      for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
+        try {
+          const result = await this.syncFn({ source, forceRebuild, attempt });
+          if (!this.isValidPayload(result?.payload)) {
+            throw new Error("EMPTY_PAYLOAD");
+          }
+          const nowMs = this.nowFn();
+          const syncedIso = result.syncedAt || new Date(nowMs).toISOString();
+          this.lastKnownGood = result.payload;
+          this.lastUpdatedIso = syncedIso;
+          this.lastUpdatedCaracas = formatCaracasTimestamp(syncedIso);
+          this.lastSuccessMs = nowMs;
+          this.degraded = false;
+          this.consecutiveFailures = 0;
+          this.lastErrorCode = null;
+          const status = result.unchanged ? "SKIPPED_UNCHANGED" : "OK";
+          return {
+            status,
+            payload: this.lastKnownGood,
+            unchanged: Boolean(result.unchanged),
+            degraded: false,
+            lastUpdated: this.lastUpdatedIso,
+            lastUpdatedCaracas: this.lastUpdatedCaracas,
+            cooldownRemainingSeconds: this.getCooldownRemainingSeconds(),
+            source
+          };
+        } catch (err) {
+          lastErr = err;
+          const errorCode = classifySafeErrorCode(err);
+          this.logger.warn("SHEETS_SYNC_ATTEMPT_FAILED", {
+            source,
+            attempt,
+            maxRetries: this.maxRetries,
+            errorCode
+          });
+          if (attempt < this.maxRetries) {
+            const backoffMs = Math.min(this.maxBackoffMs, this.baseBackoffMs * Math.pow(2, attempt - 1));
+            await this.delayFn(backoffMs);
+          }
+        }
+      }
+      const finalErrorCode = classifySafeErrorCode(lastErr);
+      this.degraded = true;
+      this.consecutiveFailures += 1;
+      this.lastErrorCode = finalErrorCode;
+      this.logger.error("SHEETS_SYNC_DEGRADED_LAST_KNOWN_GOOD", {
+        source,
+        errorCode: finalErrorCode,
+        consecutiveFailures: this.consecutiveFailures,
+        hasLastKnownGood: this.lastKnownGood !== null,
+        lastUpdated: this.lastUpdatedIso
+      });
+      return {
+        status: "DEGRADED_FALLBACK",
+        payload: this.lastKnownGood,
+        unchanged: true,
+        degraded: true,
+        lastUpdated: this.lastUpdatedIso,
+        lastUpdatedCaracas: this.lastUpdatedCaracas,
+        cooldownRemainingSeconds: this.getCooldownRemainingSeconds(),
+        source
+      };
+    })();
+    try {
+      return await this.inFlightPromise;
+    } finally {
+      this.isSyncing = false;
+      this.inFlightPromise = null;
+    }
+  }
+};
+
 // server.ts
 init_vendorKeyNormalizer();
 
@@ -9987,34 +10272,52 @@ function requireAlkostoAccess(req, res, next) {
 var rateLimitMap = /* @__PURE__ */ new Map();
 function rateLimiter(windowMs, maxRequests, label) {
   return (req, res, next) => {
-    const userKey = (req.user?.username || req.ip || "anon") + ":" + label;
     const now = Date.now();
-    const record = rateLimitMap.get(userKey);
-    if (!record || now > record.resetTime) {
-      rateLimitMap.set(userKey, { count: 1, resetTime: now + windowMs });
-      return next();
+    if (rateLimitMap.size > 5e3) {
+      for (const [k, rec] of rateLimitMap.entries()) {
+        if (now > rec.resetTime) rateLimitMap.delete(k);
+      }
     }
-    if (record.count >= maxRequests) {
-      const waitSec = Math.ceil((record.resetTime - now) / 1e3);
-      return res.status(429).json({
-        success: false,
-        error: `L\xEDmite de solicitudes alcanzado para ${label}. Por favor espera ${waitSec} segundos.`
-      });
+    const clientIp = String(req.headers?.["x-forwarded-for"] || req.ip || req.socket?.remoteAddress || "unknown").split(",")[0].trim();
+    const keys = [
+      `ip:${clientIp}:${label}`,
+      ...req.user?.username ? [`usr:${String(req.user.username).toUpperCase()}:${label}`] : []
+    ];
+    for (const key of keys) {
+      const record = rateLimitMap.get(key);
+      if (record && now <= record.resetTime && record.count >= maxRequests) {
+        const waitSec = Math.ceil((record.resetTime - now) / 1e3);
+        res.setHeader("Retry-After", String(waitSec));
+        return res.status(429).json({
+          success: false,
+          error: `L\xEDmite de solicitudes alcanzado para ${label}. Por favor espera ${waitSec} segundos.`
+        });
+      }
     }
-    record.count++;
+    for (const key of keys) {
+      const record = rateLimitMap.get(key);
+      if (!record || now > record.resetTime) {
+        rateLimitMap.set(key, { count: 1, resetTime: now + windowMs });
+      } else {
+        record.count++;
+      }
+    }
     next();
   };
 }
 var cachedWorkbook = null;
 var lastWorkbookSha256 = "";
 var lastFetchTime = 0;
-var CACHE_TTL = 3e4;
+var CACHE_TTL = DEFAULT_SERVER_CACHE_TTL_MS;
 var SHEETS_AUTO_SYNC_INTERVAL_MS = (() => {
   const parsed = Number(process.env.SHEETS_SYNC_INTERVAL_MS);
   if (Number.isFinite(parsed) && parsed >= 3e4) return Math.round(parsed);
-  return 6e4;
+  return DEFAULT_SYNC_INTERVAL_MS;
 })();
 var lastSuccessfulSheetSyncAt = "";
+var lastSheetDegraded = false;
+var lastSheetCooldownRemaining = 0;
+var getLiveSchedulerMeta = null;
 var lastSheetSource = "memory";
 var lastSheetMetrics = {};
 var lastSheetWarnings = [];
@@ -10044,16 +10347,28 @@ function loadLocalMasterClientSeed() {
   }
   return [];
 }
-function setNoCacheSyncHeaders(res, source) {
+function setNoCacheSyncHeaders(res, source, options) {
+  const liveMeta = getLiveSchedulerMeta ? getLiveSchedulerMeta() : null;
+  const effectiveSyncAt = liveMeta?.lastUpdated || lastSuccessfulSheetSyncAt;
+  const effectiveCaracas = liveMeta?.lastUpdatedCaracas || formatCaracasTimestamp(effectiveSyncAt);
+  const isDegraded = options?.degraded ?? liveMeta?.degraded ?? lastSheetDegraded;
+  const cooldownRem = options?.cooldownRemainingSeconds ?? liveMeta?.cooldownRemainingSeconds ?? lastSheetCooldownRemaining;
   res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0");
   res.setHeader("Pragma", "no-cache");
   res.setHeader("Expires", "0");
   res.setHeader("Surrogate-Control", "no-store");
-  if (lastSuccessfulSheetSyncAt) {
-    res.setHeader("X-Last-Sync", lastSuccessfulSheetSyncAt);
+  if (effectiveSyncAt) {
+    res.setHeader("X-Last-Sync", effectiveSyncAt);
+    if (effectiveCaracas) {
+      res.setHeader("X-Last-Sync-Caracas", effectiveCaracas);
+    }
   }
   if (source || lastSheetSource) {
     res.setHeader("X-Sync-Source", source || lastSheetSource);
+  }
+  res.setHeader("X-Sync-Degraded", isDegraded ? "true" : "false");
+  if (cooldownRem > 0) {
+    res.setHeader("X-Sync-Cooldown-Remaining", String(cooldownRem));
   }
 }
 async function fetchGoogleSheetWithRetry(url, maxAttempts = 3) {
@@ -10087,12 +10402,13 @@ async function fetchGoogleSheetWithRetry(url, maxAttempts = 3) {
   }
   throw lastError || new Error("Fallo al descargar Google Sheet");
 }
-async function getWorkbook(force = false) {
+async function getWorkbook(force = false, options = {}) {
   if (!force && cachedWorkbook && Date.now() - lastFetchTime < CACHE_TTL) {
     return cachedWorkbook;
   }
   const XLSX2 = await import("xlsx");
   const sheetId = getGoogleSheetId();
+  let liveDownloadError = null;
   if (sheetId) {
     try {
       const exportUrl = buildGoogleSheetExportUrl(sheetId, "xlsx");
@@ -10103,6 +10419,7 @@ async function getWorkbook(force = false) {
       lastFetchTime = Date.now();
       lastSuccessfulSheetSyncAt = (/* @__PURE__ */ new Date()).toISOString();
       lastSheetSource = "live_google_sheet";
+      lastSheetDegraded = false;
       const localPath2 = import_path.default.join(process.cwd(), "sheet.xlsx");
       try {
         import_fs.default.writeFileSync(localPath2, nodeBuf);
@@ -10110,8 +10427,12 @@ async function getWorkbook(force = false) {
       }
       return cachedWorkbook;
     } catch (err) {
-      console.warn("[SERVER] No se pudo obtener XLSX en vivo desde Google Sheets:", err?.message);
+      liveDownloadError = err instanceof Error ? err : new Error("Fallo descargando Google Sheet");
+      console.warn("[SERVER] No se pudo obtener XLSX en vivo desde Google Sheets (se preserva Last-Known-Good si existe).");
     }
+  }
+  if (options.strictLive && liveDownloadError && cachedWorkbook) {
+    throw liveDownloadError;
   }
   const localPath = import_path.default.join(process.cwd(), "sheet.xlsx");
   if (import_fs.default.existsSync(localPath)) {
@@ -10134,7 +10455,7 @@ async function getWorkbook(force = false) {
     }
   }
   if (cachedWorkbook) return cachedWorkbook;
-  throw new Error("No se pudo cargar el libro de datos ni en l\xEDnea ni desde el respaldo local.");
+  throw liveDownloadError || new Error("No se pudo cargar el libro de datos ni en l\xEDnea ni desde el respaldo local.");
 }
 async function startServer() {
   const app2 = (0, import_express.default)();
@@ -10147,13 +10468,40 @@ async function startServer() {
     }
     next(err);
   });
+  const allowedCorsOrigins = /* @__PURE__ */ new Set([
+    "https://dashboard-fdv-planificador.onrender.com",
+    "https://trade-marketing-qi6j.onrender.com",
+    ...String(process.env.ALLOWED_CORS_ORIGINS || "").split(",").map((s) => s.trim()).filter(Boolean)
+  ]);
+  const isOriginAllowed = (origin) => {
+    if (allowedCorsOrigins.has(origin)) return true;
+    if (process.env.NODE_ENV !== "production") {
+      try {
+        const parsed = new URL(origin);
+        if ((parsed.protocol === "http:" || parsed.protocol === "https:") && (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1")) {
+          return true;
+        }
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  };
   app2.use((req, res, next) => {
-    res.header("Access-Control-Allow-Origin", "*");
-    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
-    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, Pragma, X-Idempotency-Key");
-    res.header("Access-Control-Expose-Headers", "X-Last-Sync, X-Sync-Source");
+    const requestOrigin = typeof req.headers.origin === "string" ? req.headers.origin.trim() : "";
+    res.header("Vary", "Origin");
+    if (requestOrigin) {
+      if (isOriginAllowed(requestOrigin)) {
+        res.header("Access-Control-Allow-Origin", requestOrigin);
+        res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
+        res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, Pragma, X-Idempotency-Key");
+        res.header("Access-Control-Expose-Headers", "X-Last-Sync, X-Last-Sync-Caracas, X-Sync-Source, X-Sync-Degraded, X-Sync-Cooldown-Remaining");
+      } else if (req.method === "OPTIONS") {
+        return res.status(403).json({ success: false, error: "Origen CORS no autorizado." });
+      }
+    }
     if (req.method === "OPTIONS") {
-      return res.sendStatus(200);
+      return res.sendStatus(204);
     }
     next();
   });
@@ -13344,7 +13692,7 @@ async function startServer() {
   let lastActivacionParsedTime = 0;
   let cachedMetasParsed = null;
   let lastMetasParsedTime = 0;
-  const PARSED_DATA_TTL = 5e4;
+  const PARSED_DATA_TTL = DEFAULT_SERVER_CACHE_TTL_MS;
   app2.get("/api/usuarios", (_req, res) => {
     return res.status(403).json({
       success: false,
@@ -13813,64 +14161,115 @@ async function startServer() {
       metrics: parsed.metrics
     };
   }
-  let inFlightSheetsSync = null;
-  let lastFullSheetsSyncCompletedAt = 0;
-  async function runCoalescedSheetsSync(forceRebuild = false, triggeredBy = "system") {
-    if (inFlightSheetsSync) {
-      return inFlightSheetsSync;
-    }
-    if (!forceRebuild && Date.now() - lastFullSheetsSyncCompletedAt < 4e3 && cachedVolumenParsed && cachedActivacionParsed && cachedMetasParsed) {
-      return {
-        status: "SKIPPED_UNCHANGED",
-        countVolumen: cachedVolumenParsed.length,
-        countActivacion: cachedActivacionParsed.length,
-        countMetas: cachedMetasParsed.length,
-        warningsCount: lastSheetWarnings.length,
-        auditLogsCount: lastSheetAuditLogs.length,
-        metrics: lastSheetMetrics
-      };
-    }
-    inFlightSheetsSync = (async () => {
-      try {
-        const workbook = await getWorkbook(true);
-        const periodo = metasPeriodoActual();
-        const prevHash = lastSyncedSha256ByPeriod.get(periodo);
-        if (!forceRebuild && prevHash && lastWorkbookSha256 && prevHash === lastWorkbookSha256 && cachedVolumenParsed && cachedActivacionParsed && cachedMetasParsed) {
-          lastFullSheetsSyncCompletedAt = Date.now();
-          return {
-            status: "SKIPPED_UNCHANGED",
+  const sheetsScheduler = new SheetsSyncScheduler({
+    syncIntervalMs: SHEETS_AUTO_SYNC_INTERVAL_MS,
+    cacheTtlMs: DEFAULT_SERVER_CACHE_TTL_MS,
+    manualCooldownMs: DEFAULT_MANUAL_COOLDOWN_MS,
+    maxRetries: 3,
+    baseBackoffMs: 500,
+    maxBackoffMs: 2e3,
+    isValidPayload: (p) => Boolean(p && (p.countVolumen > 0 || p.countActivacion > 0 || p.countMetas > 0)),
+    syncFn: async ({ forceRebuild }) => {
+      const hasExistingLiveCache = Boolean(
+        cachedVolumenParsed?.length && cachedActivacionParsed?.length && cachedMetasParsed?.length
+      );
+      const workbook = await getWorkbook(true, { strictLive: hasExistingLiveCache });
+      const periodo = metasPeriodoActual();
+      const prevHash = lastSyncedSha256ByPeriod.get(periodo);
+      if (!forceRebuild && prevHash && lastWorkbookSha256 && prevHash === lastWorkbookSha256 && cachedVolumenParsed && cachedActivacionParsed && cachedMetasParsed) {
+        lastVolumenParsedTime = Date.now();
+        lastActivacionParsedTime = Date.now();
+        lastMetasParsedTime = Date.now();
+        return {
+          unchanged: true,
+          syncedAt: lastSuccessfulSheetSyncAt || (/* @__PURE__ */ new Date()).toISOString(),
+          payload: {
             countVolumen: cachedVolumenParsed.length,
             countActivacion: cachedActivacionParsed.length,
             countMetas: cachedMetasParsed.length,
+            countDegustaciones: 0,
             warningsCount: lastSheetWarnings.length,
             auditLogsCount: lastSheetAuditLogs.length,
             metrics: lastSheetMetrics
-          };
-        }
-        const res = await syncWorkbookToSupabase(workbook);
-        lastFullSheetsSyncCompletedAt = Date.now();
-        return res;
-      } finally {
-        inFlightSheetsSync = null;
+          }
+        };
       }
-    })();
-    return inFlightSheetsSync;
+      const res = await syncWorkbookToSupabase(workbook);
+      return {
+        unchanged: false,
+        syncedAt: lastSuccessfulSheetSyncAt || (/* @__PURE__ */ new Date()).toISOString(),
+        payload: {
+          countVolumen: res.countVolumen,
+          countActivacion: res.countActivacion,
+          countMetas: res.countMetas,
+          countDegustaciones: res.countDegustaciones ?? 0,
+          warningsCount: res.warningsCount,
+          auditLogsCount: res.auditLogsCount ?? lastSheetAuditLogs.length,
+          metrics: res.metrics
+        }
+      };
+    }
+  });
+  getLiveSchedulerMeta = () => {
+    const st = sheetsScheduler.getStatus();
+    return {
+      degraded: st.degraded,
+      cooldownRemainingSeconds: st.cooldownRemainingSeconds,
+      lastUpdated: st.lastUpdated,
+      lastUpdatedCaracas: st.lastUpdatedCaracas
+    };
+  };
+  async function runCoalescedSheetsSync(forceRebuild = false, _triggeredBy = "system", source = "manual") {
+    const outcome = await sheetsScheduler.triggerSync({ source, forceRebuild });
+    lastSheetDegraded = outcome.degraded;
+    lastSheetCooldownRemaining = outcome.cooldownRemainingSeconds;
+    if (outcome.lastUpdated) {
+      lastSuccessfulSheetSyncAt = outcome.lastUpdated;
+    }
+    const payload = outcome.payload || {
+      countVolumen: cachedVolumenParsed?.length || 0,
+      countActivacion: cachedActivacionParsed?.length || 0,
+      countMetas: cachedMetasParsed?.length || 0,
+      countDegustaciones: 0,
+      warningsCount: lastSheetWarnings.length,
+      auditLogsCount: lastSheetAuditLogs.length,
+      metrics: lastSheetMetrics
+    };
+    return {
+      status: outcome.status,
+      degraded: outcome.degraded,
+      cooldownRemainingSeconds: outcome.cooldownRemainingSeconds,
+      lastUpdated: outcome.lastUpdated,
+      lastUpdatedCaracas: outcome.lastUpdatedCaracas,
+      ...payload
+    };
   }
   app2.post(
     "/api/sync/sheets",
     authenticateToken,
     requireSupervisorOrAdmin,
-    rateLimiter(6e4, 2, "manual-sheets-sync"),
+    rateLimiter(6e4, 4, "manual-sheets-sync"),
     async (req, res) => {
       try {
         const forceRebuild = req.body?.forceRebuild === true;
         console.log(`[SERVER] Sincronizaci\xF3n manual solicitada por ${req.user?.username || "supervisor/admin"} (forceRebuild=${forceRebuild})...`);
-        const result = await runCoalescedSheetsSync(forceRebuild, String(req.user?.username || "ADMIN"));
-        setNoCacheSyncHeaders(res);
+        const result = await runCoalescedSheetsSync(forceRebuild, String(req.user?.username || "ADMIN"), "manual");
+        setNoCacheSyncHeaders(res, void 0, {
+          degraded: result.degraded,
+          cooldownRemainingSeconds: result.cooldownRemainingSeconds
+        });
+        const messageByStatus = {
+          SKIPPED_UNCHANGED: "El libro de Google Sheets no presenta cambios (SHA-256 id\xE9ntico); cero escrituras redundantes.",
+          COOLDOWN_CACHED: `\xDAltima sincronizaci\xF3n reciente. Usando cach\xE9 vigente (pr\xF3xima consulta directa habilitada en ${result.cooldownRemainingSeconds}s).`,
+          DEGRADED_FALLBACK: "Google Sheets no respondi\xF3 temporalmente. Se conserva el \xFAltimo estado v\xE1lido en cach\xE9.",
+          OK: "Sincronizaci\xF3n con Google Sheets y Supabase completada con \xE9xito"
+        };
         res.json({
           success: true,
           status: result.status,
-          message: result.status === "SKIPPED_UNCHANGED" ? "El libro de Google Sheets no presenta cambios (SHA-256 id\xE9ntico); cero escrituras redundantes." : "Sincronizaci\xF3n con Google Sheets y Supabase completada con \xE9xito",
+          degraded: result.degraded,
+          cooldownRemainingSeconds: result.cooldownRemainingSeconds,
+          message: messageByStatus[result.status] || messageByStatus.OK,
           source: lastSheetSource,
           periodo: metasPeriodoActual(),
           countVolumen: result.countVolumen,
@@ -13879,23 +14278,40 @@ async function startServer() {
           countDegustaciones: result.countDegustaciones ?? 0,
           warningsCount: result.warningsCount,
           auditLogsCount: result.auditLogsCount ?? lastSheetAuditLogs.length,
-          timestamp: lastSuccessfulSheetSyncAt || (/* @__PURE__ */ new Date()).toISOString()
+          timestamp: result.lastUpdated || lastSuccessfulSheetSyncAt || (/* @__PURE__ */ new Date()).toISOString(),
+          timestampCaracas: result.lastUpdatedCaracas || formatCaracasTimestamp(lastSuccessfulSheetSyncAt || /* @__PURE__ */ new Date())
         });
       } catch (err) {
-        console.error("[SERVER] Error en /api/sync/sheets:", err);
-        res.status(500).json({ success: false, error: "Error sincronizando datos de Google Sheets", details: err?.message });
+        console.error("[SERVER] Error en /api/sync/sheets:", err?.message || "sync_error");
+        res.status(500).json({
+          success: false,
+          error: "Error temporal al sincronizar con Google Sheets. Se conserva la \xFAltima instant\xE1nea v\xE1lida."
+        });
       }
     }
   );
   app2.get("/api/sync/status", authenticateToken, (req, res) => {
-    setNoCacheSyncHeaders(res);
+    const sched = sheetsScheduler.getStatus();
+    setNoCacheSyncHeaders(res, void 0, {
+      degraded: sched.degraded,
+      cooldownRemainingSeconds: sched.cooldownRemainingSeconds
+    });
     const isPrivileged = req.user?.role === "ADMIN" || Boolean(getSupervisorProfile(req.user?.username));
+    const effectiveUpdated = sched.lastUpdated || lastSuccessfulSheetSyncAt || null;
     res.json({
       success: true,
       periodo: metasPeriodoActual(),
-      lastSyncAt: lastSuccessfulSheetSyncAt || null,
+      isSyncing: sched.isSyncing,
+      degraded: sched.degraded,
+      lastSyncAt: effectiveUpdated,
+      lastUpdated: effectiveUpdated,
+      lastUpdatedCaracas: sched.lastUpdatedCaracas || formatCaracasTimestamp(effectiveUpdated),
       source: lastSheetSource,
-      syncIntervalSeconds: Math.round(SHEETS_AUTO_SYNC_INTERVAL_MS / 1e3),
+      syncIntervalSeconds: Math.round(sched.syncIntervalMs / 1e3),
+      cacheTtlSeconds: Math.round(sched.cacheTtlMs / 1e3),
+      cooldownSeconds: Math.round(sched.manualCooldownMs / 1e3),
+      cooldownRemainingSeconds: sched.cooldownRemainingSeconds,
+      consecutiveFailures: sched.consecutiveFailures,
       metrics: lastSheetMetrics,
       dataQuality: lastSheetDataQuality,
       warningsCount: lastSheetWarnings.length,
@@ -15432,29 +15848,34 @@ async function startServer() {
       }
     }
   }
+  let activeHttpServer = null;
+  let shutdownRegistered = false;
+  const registerGracefulShutdown = () => {
+    if (shutdownRegistered) return;
+    shutdownRegistered = true;
+    const handleSignal = (signal) => {
+      console.log(`[SERVER] Se\xF1al ${signal} recibida. Deteniendo planificador 60s y cerrando conexiones HTTP...`);
+      sheetsScheduler.stop();
+      if (activeHttpServer) {
+        const forceExit = setTimeout(() => process.exit(0), 5e3);
+        if (typeof forceExit?.unref === "function") forceExit.unref();
+        activeHttpServer.close(() => {
+          clearTimeout(forceExit);
+          process.exit(0);
+        });
+      } else {
+        process.exit(0);
+      }
+    };
+    process.once("SIGTERM", () => handleSignal("SIGTERM"));
+    process.once("SIGINT", () => handleSignal("SIGINT"));
+  };
   const tryListen = (portToTry) => {
     const serverInstance = app2.listen(portToTry, "0.0.0.0", () => {
+      activeHttpServer = serverInstance;
       console.log(`Server running on port ${portToTry}`);
-      let autoSyncTimer = null;
-      const runAutoSync = async () => {
-        try {
-          const res = await runCoalescedSheetsSync(false, "CRON");
-          if (res.status !== "SKIPPED_UNCHANGED") {
-            console.log(`[SYNC AUTO] Sincronizaci\xF3n espejo exitosa (${lastSheetSource}). Volumen: ${res.countVolumen}, Activaci\xF3n: ${res.countActivacion}, Metas: ${res.countMetas}`);
-          }
-        } catch (err) {
-          console.warn("[SYNC AUTO] Error en sincronizaci\xF3n peri\xF3dica desde Google Sheet:", err?.message);
-        } finally {
-          autoSyncTimer = setTimeout(runAutoSync, SHEETS_AUTO_SYNC_INTERVAL_MS);
-          if (typeof autoSyncTimer?.unref === "function") {
-            autoSyncTimer.unref();
-          }
-        }
-      };
-      autoSyncTimer = setTimeout(runAutoSync, 3e3);
-      if (typeof autoSyncTimer?.unref === "function") {
-        autoSyncTimer.unref();
-      }
+      registerGracefulShutdown();
+      sheetsScheduler.start({ initialDelayMs: 3e3 });
     });
     serverInstance.on("error", (err) => {
       if (err.code === "EADDRINUSE") {
