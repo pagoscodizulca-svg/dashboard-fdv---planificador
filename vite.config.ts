@@ -27,6 +27,9 @@ export default defineConfig(() => {
       },
     },
     build: {
+      target: 'es2020',
+      sourcemap: false,
+      reportCompressedSize: false,
       chunkSizeWarningLimit: 1500,
       rollupOptions: {
         output: {

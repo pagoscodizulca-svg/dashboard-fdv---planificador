@@ -552,9 +552,30 @@ async function startServer() {
     next();
   });
 
-  // Health check
-  app.get("/api/health", (req, res) => {
-    res.json({ status: "ok" });
+  const SERVER_STARTED_AT_ISO = new Date().toISOString();
+  const APP_DEPLOY_COMMIT = String(process.env.RENDER_GIT_COMMIT || process.env.GIT_COMMIT || 'local').trim().slice(0, 12);
+  const APP_DEPLOY_BRANCH = String(process.env.RENDER_GIT_BRANCH || 'master').trim();
+  let getHealthSyncSummary: (() => {
+    lastSyncAt: string | null;
+    lastSyncCaracas: string | null;
+    isSyncing: boolean;
+    degraded: boolean;
+    trackedSellers: number;
+  }) | null = null;
+
+  // Health check con observabilidad de versión desplegada en Render (cero secretos)
+  app.get("/api/health", (_req, res) => {
+    const syncSummary = getHealthSyncSummary ? getHealthSyncSummary() : null;
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('X-App-Commit', APP_DEPLOY_COMMIT);
+    res.json({
+      status: "ok",
+      commit: APP_DEPLOY_COMMIT,
+      branch: APP_DEPLOY_BRANCH,
+      startedAt: SERVER_STARTED_AT_ISO,
+      uptimeSeconds: Math.round(process.uptime()),
+      sync: syncSummary
+    });
   });
 
   // ==============================================================
@@ -5216,6 +5237,17 @@ async function startServer() {
     };
   };
 
+  getHealthSyncSummary = () => {
+    const st = sheetsScheduler.getStatus();
+    return {
+      lastSyncAt: st.lastUpdated || lastSuccessfulSheetSyncAt || null,
+      lastSyncCaracas: st.lastUpdatedCaracas || formatCaracasTimestamp(lastSuccessfulSheetSyncAt),
+      isSyncing: st.isSyncing,
+      degraded: st.degraded,
+      trackedSellers: sellerNumericTracker.getStateSize()
+    };
+  };
+
   async function runCoalescedSheetsSync(
     forceRebuild = false,
     _triggeredBy = 'system',
@@ -7197,9 +7229,21 @@ async function startServer() {
   if (!isDevMode && distIndexExists) {
     app.use(
       express.static(distPath, {
+        etag: true,
+        lastModified: true,
         setHeaders: (res, filePath) => {
-          if (filePath.endsWith('index.html')) {
+          const normalized = filePath.replace(/\\/g, '/');
+          res.setHeader('X-App-Commit', APP_DEPLOY_COMMIT);
+          if (
+            normalized.endsWith('/index.html') ||
+            normalized.endsWith('/sw.js') ||
+            normalized.endsWith('/manifest.webmanifest')
+          ) {
             res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+            res.setHeader('Pragma', 'no-cache');
+            res.setHeader('Expires', '0');
+          } else if (normalized.includes('/assets/')) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
           }
         }
       })
@@ -7208,7 +7252,10 @@ async function startServer() {
       if (req.path.startsWith('/assets/')) {
         return res.status(404).end();
       }
+      res.setHeader('X-App-Commit', APP_DEPLOY_COMMIT);
       res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   } else {

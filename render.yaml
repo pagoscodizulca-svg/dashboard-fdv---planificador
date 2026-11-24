@@ -1,14 +1,25 @@
 services:
   - type: web
-    name: dashboard-fdv
+    name: dashboard-fdv---planificador
     env: node
     plan: free
-    buildCommand: npm install && npm run build
+    branch: master
+    autoDeploy: true
+    healthCheckPath: /api/health
+    buildCommand: npm ci --include=dev --no-audit --no-fund && npm run build
     startCommand: npm start
     envVars:
+      - key: NODE_ENV
+        value: production
       - key: NODE_VERSION
         value: 22
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=384
+      - key: SHEETS_SYNC_INTERVAL_MS
+        value: "60000"
       - key: GOOGLE_SHEET_ID
+        sync: false
+      - key: SYNC_SECRET_TOKEN
         sync: false
       - key: SUPABASE_URL
         sync: false

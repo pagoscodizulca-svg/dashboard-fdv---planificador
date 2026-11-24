@@ -30,7 +30,9 @@
       });
       if ('serviceWorker' in navigator) {
         window.addEventListener('load', function () {
-          navigator.serviceWorker.register('/sw.js').catch(function (err) {
+          navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).then(function (reg) {
+            reg.update().catch(function () {});
+          }).catch(function (err) {
             console.warn('SW registration warning:', err);
           });
         });
