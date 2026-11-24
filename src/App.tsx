@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo, useCallback, useRef, Suspense, lazy } from 'react';
-import { Role, VolumenData, ActivacionData } from './types';
+import { Role, Sucursal, VolumenData, ActivacionData } from './types';
 import {
   DEFAULT_SHEETS_CACHE_TTL_MS,
   SHEETS_AUTO_REFRESH_INTERVAL_MS,
@@ -13,10 +13,18 @@ import {
   getLastSyncMetadata,
   SheetsSyncMeta
 } from './services/googleSheetsService';
-import { Lock, User as UserIcon, AlertCircle, ShieldCheck } from 'lucide-react';
+import { Lock, User as UserIcon, AlertCircle, ShieldCheck, Building2 } from 'lucide-react';
 import { Target, Package, Users, UserCircle, ScanText, ChevronDown, LogOut, Activity, Route, Sparkles, ShoppingCart, Database } from 'lucide-react';
 import { supabase, hasValidSupabaseConfig } from './lib/supabase';
-import { verifyServerSession, clearAuthSession, saveAuthSession } from './services/authService';
+import {
+  verifyServerSession,
+  clearAuthSession,
+  saveAuthSession,
+  getStoredSucursal,
+  setStoredSucursal,
+  getAuthHeaders
+} from './services/authService';
+import { normalizeSucursal } from './utils/sucursalScope';
 import { 
   getVendorProfile, 
   getSupervisorProfile,
@@ -173,6 +181,12 @@ export default function App() {
     }
     return '';
   });
+  const [activeSucursal, setActiveSucursal] = useState<Sucursal>(() => {
+    if (isIncomingWhatsAppShare() && localStorage.getItem('dashboard_fdv_token')) {
+      return getStoredSucursal() || 'OCCIDENTE';
+    }
+    return 'OCCIDENTE';
+  });
   const [permissionNotice, setPermissionNotice] = useState<string | null>(null);
   const [activeVendedorId, setActiveVendedorId] = useState<string>(() => {
     if (isIncomingWhatsAppShare() && localStorage.getItem('dashboard_fdv_token')) {
@@ -191,6 +205,7 @@ export default function App() {
   const [activacionData, setActivacionData] = useState<any[]>([]);
   const [metasActivacion, setMetasActivacion] = useState<any[]>([]);
   const [degustacionesList, setDegustacionesList] = useState<Degustacion[]>([]);
+  const [catalogVersion, setCatalogVersion] = useState<number>(0);
   const [loading, setLoading] = useState(false);
   const [isManualSyncing, setIsManualSyncing] = useState(false);
   const [isBackgroundSyncing, setIsBackgroundSyncing] = useState(false);
@@ -274,15 +289,26 @@ export default function App() {
         setUserRole(sessionRes.user.role);
         setLoggedInVendor(sessionRes.user.username);
         setLoggedInVendorId(String(sessionRes.user.vendorId ?? ''));
+        const verifiedSuc: Sucursal = normalizeSucursal(sessionRes.user.sucursal) || 'OCCIDENTE';
+        setActiveSucursal((prev) => {
+          if (sessionRes.user!.role === 'ADMIN') {
+            return getStoredSucursal() || verifiedSuc || prev;
+          }
+          setStoredSucursal(verifiedSuc);
+          return verifiedSuc;
+        });
         if (sessionRes.user.role === 'ADMIN') {
           setActiveVendedorId(localStorage.getItem('dashboard_fdv_active_route') || 'ADMIN');
+        } else if (sessionRes.user.role === 'COORDINADORA') {
+          setActiveVendedorId('COORDINADORA_ALL');
+          setActiveTab('DEGUSTACIONES');
         } else if (sessionRes.user.role === 'SUPERVISOR') {
           const supProf = getSupervisorProfile(sessionRes.user.username);
           const defaultRoute = `SUPERVISOR:${supProf?.canonicalUsername || sessionRes.user.username}`;
           const savedRoute = localStorage.getItem('dashboard_fdv_active_route');
           setActiveVendedorId(savedRoute || defaultRoute);
         } else {
-          const profile = getVendorProfile(sessionRes.user.username);
+          const profile = getVendorProfile(sessionRes.user.username, verifiedSuc);
           const initialRoute = profile.routes.length > 1 ? 'ALL_MY_ROUTES' : (profile.routes[0]?.id || profile.canonicalUsername);
           setActiveVendedorId(initialRoute);
         }
@@ -300,11 +326,11 @@ export default function App() {
     return getSupervisorProfile(loggedInVendor);
   }, [userRole, loggedInVendor]);
 
-  // Perfil del vendedor logueado (garantiza privacidad total)
+  // Perfil del vendedor logueado (garantiza privacidad total y sucursal autoritativa)
   const currentVendorProfile = useMemo(() => {
-    if (userRole === 'ADMIN' || userRole === 'SUPERVISOR') return null;
-    return getVendorProfile(loggedInVendor);
-  }, [userRole, loggedInVendor]);
+    if (userRole === 'ADMIN' || userRole === 'SUPERVISOR' || userRole === 'COORDINADORA') return null;
+    return getVendorProfile(loggedInVendor, activeSucursal);
+  }, [userRole, loggedInVendor, activeSucursal, catalogVersion]);
 
   // Protección de acceso: asegurar que un vendedor o supervisor NUNCA esté en una ruta ajena
   useEffect(() => {
@@ -575,11 +601,15 @@ export default function App() {
     }
 
     const catalogController = new AbortController();
-    fetch('/api/catalog/vendors', { signal: catalogController.signal })
+    fetch(`/api/catalog/vendors?sucursal=${encodeURIComponent(activeSucursal)}`, {
+      signal: catalogController.signal,
+      headers: getAuthHeaders({ activeSucursal })
+    })
       .then((res) => (res.ok ? res.json() : null))
       .then((cat) => {
         if (cat && Array.isArray(cat.vendedores)) {
           hydrateVendorProfilesFromMasterCatalog(cat.vendedores);
+          setCatalogVersion((v) => v + 1);
         }
         if (cat?.syncedAt) {
           const prevSync = localStorage.getItem('fdv_master_catalog_sync_version');
@@ -632,7 +662,7 @@ export default function App() {
         autoSyncIntervalRef.current = null;
       }
     };
-  }, [isLoggedIn, loadData, resetAutoSyncTimer]);
+  }, [isLoggedIn, activeSucursal, loadData, resetAutoSyncTimer]);
 
   // Suscripción en tiempo real (SSE + respaldo de reconexión) por vendedor:
   // solo actualiza y muestra "Tus datos han sido actualizados con éxito" (5000 ms exactos) cuando cambian sus números.
@@ -656,7 +686,7 @@ export default function App() {
     onDataUpdated: handleLiveSellerDataUpdated
   });
 
-  // Suscripción a degustaciones ESTRICTAMENTE tras iniciar sesión (evita llamadas no autenticadas en pantalla de login)
+  // Suscripción a degustaciones ESTRICTAMENTE tras iniciar sesión y delimitada por activeSucursal
   useEffect(() => {
     if (!isLoggedIn) {
       setDegustacionesList([]);
@@ -664,11 +694,11 @@ export default function App() {
     }
     const unsubscribeDeg = subscribeDegustaciones((data) => {
       setDegustacionesList(data);
-    });
+    }, activeSucursal);
     return () => {
       unsubscribeDeg();
     };
-  }, [isLoggedIn]);
+  }, [isLoggedIn, activeSucursal]);
 
   // Sesión de autenticación Supabase
   useEffect(() => {
@@ -710,6 +740,9 @@ export default function App() {
       }
 
       const role: Role = data.user.role;
+      const loginSucursal: Sucursal = normalizeSucursal(data?.user?.sucursal) || 'OCCIDENTE';
+      setActiveSucursal(loginSucursal);
+      setStoredSucursal(loginSucursal);
       let initialRoute = 'ADMIN';
 
       if (role === 'ADMIN') {
@@ -719,6 +752,16 @@ export default function App() {
         localStorage.setItem('dashboard_fdv_role', 'ADMIN');
         localStorage.setItem('dashboard_fdv_vendor', 'ADMIN');
         localStorage.setItem('dashboard_fdv_active_route', 'ADMIN');
+      } else if (role === 'COORDINADORA') {
+        const coordName = String(data?.user?.displayName || data?.user?.username || usuarioUpper).toUpperCase().trim();
+        initialRoute = 'COORDINADORA_ALL';
+        setUserRole('COORDINADORA');
+        setLoggedInVendor(coordName);
+        setActiveVendedorId(initialRoute);
+        setActiveTab('DEGUSTACIONES');
+        localStorage.setItem('dashboard_fdv_role', 'COORDINADORA');
+        localStorage.setItem('dashboard_fdv_vendor', coordName);
+        localStorage.setItem('dashboard_fdv_active_route', initialRoute);
       } else if (role === 'SUPERVISOR') {
         const supProf = getSupervisorProfile(usuarioUpper);
         const canonicalSup = supProf?.canonicalUsername || usuarioUpper;
@@ -730,12 +773,13 @@ export default function App() {
         localStorage.setItem('dashboard_fdv_vendor', canonicalSup);
         localStorage.setItem('dashboard_fdv_active_route', initialRoute);
       } else {
-        const profile = getVendorProfile(usuarioUpper);
+        const profile = getVendorProfile(data?.user?.displayName || usuarioUpper, loginSucursal);
+        const serverRuta = String(data?.user?.ruta || '').trim();
         setUserRole('VENDEDOR');
         setLoggedInVendor(profile.canonicalUsername);
         initialRoute = profile.routes.length > 1 
           ? 'ALL_MY_ROUTES' 
-          : (profile.routes[0]?.id || profile.canonicalUsername);
+          : (serverRuta || profile.routes[0]?.id || profile.canonicalUsername);
         if (usuarioUpper.includes('VILLA') && profile.routes.some(r => r.id.includes('VILLA'))) {
           initialRoute = profile.routes.find(r => r.id.includes('VILLA'))?.id || initialRoute;
         } else if ((usuarioUpper.includes('JOHNATAN') || usuarioUpper.includes('SOTO') || usuarioUpper.includes('DIAZ1')) && !usuarioUpper.includes('VILLA')) {
@@ -799,6 +843,7 @@ export default function App() {
     setAuthPassword('');
     setLoginError('');
     setUserRole('VENDEDOR');
+    setActiveSucursal('OCCIDENTE');
     setLoggedInVendor('');
     setLoggedInVendorId('');
     setActiveVendedorId('');
@@ -815,32 +860,44 @@ export default function App() {
     localStorage.setItem('dashboard_fdv_active_route', newRouteId);
   };
 
-  // Opciones permitidas en el selector:
-  // Si es VENDEDOR: NUNCA ve compañeros, solo sus rutas asignadas
-  // Si es SUPERVISOR: ve su zona supervisada consolidada y los vendedores a su cargo
-  // Si es ADMIN: ve todas las rutas y supervisores para auditoría y supervisión
+  const handleAdminSucursalChange = (nextSucursal: Sucursal) => {
+    if (userRole !== 'ADMIN' || nextSucursal === activeSucursal) return;
+    setActiveSucursal(nextSucursal);
+    setStoredSucursal(nextSucursal);
+    setActiveVendedorId('ADMIN');
+    localStorage.setItem('dashboard_fdv_active_route', 'ADMIN');
+  };
+
+  // Opciones permitidas en el selector (estrictamente delimitadas por activeSucursal):
+  // Si es VENDEDOR: NUNCA ve compañeros ni otra sucursal, solo sus rutas asignadas
+  // Si es SUPERVISOR: ve su zona supervisada consolidada y los vendedores a su cargo en su sucursal
+  // Si es COORDINADORA: ve todas las rutas/vendedores exclusivamente de su sucursal
+  // Si es ADMIN: ve las rutas y supervisores de la sucursal activa seleccionada
   const allowedDropdownOptions = useMemo(() => {
     if (userRole === 'ADMIN') {
       const adminOptions: { value: string; label: string }[] = [
-        { value: 'ADMIN', label: 'TODOS LOS VENDEDORES (EMPRESA COMPLETA)' }
+        { value: 'ADMIN', label: `TODOS LOS VENDEDORES (SEDE ${activeSucursal})` }
       ];
 
-      Object.values(SUPERVISOR_PROFILES).forEach(sup => {
-        const assignedNames = sup.supervisedVendors.map((vk) => VENDOR_PROFILES[vk]?.displayName || vk);
-        const summaryLabel =
-          assignedNames.length <= 3
-            ? assignedNames.join(', ')
-            : `${assignedNames.length} vendedores asignados`;
-        adminOptions.push({
-          value: `SUPERVISOR:${sup.canonicalUsername}`,
-          label: `👥 Supervisor: ${sup.displayName} (${summaryLabel})`
+      Object.values(SUPERVISOR_PROFILES)
+        .filter((sup) => (sup.sucursal || 'OCCIDENTE') === activeSucursal)
+        .forEach(sup => {
+          const assignedNames = sup.supervisedVendors.map((vk) => VENDOR_PROFILES[vk]?.displayName || vk);
+          const summaryLabel =
+            assignedNames.length <= 3
+              ? assignedNames.join(', ')
+              : `${assignedNames.length} vendedores asignados`;
+          adminOptions.push({
+            value: `SUPERVISOR:${sup.canonicalUsername}`,
+            label: `👥 Supervisor: ${sup.displayName} (${summaryLabel})`
+          });
         });
-      });
 
       const seenProfiles = new Set<string>();
       const distinctProfiles: VendorProfile[] = [];
 
       Object.values(VENDOR_PROFILES).forEach(prof => {
+        if ((prof.sucursal || 'OCCIDENTE') !== activeSucursal) return;
         if (!seenProfiles.has(prof.canonicalUsername)) {
           seenProfiles.add(prof.canonicalUsername);
           distinctProfiles.push(prof);
@@ -865,6 +922,28 @@ export default function App() {
       return adminOptions;
     }
 
+    if (userRole === 'COORDINADORA') {
+      const coordOptions: { value: string; label: string }[] = [
+        { value: 'COORDINADORA_ALL', label: `TODAS LAS RUTAS (SEDE ${activeSucursal})` }
+      ];
+      const seenProfiles = new Set<string>();
+      const distinctProfiles: VendorProfile[] = [];
+      Object.values(VENDOR_PROFILES).forEach(prof => {
+        if ((prof.sucursal || 'OCCIDENTE') !== activeSucursal) return;
+        if (!seenProfiles.has(prof.canonicalUsername)) {
+          seenProfiles.add(prof.canonicalUsername);
+          distinctProfiles.push(prof);
+        }
+      });
+      distinctProfiles.sort((a, b) => a.displayName.localeCompare(b.displayName));
+      distinctProfiles.forEach(prof => {
+        if (prof.routes.length >= 1) {
+          coordOptions.push({ value: prof.routes[0].id, label: `👤 ${prof.displayName}` });
+        }
+      });
+      return coordOptions;
+    }
+
     if (userRole === 'SUPERVISOR' && currentSupervisorProfile) {
       const supOptions: { value: string; label: string }[] = [
         {
@@ -875,7 +954,7 @@ export default function App() {
 
       currentSupervisorProfile.supervisedVendors.forEach(vendorKey => {
         const prof = VENDOR_PROFILES[vendorKey];
-        if (!prof) return;
+        if (!prof || (prof.sucursal || 'OCCIDENTE') !== activeSucursal) return;
         if (prof.routes.length > 1) {
           supOptions.push({
             value: `CONSOLIDATED:${prof.canonicalUsername}`,
@@ -894,7 +973,9 @@ export default function App() {
 
     // PRIVACIDAD ESTRICTA PARA VENDEDORES
     if (!currentVendorProfile) return [];
-    const routes = currentVendorProfile.routes || [];
+    const routes = (currentVendorProfile.routes || []).filter(
+      (r) => !r.sucursal || r.sucursal === activeSucursal
+    );
     if (routes.length > 1) {
       return [
         { 
@@ -905,12 +986,13 @@ export default function App() {
       ];
     }
     return routes.map(r => ({ value: r.id, label: r.label }));
-  }, [userRole, currentVendorProfile, currentSupervisorProfile]);
+  }, [userRole, currentVendorProfile, currentSupervisorProfile, activeSucursal, catalogVersion]);
 
   // Nombre legible del vendedor o ruta activa
   const activeVendedorDisplayName = useMemo(() => {
-    if (userRole === 'ADMIN' || userRole === 'SUPERVISOR') {
-      if (activeVendedorId === 'ADMIN') return 'TODOS LOS VENDEDORES';
+    if (userRole === 'ADMIN' || userRole === 'SUPERVISOR' || userRole === 'COORDINADORA') {
+      if (activeVendedorId === 'ADMIN') return `TODOS LOS VENDEDORES (${activeSucursal})`;
+      if (activeVendedorId === 'COORDINADORA_ALL') return `COORDINACIÓN TRADE MARKETING (${activeSucursal})`;
       if (activeVendedorId.startsWith('SUPERVISOR:')) {
         const rawSup = activeVendedorId.replace('SUPERVISOR:', '');
         const supProf = getSupervisorProfile(rawSup);
@@ -920,10 +1002,11 @@ export default function App() {
       }
       if (activeVendedorId.startsWith('CONSOLIDATED:')) {
         const rawTarget = activeVendedorId.replace('CONSOLIDATED:', '');
-        const prof = getVendorProfile(rawTarget);
+        const prof = getVendorProfile(rawTarget, activeSucursal);
         return prof ? `${prof.displayName} (TODAS LAS RUTAS)` : rawTarget;
       }
       for (const prof of Object.values(VENDOR_PROFILES)) {
+        if ((prof.sucursal || 'OCCIDENTE') !== activeSucursal) continue;
         const found = prof.routes.find(r => r.id === activeVendedorId);
         if (found) {
           return prof.displayName.toUpperCase() === found.label.toUpperCase()
@@ -943,19 +1026,32 @@ export default function App() {
     return currentVendorProfile.displayName.toUpperCase() === route.label.toUpperCase()
       ? route.label
       : `${currentVendorProfile.displayName} - ${route.label}`;
-  }, [userRole, activeVendedorId, currentVendorProfile, allowedDropdownOptions]);
+  }, [userRole, activeVendedorId, currentVendorProfile, allowedDropdownOptions, activeSucursal, catalogVersion]);
 
-  // Filtrado 100% seguro y estricto
+  // Filtrado 100% seguro y estricto por ruta y sucursal activa
+  // Nota: las hojas históricas locales (Google Sheets Codizulca) pertenecen a OCCIDENTE salvo que el registro declare sucursal explícita.
   const filteredVolumen = useMemo(() => {
-    return volumenData.filter(d => isRouteMatch(d.vendedorId, activeVendedorId, loggedInVendor, userRole));
-  }, [volumenData, activeVendedorId, loggedInVendor, userRole]);
+    return volumenData.filter(d => {
+      const recordSuc = normalizeSucursal((d as any).sucursal) || 'OCCIDENTE';
+      if (recordSuc !== activeSucursal) return false;
+      return isRouteMatch(d.vendedorId, activeVendedorId, loggedInVendor, userRole, activeSucursal);
+    });
+  }, [volumenData, activeVendedorId, loggedInVendor, userRole, activeSucursal]);
 
   const filteredActivacion = useMemo(() => {
-    return activacionData.filter(d => isRouteMatch(d.vendedorId, activeVendedorId, loggedInVendor, userRole));
-  }, [activacionData, activeVendedorId, loggedInVendor, userRole]);
+    return activacionData.filter(d => {
+      const recordSuc = normalizeSucursal((d as any).sucursal) || 'OCCIDENTE';
+      if (recordSuc !== activeSucursal) return false;
+      return isRouteMatch(d.vendedorId, activeVendedorId, loggedInVendor, userRole, activeSucursal);
+    });
+  }, [activacionData, activeVendedorId, loggedInVendor, userRole, activeSucursal]);
 
   const filteredMetas = useMemo(() => {
-    const exactMatches = metasActivacion.filter(m => isRouteMatch(m.vendedorId, activeVendedorId, loggedInVendor, userRole));
+    const branchMetas = metasActivacion.filter(m => {
+      const recordSuc = normalizeSucursal((m as any).sucursal) || 'OCCIDENTE';
+      return recordSuc === activeSucursal;
+    });
+    const exactMatches = branchMetas.filter(m => isRouteMatch(m.vendedorId, activeVendedorId, loggedInVendor, userRole, activeSucursal));
     if (exactMatches.length > 0) return exactMatches;
 
     // Si es una vista de supervisor consolidada
@@ -963,55 +1059,68 @@ export default function App() {
       const supName = activeVendedorId.replace(/^SUPERVISOR:/, '');
       const supAliases = getSupervisedAliases(supName);
       if (supAliases.length > 0) {
-        return metasActivacion.filter(m => matchesVendorAlias(supAliases, m.vendedorId));
+        return branchMetas.filter(m => matchesVendorAlias(supAliases, m.vendedorId));
       }
     }
 
     // Si no hay fila exacta para la sub-ruta seleccionada en el grid de metas, asociar con el perfil correspondiente
     if (userRole === 'VENDEDOR' && currentVendorProfile) {
       const allAliases = [currentVendorProfile.canonicalUsername, currentVendorProfile.displayName, ...currentVendorProfile.routes.flatMap(r => r.aliases)];
-      return metasActivacion.filter(m => matchesVendorAlias(allAliases, m.vendedorId));
+      return branchMetas.filter(m => matchesVendorAlias(allAliases, m.vendedorId));
     }
-    if ((userRole === 'ADMIN' || userRole === 'SUPERVISOR') && activeVendedorId !== 'ADMIN') {
+    if ((userRole === 'ADMIN' || userRole === 'SUPERVISOR' || userRole === 'COORDINADORA') && activeVendedorId !== 'ADMIN' && activeVendedorId !== 'COORDINADORA_ALL') {
       const rawTarget = activeVendedorId.replace(/^CONSOLIDATED:/, '');
-      const prof = getVendorProfile(rawTarget);
+      const prof = getVendorProfile(rawTarget, activeSucursal);
       if (prof) {
         const allAliases = [prof.canonicalUsername, prof.displayName, ...prof.routes.flatMap(r => r.aliases)];
-        return metasActivacion.filter(m => matchesVendorAlias(allAliases, m.vendedorId));
+        return branchMetas.filter(m => matchesVendorAlias(allAliases, m.vendedorId));
       }
     }
     return [];
-  }, [metasActivacion, activeVendedorId, loggedInVendor, userRole, currentVendorProfile]);
+  }, [metasActivacion, activeVendedorId, loggedInVendor, userRole, currentVendorProfile, activeSucursal]);
 
-  // Cartera completa de clientes correspondientes a cada vendedor desde la base de datos
+  // Cartera de respaldo local de clientes correspondientes a cada vendedor (estrictamente filtrada por activeSucursal;
+  // en CENTRO devuelve [] para que DegustacionesTab opere 100% sobre public.clientes filtrados por sucursal en Supabase)
   const clientesParaDegustaciones = useMemo(() => {
+    if (activeSucursal !== 'OCCIDENTE') {
+      return [];
+    }
     const map = new Map<string, any>();
 
     // 1. Clientes desde Activación
-    const baseAct = userRole === 'ADMIN'
-      ? (activeVendedorId === 'ADMIN' ? activacionData : activacionData.filter(d => isRouteMatch(d.vendedorId, activeVendedorId, loggedInVendor, userRole)))
-      : activacionData.filter(d => isRouteMatch(d.vendedorId, 'ALL_MY_ROUTES', loggedInVendor, userRole));
+    const baseAct = (userRole === 'ADMIN' || userRole === 'COORDINADORA')
+      ? ((activeVendedorId === 'ADMIN' || activeVendedorId === 'COORDINADORA_ALL')
+          ? activacionData
+          : activacionData.filter(d => isRouteMatch(d.vendedorId, activeVendedorId, loggedInVendor, userRole, activeSucursal)))
+      : activacionData.filter(d => isRouteMatch(d.vendedorId, 'ALL_MY_ROUTES', loggedInVendor, userRole, activeSucursal));
 
     (baseAct || []).forEach(c => {
       if (c && c.cliente) {
+        const recordSuc = normalizeSucursal((c as any).sucursal) || 'OCCIDENTE';
+        if (recordSuc !== activeSucursal) return;
         const key = String(c.id || c.cliente).trim().toUpperCase();
         map.set(key, {
           id: c.id || '',
           cliente: c.cliente,
           vendedorId: c.vendedorId,
           vendedorNombre: c.vendedorNombre || (currentVendorProfile ? currentVendorProfile.displayName : c.vendedorId),
-          vendedorEmail: c.vendedorEmail || (currentVendorProfile ? currentVendorProfile.email : undefined)
+          vendedorEmail: c.vendedorEmail || (currentVendorProfile ? currentVendorProfile.email : undefined),
+          sucursal: activeSucursal
         });
       }
     });
 
     // 2. Complementar con clientes desde Volumen para asegurar cobertura de toda la cartera
-    const baseVol = userRole === 'ADMIN'
-      ? (activeVendedorId === 'ADMIN' ? volumenData : volumenData.filter(d => isRouteMatch(d.vendedorId, activeVendedorId, loggedInVendor, userRole)))
-      : volumenData.filter(d => isRouteMatch(d.vendedorId, 'ALL_MY_ROUTES', loggedInVendor, userRole));
+    const baseVol = (userRole === 'ADMIN' || userRole === 'COORDINADORA')
+      ? ((activeVendedorId === 'ADMIN' || activeVendedorId === 'COORDINADORA_ALL')
+          ? volumenData
+          : volumenData.filter(d => isRouteMatch(d.vendedorId, activeVendedorId, loggedInVendor, userRole, activeSucursal)))
+      : volumenData.filter(d => isRouteMatch(d.vendedorId, 'ALL_MY_ROUTES', loggedInVendor, userRole, activeSucursal));
 
     (baseVol || []).forEach(v => {
       if (v && v.cliente) {
+        const recordSuc = normalizeSucursal((v as any).sucursal) || 'OCCIDENTE';
+        if (recordSuc !== activeSucursal) return;
         const key = String(v.cliente).trim().toUpperCase();
         if (!map.has(key)) {
           map.set(key, {
@@ -1019,14 +1128,15 @@ export default function App() {
             cliente: v.cliente,
             vendedorId: v.vendedorId,
             vendedorNombre: v.vendedorNombre || (currentVendorProfile ? currentVendorProfile.displayName : v.vendedorId),
-            vendedorEmail: v.vendedorEmail || (currentVendorProfile ? currentVendorProfile.email : undefined)
+            vendedorEmail: v.vendedorEmail || (currentVendorProfile ? currentVendorProfile.email : undefined),
+            sucursal: activeSucursal
           });
         }
       }
     });
 
     return Array.from(map.values());
-  }, [userRole, activeVendedorId, loggedInVendor, activacionData, volumenData]);
+  }, [userRole, activeVendedorId, loggedInVendor, activacionData, volumenData, activeSucursal, currentVendorProfile]);
 
   // Restricción multicapa (Defensa en Profundidad): Alkosto denegado explícitamente a Sairu Valles
   // y habilitado únicamente para perfiles autorizados (ADMIN / SUPERVISOR).
@@ -1282,10 +1392,56 @@ export default function App() {
           )}
         </div>
 
-        {/* PERFIL DEL VENDEDOR / RUTAS ASIGNADAS & CERRAR SESIÓN */}
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full xl:w-auto pb-2 xl:pb-0">
+        {/* PERFIL DEL VENDEDOR / SUCURSAL ACTIVA / RUTAS ASIGNADAS & CERRAR SESIÓN */}
+        <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-3 w-full xl:w-auto pb-2 xl:pb-0">
           
-          {/* VISTA PERSONAL PARA VENDEDOR O SELECTOR PARA ADMIN */}
+          {/* INDICADOR / SELECTOR DE SUCURSAL MULTISEDE (CENTRO | OCCIDENTE) */}
+          {userRole === 'ADMIN' ? (
+            <div
+              data-testid="sucursal-admin-switcher"
+              className="flex items-center gap-1.5 bg-neutral-950 border border-neutral-800 rounded-xl md:rounded-full px-2.5 py-1.5 min-h-[44px] shrink-0"
+            >
+              <Building2 className="w-4 h-4 text-amber-400 ml-1 shrink-0" />
+              <span className="text-[10px] font-mono font-bold text-neutral-400 uppercase tracking-wider mr-1">
+                Sede:
+              </span>
+              {(['OCCIDENTE', 'CENTRO'] as Sucursal[]).map((suc) => {
+                const isSelected = activeSucursal === suc;
+                return (
+                  <button
+                    key={suc}
+                    type="button"
+                    onClick={() => handleAdminSucursalChange(suc)}
+                    className={`px-3 py-1 rounded-lg md:rounded-full text-[11px] font-mono font-bold uppercase transition-all cursor-pointer ${
+                      isSelected
+                        ? suc === 'CENTRO'
+                          ? 'bg-sky-600 text-white shadow-sm shadow-sky-900/40'
+                          : 'bg-emerald-600 text-white shadow-sm shadow-emerald-900/40'
+                        : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
+                    }`}
+                  >
+                    {suc}
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <div
+              data-testid="sucursal-locked-badge"
+              className={`flex items-center gap-2 rounded-xl md:rounded-full px-3.5 py-2 min-h-[44px] border shrink-0 ${
+                activeSucursal === 'CENTRO'
+                  ? 'bg-sky-950/50 border-sky-800/70 text-sky-300'
+                  : 'bg-emerald-950/50 border-emerald-800/70 text-emerald-300'
+              }`}
+            >
+              <Building2 className="w-4 h-4 shrink-0" />
+              <span className="text-[11px] font-mono font-bold uppercase tracking-wider">
+                Sede: {activeSucursal}
+              </span>
+            </div>
+          )}
+
+          {/* VISTA PERSONAL PARA VENDEDOR O SELECTOR PARA SUPERVISIÓN / COORDINACIÓN / ADMIN */}
           {userRole === 'VENDEDOR' ? (
             <div className="flex flex-1 sm:flex-none items-center gap-3 bg-neutral-950 border border-neutral-800 rounded-xl md:rounded-full px-4 py-2 min-h-[44px] shrink-0">
               <div className="w-7 h-7 rounded-full bg-emerald-500/20 flex items-center justify-center border border-emerald-500/30 shrink-0">
@@ -1346,7 +1502,9 @@ export default function App() {
                   <span className="text-[10px] font-sans text-neutral-500 leading-none uppercase tracking-wider mb-0.5">
                     {userRole === 'SUPERVISOR'
                       ? `Supervisor: ${currentSupervisorProfile?.displayName || loggedInVendor}`
-                      : 'Supervisión (Admin)'}
+                      : userRole === 'COORDINADORA'
+                        ? `Coordinadora Trade (${activeSucursal})`
+                        : `Supervisión Admin (${activeSucursal})`}
                   </span>
                   <select 
                     value={activeVendedorId}
@@ -1460,7 +1618,14 @@ export default function App() {
             {activeTab === 'DEGUSTACIONES' && (
               <DegustacionesTab 
                 userRole={userRole}
-                vendedorName={userRole === 'ADMIN' ? (activeVendedorId === 'ADMIN' ? 'GERENCIA TRADE MARKETING' : activeVendedorDisplayName) : (currentVendorProfile?.displayName || loggedInVendor)}
+                activeSucursal={activeSucursal}
+                vendedorName={
+                  userRole === 'ADMIN'
+                    ? (activeVendedorId === 'ADMIN' ? `GERENCIA TRADE MARKETING (${activeSucursal})` : activeVendedorDisplayName)
+                    : userRole === 'COORDINADORA'
+                      ? (loggedInVendor || `COORDINACIÓN TRADE (${activeSucursal})`)
+                      : (currentVendorProfile?.displayName || loggedInVendor)
+                }
                 activeVendedorId={activeVendedorId}
                 clientesAsignados={clientesParaDegustaciones}
                 onNavigateToTab={(tab) => {

@@ -143,6 +143,7 @@ export function buildSyntheticDegustacionPayload(
   return {
     id,
     idempotencyKey: id,
+    sucursal: 'OCCIDENTE' as const,
     clienteCodigo: `QA-${String(1000 + index)}`,
     clienteNombre: `PDV SINTETICO ${String(index).padStart(3, '0')} ${tag}`,
     vendedorNombre: vendor.canonicalUsername,
@@ -301,8 +302,13 @@ export async function runDegustacionSyncStressSuite(options: {
     bursts.push(computeBurstMetrics('idempotency_double_click', idempotencyParallelCount, idempSamples, tIdempElapsed));
 
     // 5. Verificación 1:1 de integridad en FDV y Receptor Trade Marketing
+    const getHeaders: Record<string, string> = {};
+    if (options.authToken) {
+      getHeaders['Authorization'] = `Bearer ${options.authToken}`;
+    }
     const fdvGetRes = await fetch(
-      `${options.fdvBaseUrl.replace(/\/+$/, '')}/api/degustaciones?tag=${encodeURIComponent(tag)}`
+      `${options.fdvBaseUrl.replace(/\/+$/, '')}/api/degustaciones?tag=${encodeURIComponent(tag)}`,
+      { headers: getHeaders }
     );
     const fdvJson = await fdvGetRes.json();
     const fdvList: any[] = Array.isArray(fdvJson?.data) ? fdvJson.data : [];
@@ -450,8 +456,11 @@ export async function runDegustacionSyncStressSuite(options: {
     // Verificación posterior al teardown (0 registros sintéticos remanentes)
     let remainingInFdv = -1;
     try {
+      const verifyHeaders: Record<string, string> = {};
+      if (options.authToken) verifyHeaders['Authorization'] = `Bearer ${options.authToken}`;
       const verifyFdv = await fetch(
-        `${options.fdvBaseUrl.replace(/\/+$/, '')}/api/degustaciones?tag=${encodeURIComponent(tag)}`
+        `${options.fdvBaseUrl.replace(/\/+$/, '')}/api/degustaciones?tag=${encodeURIComponent(tag)}`,
+        { headers: verifyHeaders }
       );
       if (verifyFdv.ok) {
         const j = await verifyFdv.json();

@@ -10,13 +10,18 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { 
   Degustacion, 
+  DegustacionCatalogosResponse,
   DegustacionConfig, 
   EstadoDegustacion, 
+  ProductoNacionalItem,
+  TiendaCatalogoItem,
   TurnoDegustacion, 
-  Role 
+  Role,
+  Sucursal
 } from '../types';
 import { 
   subscribeDegustaciones, 
+  fetchDegustacionCatalogos,
   saveDegustacion, 
   updateDegustacion, 
   checkDateAvailability, 
@@ -29,9 +34,12 @@ import {
   getNextAvailableBookingDate,
   syncAllDegustacionesToGerencia
 } from '../services/degustacionesService';
+import { getStoredSucursal } from '../services/authService';
+import { normalizeSucursal } from '../utils/sucursalScope';
 
 interface DegustacionesTabProps {
   userRole: Role;
+  activeSucursal?: Sucursal;
   vendedorName: string;
   activeVendedorId: string;
   clientesAsignados?: any[];
@@ -50,11 +58,14 @@ const PRODUCTOS_CATALOGO = [
 
 export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
   userRole,
+  activeSucursal,
   vendedorName,
   activeVendedorId,
   clientesAsignados = []
 }) => {
-  const isManager = userRole === 'ADMIN';
+  const effectiveSucursal: Sucursal =
+    normalizeSucursal(activeSucursal) || getStoredSucursal() || 'OCCIDENTE';
+  const isManager = userRole === 'ADMIN' || userRole === 'COORDINADORA';
 
   // Sub-tabs unificadas: Disponibilidad, Agendar, Historial
   type SubTab = 'disponibilidad' | 'agendar' | 'historial';
@@ -103,38 +114,161 @@ export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
   const [formSubmitting, setFormSubmitting] = useState(false);
   const [formSuccessMessage, setFormSuccessMessage] = useState<string | null>(null);
   const [formErrorMessage, setFormErrorMessage] = useState<string | null>(null);
+  const [catalogos, setCatalogos] = useState<DegustacionCatalogosResponse | null>(null);
+  const [productoSearch, setProductoSearch] = useState('');
+  const [productoRubroFilter, setProductoRubroFilter] = useState('TODOS');
 
-  // Subscribirse a Firestore
+  // Suscribirse a degustaciones y cargar catálogos oficiales delimitados estrictamente por effectiveSucursal
   useEffect(() => {
+    let isMounted = true;
     setIsLoading(true);
+    setFormClienteCodigo('');
+    setFormClienteNombre('');
+    setFormClienteSearch('');
+    setShowClienteSuggestions(false);
+
     const unsubscribe = subscribeDegustaciones((data) => {
+      if (!isMounted) return;
       setDegustaciones(data);
       setIsLoading(false);
-    });
-    return () => unsubscribe();
-  }, []);
+    }, effectiveSucursal);
 
-  // Lista de clientes asignados únicos para el autocompletado
-  const availableClientes = useMemo(() => {
-    const map = new Map<string, { codigo: string; nombre: string; ruta?: string }>();
-    (clientesAsignados || []).forEach(c => {
-      if (c) {
-        const codigo = String(c.id || c.codigo || '').trim();
+    fetchDegustacionCatalogos(effectiveSucursal)
+      .then((res) => {
+        if (!isMounted) return;
+        setCatalogos(res);
+      })
+      .catch(() => {});
+
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
+  }, [effectiveSucursal]);
+
+  // Catálogo compartido nacional de productos (100% disponible para CENTRO y OCCIDENTE)
+  const availableProductos = useMemo<ProductoNacionalItem[]>(() => {
+    if (catalogos?.productos && catalogos.productos.length > 0) {
+      return catalogos.productos;
+    }
+    return PRODUCTOS_CATALOGO.map((nombre, idx) => ({
+      id: `PROD-${idx + 1}`,
+      codigo: `PROD-${idx + 1}`,
+      nombre,
+      categoria: 'LINEA GENERAL',
+      rubro: 'LINEA GENERAL',
+      activo: true
+    }));
+  }, [catalogos]);
+
+  const rubrosDisponibles = useMemo(() => {
+    const setR = new Set<string>();
+    availableProductos.forEach((p) => {
+      const cat = p.rubro || p.categoria;
+      if (cat) setR.add(cat.toUpperCase().trim());
+    });
+    return ['TODOS', ...Array.from(setR).sort()];
+  }, [availableProductos]);
+
+  const filteredProductosCatalogo = useMemo(() => {
+    const q = productoSearch.trim().toLowerCase();
+    return availableProductos.filter((p) => {
+      const cat = (p.rubro || p.categoria || '').toUpperCase().trim();
+      if (productoRubroFilter !== 'TODOS' && cat !== productoRubroFilter) {
+        return false;
+      }
+      if (!q) return true;
+      return (
+        p.nombre.toLowerCase().includes(q) ||
+        p.codigo.toLowerCase().includes(q) ||
+        cat.toLowerCase().includes(q) ||
+        (p.marca || '').toLowerCase().includes(q)
+      );
+    });
+  }, [availableProductos, productoSearch, productoRubroFilter]);
+
+  // Lista de tiendas/clientes autorizados estrictamente para effectiveSucursal
+  const availableClientes = useMemo<TiendaCatalogoItem[]>(() => {
+    const map = new Map<string, TiendaCatalogoItem>();
+
+    if (catalogos?.clientes && catalogos.clientes.length > 0) {
+      const strictBranchStores = catalogos.clientes.filter(
+        (c) => normalizeSucursal(c.sucursal) === effectiveSucursal
+      );
+
+      // Si es VENDEDOR y existen tiendas etiquetadas específicamente con su ruta/vendedor, priorizar su cartera asignada
+      let scopedStores = strictBranchStores;
+      if (!isManager && userRole === 'VENDEDOR') {
+        const vNameUpper = (vendedorName || '').toUpperCase().trim();
+        const activeRouteUpper = (activeVendedorId || '').toUpperCase().trim();
+        const vendorOwned = strictBranchStores.filter((c) => {
+          const cRuta = (c.ruta || '').toUpperCase().trim();
+          const cVend = (c.vendedorId || '').toUpperCase().trim();
+          if (!cRuta && !cVend) return false;
+          if (activeRouteUpper && activeRouteUpper !== 'ALL_MY_ROUTES') {
+            if (cRuta === activeRouteUpper || cVend === activeRouteUpper) return true;
+          }
+          return (
+            (vNameUpper && (cRuta.includes(vNameUpper) || cVend.includes(vNameUpper) || vNameUpper.includes(cVend)))
+          );
+        });
+        const anyTaggedInBranch = strictBranchStores.some((c) => Boolean(c.ruta || c.vendedorId));
+        if (vendorOwned.length > 0) {
+          scopedStores = vendorOwned;
+        } else if (!anyTaggedInBranch) {
+          scopedStores = strictBranchStores;
+        }
+      }
+
+      scopedStores.forEach((c) => {
+        const codigo = String(c.codigo || '').trim();
+        const nombre = String(c.nombre || '').trim();
+        if (!nombre) return;
+        const safeCode = codigo || `CLI-${nombre.toUpperCase().replace(/[^A-Z0-9]+/g, '').slice(0, 10)}`;
+        const key = `${safeCode.toUpperCase()}:::${nombre.toUpperCase()}`;
+        if (!map.has(key)) {
+          map.set(key, {
+            id: c.id || safeCode,
+            codigo: safeCode,
+            nombre,
+            ruta: c.ruta || '',
+            vendedorId: c.vendedorId || '',
+            ciudad: c.ciudad,
+            sucursal: effectiveSucursal
+          });
+        }
+      });
+
+      return Array.from(map.values()).sort((a, b) => a.nombre.localeCompare(b.nombre));
+    }
+
+    // Respaldo local únicamente para OCCIDENTE cuando aún no hay tabla public.clientes en Supabase
+    if (effectiveSucursal === 'OCCIDENTE') {
+      (clientesAsignados || []).forEach((c) => {
+        if (!c) return;
+        const recordSuc = normalizeSucursal(c.sucursal) || 'OCCIDENTE';
+        if (recordSuc !== 'OCCIDENTE') return;
+        const rawCode = String(c.id || c.codigo || '').trim();
         const nombre = String(c.cliente || c.nombre || c.razonSocial || '').trim();
         if (nombre) {
-          const key = (codigo ? codigo.toUpperCase() : '') + ':::' + nombre.toUpperCase();
+          const safeCode = rawCode || `OCC-${nombre.toUpperCase().replace(/[^A-Z0-9]+/g, '').slice(0, 10)}`;
+          const key = `${safeCode.toUpperCase()}:::${nombre.toUpperCase()}`;
           if (!map.has(key)) {
             map.set(key, {
-              codigo: codigo || 'PDV',
-              nombre: nombre,
-              ruta: c.vendedorId || c.vendedor || ''
+              id: safeCode,
+              codigo: safeCode,
+              nombre,
+              ruta: c.vendedorId || c.vendedor || '',
+              vendedorId: c.vendedorId || c.vendedor || '',
+              sucursal: 'OCCIDENTE'
             });
           }
         }
-      }
-    });
+      });
+    }
+
     return Array.from(map.values()).sort((a, b) => a.nombre.localeCompare(b.nombre));
-  }, [clientesAsignados]);
+  }, [catalogos, clientesAsignados, effectiveSucursal, isManager, userRole, vendedorName, activeVendedorId]);
 
   // Filtrado de clientes para autocompletado en el formulario
   const filteredClienteSuggestions = useMemo(() => {
@@ -202,17 +336,25 @@ export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
   };
 
   // Selección directa desde el desplegable
-  const handleSelectCliente = (c: { codigo: string; nombre: string; ruta?: string }) => {
+  const handleSelectCliente = (c: TiendaCatalogoItem) => {
     setFormClienteCodigo(c.codigo);
     setFormClienteNombre(c.nombre);
     setFormClienteSearch(c.nombre);
     setShowClienteSuggestions(false);
   };
 
-  // Degustaciones visibles según el rol del usuario y filtros
+  // Degustaciones estrictamente aisladas por sucursal activa
+  const branchScopedDegustaciones = useMemo(() => {
+    return degustaciones.filter((d) => {
+      const recSuc = normalizeSucursal(d.sucursal) || effectiveSucursal;
+      return recSuc === effectiveSucursal;
+    });
+  }, [degustaciones, effectiveSucursal]);
+
+  // Degustaciones visibles según el rol del usuario, sucursal activa y filtros
   const visibleDegustaciones = useMemo(() => {
-    return degustaciones.filter(d => {
-      // Para vendedor: solo ve sus degustaciones personales
+    return branchScopedDegustaciones.filter(d => {
+      // Para vendedor/supervisor: solo ve sus degustaciones dentro de su sucursal
       if (!isManager) {
         const vendorKey = vendedorName.toUpperCase().trim();
         const dVendor = (d.vendedorNombre || '').toUpperCase().trim();
@@ -221,7 +363,7 @@ export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
                         dVendorId.includes(vendorKey) || vendorKey.includes(dVendorId);
         if (!isOwner) return false;
       } else {
-        // Para admin: puede filtrar por vendedor
+        // Para coordinadora / admin: puede filtrar por vendedor dentro de su sucursal
         if (filtroVendedor !== 'TODOS' && d.vendedorNombre !== filtroVendedor) {
           return false;
         }
@@ -245,51 +387,56 @@ export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
 
       return true;
     });
-  }, [degustaciones, isManager, vendedorName, filtroVendedor, filtroEstado, busqueda]);
+  }, [branchScopedDegustaciones, isManager, vendedorName, filtroVendedor, filtroEstado, busqueda]);
 
-  // Lista de vendedores únicos para el selector de filtro en historial (Admin)
+  // Lista de vendedores únicos para el selector de filtro en historial (Coordinadora / Admin de la sucursal)
   const listaVendedoresParaFiltro = useMemo(() => {
     const setV = new Set<string>();
-    degustaciones.forEach(d => {
+    branchScopedDegustaciones.forEach(d => {
       if (d.vendedorNombre) setV.add(d.vendedorNombre);
     });
     return Array.from(setV).sort();
-  }, [degustaciones]);
+  }, [branchScopedDegustaciones]);
 
-  // Métricas globales y personales
+  // Métricas globales de la sucursal y personales
   const metricas = useMemo(() => {
-    const list = isManager ? degustaciones : visibleDegustaciones;
+    const list = isManager ? branchScopedDegustaciones : visibleDegustaciones;
     const total = list.length;
     const solicitadas = list.filter(d => d.estado === 'SOLICITADA').length;
     const aprobadas = list.filter(d => d.estado === 'APROBADA').length;
     const realizadas = list.filter(d => d.estado === 'REALIZADA').length;
     const rechazadas = list.filter(d => d.estado === 'RECHAZADA' || d.estado === 'CANCELADA').length;
     return { total, solicitadas, aprobadas, realizadas, rechazadas };
-  }, [degustaciones, visibleDegustaciones, isManager]);
+  }, [branchScopedDegustaciones, visibleDegustaciones, isManager]);
 
-  // Conteo de degustaciones del vendedor en la semana de la fecha seleccionada en el formulario
+  // Conteo de degustaciones del vendedor en la semana de la fecha seleccionada (aislado por sucursal)
   const weeklyUsage = useMemo(() => {
     if (!formFecha) return { count: 0, rangeLabel: '', isMaxReached: false };
-    const count = countVendorDegustacionesInWeek(vendedorName || activeVendedorId, formFecha, degustaciones);
+    const count = countVendorDegustacionesInWeek(
+      vendedorName || activeVendedorId,
+      formFecha,
+      branchScopedDegustaciones,
+      effectiveSucursal
+    );
     const range = getWeekRange(formFecha);
     return {
       count,
       rangeLabel: range.label,
       isMaxReached: count >= 5
     };
-  }, [formFecha, vendedorName, activeVendedorId, degustaciones]);
+  }, [formFecha, vendedorName, activeVendedorId, branchScopedDegustaciones, effectiveSucursal]);
 
-  // Comprobar disponibilidad de la fecha activa en el formulario
+  // Comprobar disponibilidad de la fecha activa en el formulario (18 cupos por sucursal)
   const disponibilidadFechaSeleccionada = useMemo(() => {
     if (!formFecha) return null;
-    return checkDateAvailability(formFecha, degustaciones, config);
-  }, [formFecha, degustaciones, config]);
+    return checkDateAvailability(formFecha, branchScopedDegustaciones, config, effectiveSucursal);
+  }, [formFecha, branchScopedDegustaciones, config, effectiveSucursal]);
 
-  // Comprobar disponibilidad de la fecha activa en el calendario
+  // Comprobar disponibilidad de la fecha activa en el calendario (18 cupos por sucursal)
   const disponibilidadCalendarDate = useMemo(() => {
     if (!selectedCalendarDate) return null;
-    return checkDateAvailability(selectedCalendarDate, degustaciones, config);
-  }, [selectedCalendarDate, degustaciones, config]);
+    return checkDateAvailability(selectedCalendarDate, branchScopedDegustaciones, config, effectiveSucursal);
+  }, [selectedCalendarDate, branchScopedDegustaciones, config, effectiveSucursal]);
 
   // Asegurar que formHora tenga un valor inicial apropiado si está vacío
   useEffect(() => {
@@ -336,19 +483,47 @@ export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
     setFormSuccessMessage(null);
     setFormErrorMessage(null);
 
-    const finalClienteNombre = formClienteNombre.trim() || formClienteSearch.trim();
-    if (!finalClienteNombre) {
-      setFormErrorMessage('Por favor selecciona o ingresa un cliente válido de tu cartera.');
+    const rawCodigoInput = formClienteCodigo.replace(/^[#\s]+/, '').trim();
+    const rawNombreInput = (formClienteNombre.trim() || formClienteSearch.trim());
+    if (!rawNombreInput && !rawCodigoInput) {
+      setFormErrorMessage(`Por favor selecciona una tienda válida del catálogo oficial de la sucursal ${effectiveSucursal}.`);
       return;
     }
+
+    // Validación Zero-Trust en origen: exigir tienda catalogada perteneciente estrictamente a effectiveSucursal
+    const matchedStore = availableClientes.find((c) => {
+      if (normalizeSucursal(c.sucursal) !== effectiveSucursal) return false;
+      const cCode = c.codigo.replace(/^[#\s]+/, '').trim().toUpperCase();
+      const inCode = rawCodigoInput.toUpperCase();
+      const cName = c.nombre.trim().toUpperCase();
+      const inName = rawNombreInput.toUpperCase();
+      if (inCode && cCode === inCode) return true;
+      if (inName && cName === inName) return true;
+      return false;
+    });
+
+    if (!matchedStore) {
+      setFormErrorMessage(
+        `Debes seleccionar una tienda válida del catálogo oficial de tu sucursal (${effectiveSucursal}). No se permiten tiendas no catalogadas ni de otra sede.`
+      );
+      return;
+    }
+
+    const finalClienteNombre = matchedStore.nombre.trim();
+    const finalClienteCodigo = matchedStore.codigo.trim();
 
     if (!formFecha) {
       setFormErrorMessage('Debes seleccionar una fecha para la degustación.');
       return;
     }
 
-    // 1. Validar límite semanal de 5 degustaciones por vendedor
-    const weeklyCount = countVendorDegustacionesInWeek(vendedorName || activeVendedorId, formFecha, degustaciones);
+    // 1. Validar límite semanal de 5 degustaciones por vendedor en la sucursal activa
+    const weeklyCount = countVendorDegustacionesInWeek(
+      vendedorName || activeVendedorId,
+      formFecha,
+      branchScopedDegustaciones,
+      effectiveSucursal
+    );
     if (weeklyCount >= 5) {
       const { label } = getWeekRange(formFecha);
       setFormErrorMessage(`Has alcanzado el límite máximo de 5 degustaciones permitidas para la semana del ${label}.`);
@@ -363,27 +538,27 @@ export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
       return;
     }
 
-    // 3. Validar disponibilidad general de la fecha
-    const avail = checkDateAvailability(formFecha, degustaciones, config);
+    // 3. Validar disponibilidad general de la fecha en la sucursal activa
+    const avail = checkDateAvailability(formFecha, branchScopedDegustaciones, config, effectiveSucursal);
     if (!avail.disponible) {
       setFormErrorMessage(`Fecha no disponible: ${avail.motivo || 'Cupo completo o anticipación insuficiente.'}`);
       return;
     }
 
     if (formTurno === 'MAÑANA' && avail.cuposMananaDisponibles <= 0) {
-      setFormErrorMessage('El turno de la mañana ya completó el límite de 9 degustaciones para esta fecha. Selecciona el turno de la tarde o una fecha diferente.');
+      setFormErrorMessage('El turno de la mañana ya completó el límite de 9 degustaciones para esta fecha en tu sucursal. Selecciona el turno de la tarde o una fecha diferente.');
       return;
     }
 
     if (formTurno === 'TARDE' && avail.cuposTardeDisponibles <= 0) {
-      setFormErrorMessage('El turno de la tarde ya completó el límite de 9 degustaciones para esta fecha. Selecciona el turno de la mañana o una fecha diferente.');
+      setFormErrorMessage('El turno de la tarde ya completó el límite de 9 degustaciones para esta fecha en tu sucursal. Selecciona el turno de la mañana o una fecha diferente.');
       return;
     }
 
     // Validar que el mismo cliente no esté agendado dos veces en el mismo turno en esta fecha
     const clienteYaAgendado = (formTurno === 'MAÑANA' ? avail.degustacionesManana : avail.degustacionesTarde).some(
-      d => (d.clienteNombre && d.clienteNombre.trim().toUpperCase() === finalClienteNombre.trim().toUpperCase()) ||
-           (d.clienteCodigo && formClienteCodigo && d.clienteCodigo.trim() === formClienteCodigo.trim() && formClienteCodigo.trim() !== 'PDV')
+      d => (d.clienteNombre && d.clienteNombre.trim().toUpperCase() === finalClienteNombre.toUpperCase()) ||
+           (d.clienteCodigo && finalClienteCodigo && d.clienteCodigo.trim().toUpperCase() === finalClienteCodigo.toUpperCase())
     );
     if (clienteYaAgendado) {
       setFormErrorMessage(`El cliente "${finalClienteNombre}" ya tiene una degustación registrada en el turno de la ${formTurno.toLowerCase()} para esta fecha.`);
@@ -391,22 +566,53 @@ export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
     }
 
     if (formProductos.length === 0) {
-      setFormErrorMessage('Selecciona al menos un producto a degustar.');
+      setFormErrorMessage('Selecciona al menos un producto del catálogo nacional a degustar.');
       return;
     }
+
+    // Resolver ruta concreta y vendedorId concreto (jamás enviar 'ALL_MY_ROUTES')
+    const isSyntheticRouteSelector =
+      !activeVendedorId ||
+      activeVendedorId === 'ALL_MY_ROUTES' ||
+      activeVendedorId === 'ADMIN' ||
+      activeVendedorId === 'COORDINADORA_ALL' ||
+      activeVendedorId.startsWith('CONSOLIDATED:') ||
+      activeVendedorId.startsWith('SUPERVISOR:');
+
+    const matchedVendorCat = catalogos?.vendedores?.find(
+      (v) =>
+        normalizeSucursal(v.sucursal) === effectiveSucursal &&
+        (v.nombre.toUpperCase() === vendedorName.trim().toUpperCase() ||
+          v.id.toUpperCase() === activeVendedorId.trim().toUpperCase())
+    );
+
+    const concreteRuta =
+      (matchedStore.ruta && matchedStore.ruta !== 'ALL_MY_ROUTES' ? matchedStore.ruta.trim() : '') ||
+      (!isSyntheticRouteSelector ? activeVendedorId.trim() : '') ||
+      matchedVendorCat?.ruta ||
+      matchedVendorCat?.rutas?.[0] ||
+      catalogos?.rutas?.[0]?.id ||
+      vendedorName.trim().toUpperCase();
+
+    const concreteVendedorId =
+      matchedVendorCat?.id ||
+      (matchedStore.vendedorId && matchedStore.vendedorId !== 'ALL_MY_ROUTES' ? matchedStore.vendedorId.trim() : '') ||
+      (!isSyntheticRouteSelector ? activeVendedorId.trim() : '') ||
+      vendedorName.trim().toUpperCase();
 
     setFormSubmitting(true);
     try {
       const nueva: Degustacion = {
         id: `deg-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
-        clienteCodigo: formClienteCodigo.trim() || 'PDV',
+        sucursal: effectiveSucursal,
+        clienteCodigo: finalClienteCodigo,
         clienteNombre: finalClienteNombre.toUpperCase(),
         vendedorNombre: vendedorName.trim().toUpperCase(),
-        vendedorId: activeVendedorId,
-        vendedorEmail: (vendedorName.toUpperCase().includes('MIKELANGELO') || vendedorName.toUpperCase().includes('SOTO') || activeVendedorId.toUpperCase().includes('SOTO') || activeVendedorId.toUpperCase().includes('MIKELANGELO'))
+        vendedorId: concreteVendedorId,
+        vendedorEmail: matchedVendorCat?.email || ((vendedorName.toUpperCase().includes('MIKELANGELO') || vendedorName.toUpperCase().includes('SOTO') || activeVendedorId.toUpperCase().includes('SOTO') || activeVendedorId.toUpperCase().includes('MIKELANGELO'))
           ? 'Mikelangelodiaz@gmail.com'
-          : undefined,
-        ruta: activeVendedorId,
+          : undefined),
+        ruta: concreteRuta,
         fecha: formFecha,
         turno: formTurno,
         hora: formHora,
@@ -420,12 +626,12 @@ export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
         telefonoContacto: formTelefonoContacto.trim(),
         observaciones: formObservaciones.trim(),
         estado: 'SOLICITADA',
-        notasTradeMarketing: 'Solicitud agendada. En revisión por Trade Marketing para confirmación y asignación.',
+        notasTradeMarketing: `Solicitud agendada (${effectiveSucursal}). En revisión por Coordinación de Trade Marketing (${effectiveSucursal}).`,
         createdAt: new Date().toISOString()
       };
 
-      await saveDegustacion(nueva);
-      setDegustaciones((prev) => [nueva, ...prev.filter((d) => d.id !== nueva.id)]);
+      const saved = await saveDegustacion(nueva, effectiveSucursal);
+      setDegustaciones((prev) => [saved, ...prev.filter((d) => d.id !== saved.id)]);
 
       setFormSuccessMessage(`¡Degustación para "${nueva.clienteNombre}" agendada con éxito! Redirigiendo a tu historial de seguimiento...`);
       
@@ -459,13 +665,13 @@ export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
         await updateDegustacion(activeModalItem.id, {
           estado: 'APROBADA',
           promotoraAsignada: promotoraInput.trim() || 'Por Asignar',
-          notasTradeMarketing: notasTradeInput.trim() || 'Aprobada por Trade Marketing. Recursos asignados.'
-        });
+          notasTradeMarketing: notasTradeInput.trim() || `Aprobada por Trade Marketing (${effectiveSucursal}). Recursos asignados.`
+        }, effectiveSucursal);
       } else if (modalActionType === 'rechazar') {
         await updateDegustacion(activeModalItem.id, {
           estado: 'RECHAZADA',
-          notasTradeMarketing: notasTradeInput.trim() || 'Rechazada por Trade Marketing (fecha u operatividad).'
-        });
+          notasTradeMarketing: notasTradeInput.trim() || `Rechazada por Trade Marketing (${effectiveSucursal}).`
+        }, effectiveSucursal);
       } else if (modalActionType === 'realizada') {
         await updateDegustacion(activeModalItem.id, {
           estado: 'REALIZADA',
@@ -476,7 +682,7 @@ export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
             ventasGeneradas: resultadoVentas.trim() || 'Impacto positivo en rotación de producto',
             comentarios: resultadoComentarios.trim()
           }
-        });
+        }, effectiveSucursal);
       }
 
       setActiveModalItem(null);
@@ -575,8 +781,8 @@ export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
     setIsSyncingGerencia(true);
     setSyncStatusMsg(null);
     try {
-      const res = await syncAllDegustacionesToGerencia(degustaciones);
-      setSyncStatusMsg(`Sincronización con Gerencia completada: ${res.success} enviadas (${res.failed} errores).`);
+      const res = await syncAllDegustacionesToGerencia(branchScopedDegustaciones, effectiveSucursal);
+      setSyncStatusMsg(`Sincronización (${effectiveSucursal}) con Gerencia completada: ${res.success} enviadas (${res.failed} errores).`);
       setTimeout(() => setSyncStatusMsg(null), 6000);
     } catch (err: any) {
       setSyncStatusMsg(`Error al sincronizar con Gerencia: ${err?.message || 'Error de red'}`);
@@ -603,16 +809,30 @@ export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
                 <h1 className="text-lg sm:text-xl md:text-2xl font-sans font-bold text-white tracking-tight">
                   Módulo de Degustaciones
                 </h1>
+                <span
+                  data-testid="degustaciones-sucursal-badge"
+                  className={`text-[10px] font-mono uppercase px-2.5 py-0.5 rounded-full border font-bold ${
+                    effectiveSucursal === 'CENTRO'
+                      ? 'bg-sky-950/70 border-sky-700 text-sky-300'
+                      : 'bg-emerald-950/70 border-emerald-700 text-emerald-300'
+                  }`}
+                >
+                  Sede: {effectiveSucursal}
+                </span>
                 <span className={`text-[10px] font-mono uppercase px-2.5 py-0.5 rounded-full border font-bold ${
                   isManager 
                     ? 'bg-amber-950/60 border-amber-800 text-amber-400'
-                    : 'bg-emerald-950/60 border-emerald-800 text-emerald-400'
+                    : 'bg-neutral-900 border-neutral-700 text-neutral-300'
                 }`}>
-                  {isManager ? 'Supervisión / Trade Marketing' : 'Fuerza de Ventas'}
+                  {userRole === 'COORDINADORA'
+                    ? `Coordinadora Trade (${effectiveSucursal})`
+                    : isManager
+                      ? 'Supervisión / Trade Marketing'
+                      : 'Fuerza de Ventas'}
                 </span>
               </div>
               <p className="text-xs sm:text-sm text-neutral-400">
-                Agendamiento de degustaciones (Jueves, Viernes y Sábados | Habilitado hasta el Lunes a las 5:00 PM | Máx. 5 por vendedor/semana | 18 cupos diarios).
+                Agendamiento multisede ({effectiveSucursal}): Jueves, Viernes y Sábados | Cierre Lunes 5:00 PM | Máx. 5 por vendedor/semana | 18 cupos diarios ({effectiveSucursal}).
               </p>
             </div>
           </div>
@@ -795,15 +1015,15 @@ export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
 
           <form onSubmit={handleSubmitNuevaDegustacion} className="space-y-6">
             
-            {/* BLOQUE 1: CLIENTE ASIGNADO */}
+            {/* BLOQUE 1: CLIENTE ASIGNADO (AISLADO POR SUCURSAL) */}
             <div className="bg-neutral-900/40 border border-neutral-800/80 rounded-xl p-4 sm:p-5 space-y-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h3 className="text-xs font-sans font-bold text-red-400 uppercase tracking-wider flex items-center gap-1.5">
                   <Building2 className="w-4 h-4" />
-                  1. Selección de Cliente (Cartera Asignada)
+                  1. Selección de Tienda / Cliente (Sede {effectiveSucursal})
                 </h3>
                 <span className="text-[11px] font-mono font-bold text-neutral-300 bg-neutral-950 border border-neutral-800 px-2.5 py-1 rounded-lg">
-                  {availableClientes.length} clientes en base de datos
+                  {availableClientes.length} tiendas autorizadas ({effectiveSucursal})
                 </span>
               </div>
 
@@ -867,7 +1087,7 @@ export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
                           <div className="max-w-[75%]">
                             <span className="font-bold text-white block uppercase truncate">{c.nombre}</span>
                             <span className="text-[10px] text-neutral-400 font-mono">
-                              Cód: <strong className="text-neutral-200">{c.codigo}</strong> {c.ruta ? `• Ruta: ${c.ruta}` : ''}
+                              Cód: <strong className="text-neutral-200">{c.codigo}</strong> • Sede: <strong className="text-emerald-400">{c.sucursal}</strong> {c.ruta ? `• Ruta: ${c.ruta}` : ''}
                             </span>
                           </div>
                           <span className="text-[10px] font-mono text-red-400 bg-red-950/40 border border-red-900/40 px-2 py-1 rounded shrink-0">
@@ -1030,23 +1250,76 @@ export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
               )}
             </div>
 
-            {/* BLOQUE 3: PRODUCTOS Y ESTIMACIONES */}
+            {/* BLOQUE 3: CATÁLOGO NACIONAL COMPARTIDO DE PRODUCTOS Y VOLUMEN */}
             <div className="bg-neutral-900/40 border border-neutral-800/80 rounded-xl p-4 sm:p-5 space-y-4">
-              <h3 className="text-xs font-sans font-bold text-red-400 uppercase tracking-wider flex items-center gap-1.5">
-                <Package className="w-4 h-4" />
-                3. Catálogo de Productos y Volumen
-              </h3>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-xs font-sans font-bold text-red-400 uppercase tracking-wider flex items-center gap-1.5">
+                  <Package className="w-4 h-4" />
+                  3. Catálogo Nacional de Productos y Volumen
+                </h3>
+                <span className="text-[10px] font-mono font-bold text-amber-300 bg-amber-950/40 border border-amber-900/50 px-2.5 py-1 rounded-lg uppercase">
+                  Catálogo Nacional Compartido • {availableProductos.length} SKUs
+                </span>
+              </div>
 
-              <div>
-                <label className="block text-xs font-sans font-bold text-neutral-300 uppercase tracking-wider mb-2">
-                  Productos a degustar * (Selecciona uno o más)
-                </label>
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
-                  {PRODUCTOS_CATALOGO.map((prod) => {
+              <div className="space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <label className="block text-xs font-sans font-bold text-neutral-300 uppercase tracking-wider">
+                    Productos a degustar * ({formProductos.length} seleccionados)
+                  </label>
+                  <div className="relative w-full sm:w-72">
+                    <Search className="w-3.5 h-3.5 text-neutral-500 absolute left-3 top-2.5 pointer-events-none" />
+                    <input
+                      type="text"
+                      value={productoSearch}
+                      onChange={(e) => setProductoSearch(e.target.value)}
+                      placeholder="Buscar SKU o producto nacional..."
+                      className="w-full bg-neutral-900 border border-neutral-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white placeholder-neutral-500 focus:outline-none focus:border-red-500"
+                    />
+                  </div>
+                </div>
+
+                {rubrosDisponibles.length > 2 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {rubrosDisponibles.map((rubro) => (
+                      <button
+                        key={rubro}
+                        type="button"
+                        onClick={() => setProductoRubroFilter(rubro)}
+                        className={`px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold uppercase border transition-all cursor-pointer ${
+                          productoRubroFilter === rubro
+                            ? 'bg-red-600 text-white border-red-500'
+                            : 'bg-neutral-900 text-neutral-400 border-neutral-800 hover:text-white'
+                        }`}
+                      >
+                        {rubro}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {formProductos.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 p-2.5 bg-neutral-950/70 border border-neutral-800 rounded-xl">
+                    {formProductos.map((sel) => (
+                      <span
+                        key={sel}
+                        onClick={() => setFormProductos((prev) => prev.filter((p) => p !== sel))}
+                        className="inline-flex items-center gap-1.5 text-[10px] font-bold bg-red-950/60 border border-red-700 text-red-200 px-2.5 py-1 rounded-full cursor-pointer hover:bg-red-900/60"
+                      >
+                        <span>{sel}</span>
+                        <X className="w-3 h-3" />
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5 max-h-64 overflow-y-auto pr-1">
+                  {filteredProductosCatalogo.map((prodItem) => {
+                    const prod = prodItem.nombre;
                     const isChecked = formProductos.includes(prod);
                     return (
                       <div
-                        key={prod}
+                        key={`${prodItem.codigo}-${prod}`}
                         onClick={() => {
                           if (isChecked) {
                             setFormProductos(prev => prev.filter(p => p !== prod));
@@ -1065,7 +1338,14 @@ export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
                         }`}>
                           {isChecked && <Check className="w-3 h-3 stroke-[3]" />}
                         </div>
-                        <span className="truncate">{prod}</span>
+                        <div className="min-w-0 flex-1">
+                          <span className="truncate block">{prod}</span>
+                          {(prodItem.rubro || prodItem.categoria) && (
+                            <span className="text-[9px] font-mono text-neutral-500 block truncate">
+                              {prodItem.codigo} • {prodItem.rubro || prodItem.categoria}
+                            </span>
+                          )}
+                        </div>
                       </div>
                     );
                   })}
@@ -1292,7 +1572,7 @@ export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
                 }
 
                 const isAllowedDay = cDay.dayOfWeek === 4 || cDay.dayOfWeek === 5 || cDay.dayOfWeek === 6;
-                const avail = checkDateAvailability(cDay.dateStr, degustaciones, config);
+                const avail = checkDateAvailability(cDay.dateStr, branchScopedDegustaciones, config, effectiveSucursal);
                 const isSelected = selectedCalendarDate === cDay.dateStr;
 
                 let badgeColor = 'bg-neutral-950 border-neutral-900 text-neutral-600 opacity-40 cursor-not-allowed';
@@ -1582,9 +1862,18 @@ export const DegustacionesTab: React.FC<DegustacionesTabProps> = ({
                       {/* HEADER TARJETA: CLIENTE & BADGE */}
                       <div className="flex items-start justify-between gap-3">
                         <div>
-                          <span className="text-[10px] font-mono text-neutral-400 block mb-0.5">
-                            {d.clienteCodigo || 'PDV'}
-                          </span>
+                          <div className="flex items-center gap-1.5 mb-0.5">
+                            <span className="text-[10px] font-mono text-neutral-400">
+                              {d.clienteCodigo || 'PDV'}
+                            </span>
+                            <span className={`text-[9px] font-mono font-bold px-1.5 py-0.2 rounded border uppercase ${
+                              (d.sucursal || effectiveSucursal) === 'CENTRO'
+                                ? 'bg-sky-950/60 border-sky-800 text-sky-300'
+                                : 'bg-emerald-950/60 border-emerald-800 text-emerald-300'
+                            }`}>
+                              {d.sucursal || effectiveSucursal}
+                            </span>
+                          </div>
                           <h4 className="text-sm font-sans font-extrabold text-white uppercase leading-snug">
                             {d.clienteNombre}
                           </h4>

@@ -5,6 +5,8 @@
  *  2. Dashboard de Ventas / Planificador de Vendedores (dashboard-fdv---planificador)
  */
 
+import { inferSucursalFromLegacyMetadata, normalizeSucursal, type Sucursal } from './sucursalScope';
+
 export interface MasterSellerRecord {
   vendedor_id: string;
   codigo_erp: string;
@@ -15,7 +17,8 @@ export interface MasterSellerRecord {
   supervisor: 'JOHNATAN SOTO' | 'ALI PEREZ' | 'NELSON FINOL' | string;
   zona: string;
   region: string;
-  role: 'VENDEDOR' | 'SUPERVISOR' | 'ADMIN';
+  sucursal?: Sucursal;
+  role: 'VENDEDOR' | 'SUPERVISOR' | 'COORDINADORA' | 'ADMIN';
   is_supervisor_route: boolean;
   incluir_en_volumen: boolean;
   meta_activacion: number;
@@ -797,6 +800,7 @@ export function hydrateRuntimeSellerCatalog(rows: Array<Partial<MasterSellerReco
         supervisor: sanitizeCatalogUpper(raw.supervisor) || existing.supervisor,
         zona: sanitizeCatalogText(raw.zona) || existing.zona,
         region: sanitizeCatalogText(raw.region) || existing.region,
+        sucursal: normalizeSucursal(raw.sucursal) || existing.sucursal || inferSucursalFromLegacyMetadata(raw.region, raw.zona),
         role: (sanitizeCatalogUpper(raw.role) as MasterSellerRecord['role']) || existing.role,
         is_supervisor_route: isSup,
         incluir_en_volumen:
@@ -811,6 +815,7 @@ export function hydrateRuntimeSellerCatalog(rows: Array<Partial<MasterSellerReco
         activo: typeof raw.activo === 'boolean' ? raw.activo : existing.activo,
       });
     } else {
+      const inferredSuc = inferSucursalFromLegacyMetadata(raw.sucursal, `${raw.region || ''} ${raw.zona || ''}`);
       byCanonical.set(key, {
         vendedor_id: sanitizeCatalogText(raw.vendedor_id) || canon,
         codigo_erp: sanitizeCatalogText(raw.codigo_erp) || '',
@@ -818,10 +823,11 @@ export function hydrateRuntimeSellerCatalog(rows: Array<Partial<MasterSellerReco
         display_name: sanitizeCatalogText(raw.display_name) || canon,
         ruta_oficial: sanitizeCatalogUpper(raw.ruta_oficial) || canon,
         aliases: Array.from(new Set([canon, ...rawAliases])),
-        supervisor: sanitizeCatalogUpper(raw.supervisor) || 'NELSON FINOL',
-        zona: sanitizeCatalogText(raw.zona) || 'Maracaibo',
-        region: sanitizeCatalogText(raw.region) || 'OCCIDENTE',
-        role: isSup ? 'SUPERVISOR' : 'VENDEDOR',
+        supervisor: sanitizeCatalogUpper(raw.supervisor) || (inferredSuc === 'CENTRO' ? 'SUPERVISION CENTRO' : 'NELSON FINOL'),
+        zona: sanitizeCatalogText(raw.zona) || (inferredSuc === 'CENTRO' ? 'Centro' : 'Maracaibo'),
+        region: sanitizeCatalogText(raw.region) || inferredSuc,
+        sucursal: inferredSuc,
+        role: (sanitizeCatalogUpper(raw.role) as MasterSellerRecord['role']) || (isSup ? 'SUPERVISOR' : 'VENDEDOR'),
         is_supervisor_route: isSup,
         incluir_en_volumen: typeof raw.incluir_en_volumen === 'boolean' ? raw.incluir_en_volumen : !isSup,
         meta_activacion: Number(raw.meta_activacion) || 0,
@@ -938,7 +944,10 @@ export function sanitizeAndNormalizeClientRecord(
   );
 
   const rif = sanitizeRif(raw.rif ?? raw.rifCedula ?? raw.ruc);
-  const sucursal = sanitizeCatalogUpper(raw.sucursal) || 'PRINCIPAL';
+  const sucursal = inferSucursalFromLegacyMetadata(
+    raw.sucursal,
+    `${String(raw.region ?? '')} ${String(raw.zona ?? '')} ${String(resolved.record?.sucursal ?? '')}`
+  );
   const direccion = sanitizeCatalogText(raw.direccion ?? raw.address);
   const tipoCliente =
     sanitizeCatalogUpper(raw.tipo_cliente ?? raw.tipoCliente ?? raw.canal ?? raw.categoria) ||

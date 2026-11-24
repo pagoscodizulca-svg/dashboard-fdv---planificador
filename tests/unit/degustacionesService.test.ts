@@ -8,6 +8,7 @@ import {
   buildTradeMarketingItem,
   sortDegustacionesOrdenadas,
   syncToGoogleSheets,
+  setGoogleSheetsWebhookUrl,
   syncToGerenciaDashboard,
   DEFAULT_CONFIG,
   formatYMD
@@ -442,6 +443,7 @@ describe('Unit: degustacionesService', () => {
   describe('Network / Sync resilience (Google Sheets & Gerencia)', () => {
     beforeEach(() => {
       vi.restoreAllMocks();
+      setGoogleSheetsWebhookUrl('https://script.google.com/macros/s/test-webhook/exec');
     });
 
     it('syncToGoogleSheets should return true on successful request', async () => {

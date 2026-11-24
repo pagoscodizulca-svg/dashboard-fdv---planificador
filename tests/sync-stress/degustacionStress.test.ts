@@ -8,6 +8,7 @@ describe('Stress & Concurrency QA: Degustaciones FDV -> Trade Marketing Sync (Wa
   let receptorBaseUrl = '';
   let fdvServer: ChildProcess | null = null;
   let fdvBaseUrl = '';
+  let adminAuthToken = '';
 
   // Estado en memoria del receptor Trade Marketing simulado (emula contrato HTTP de Render + deduplicación por id)
   const receptorStore = new Map<string, any>();
@@ -109,6 +110,20 @@ describe('Stress & Concurrency QA: Degustaciones FDV -> Trade Marketing Sync (Wa
     if (!healthy) {
       throw new Error('FDV server did not become healthy in time for stress test');
     }
+
+    const loginRes = await fetch(`${fdvBaseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: 'ADMIN',
+        password: process.env.ADMIN_PASSWORD || '123'
+      })
+    });
+    const loginJson = await loginRes.json();
+    if (!loginRes.ok || !loginJson?.token) {
+      throw new Error('Failed to authenticate ADMIN for stress test');
+    }
+    adminAuthToken = loginJson.token;
   }, 20000);
 
   afterAll(async () => {
@@ -128,6 +143,7 @@ describe('Stress & Concurrency QA: Degustaciones FDV -> Trade Marketing Sync (Wa
       const report: FullStressSuiteReport = await runDegustacionSyncStressSuite({
         fdvBaseUrl,
         receptorBaseUrl,
+        authToken: adminAuthToken,
         warmupCount: 1,
         mediumCount: 15,
         peakCount: 40,

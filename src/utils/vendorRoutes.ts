@@ -1,22 +1,26 @@
-import { Role } from '../types';
+import { Role, Sucursal } from '../types';
 import { normalizeVendorKey } from './vendorKeyNormalizer';
+import { inferSucursalFromLegacyMetadata, normalizeSucursal } from './sucursalScope';
 
 export interface AssignedRoute {
   id: string;
   label: string;
   aliases: string[];
+  sucursal?: Sucursal;
 }
 
 export interface VendorProfile {
   canonicalUsername: string;
   displayName: string;
   email?: string;
+  sucursal?: Sucursal;
   routes: AssignedRoute[];
 }
 
 export interface SupervisorProfile {
   canonicalUsername: string;
   displayName: string;
+  sucursal?: Sucursal;
   supervisedVendors: string[];
 }
 
@@ -395,17 +399,36 @@ export const SUPERVISOR_PROFILES: Record<string, SupervisorProfile> = {
   }
 };
 
+// Etiquetado explícito de la semilla histórica de Zulia / Falcón como sucursal 'OCCIDENTE'
+Object.values(VENDOR_PROFILES).forEach((prof) => {
+  if (!prof.sucursal) prof.sucursal = 'OCCIDENTE';
+  prof.routes.forEach((r) => {
+    if (!r.sucursal) r.sucursal = prof.sucursal || 'OCCIDENTE';
+  });
+});
+Object.values(SUPERVISOR_PROFILES).forEach((sup) => {
+  if (!sup.sucursal) sup.sucursal = 'OCCIDENTE';
+});
+
 /**
- * Permite hidratar dinámicamente VENDOR_PROFILES y SUPERVISOR_PROFILES desde Supabase (`public.vendedores_maestro`).
+ * Permite hidratar dinámicamente VENDOR_PROFILES y SUPERVISOR_PROFILES desde Supabase
+ * (`public.vendedores`, `public.vendedores_maestro` o `public.rutas`) respetando `sucursal` ('CENTRO' | 'OCCIDENTE').
  */
 export function hydrateVendorProfilesFromMasterCatalog(
   rows: Array<{
     nombre_canonico?: string;
+    username?: string;
+    nombre?: string;
     display_name?: string;
     ruta_oficial?: string;
+    ruta?: string;
     aliases?: string[];
     supervisor?: string;
     email?: string;
+    sucursal?: string;
+    region?: string;
+    zona?: string;
+    role?: string;
     is_supervisor_route?: boolean;
     activo?: boolean;
   }>
@@ -413,21 +436,58 @@ export function hydrateVendorProfilesFromMasterCatalog(
   if (!Array.isArray(rows) || rows.length === 0) return;
   for (const r of rows) {
     if (r.activo === false) continue;
-    const canon = normalizeVendorName(r.nombre_canonico);
-    if (!canon || r.is_supervisor_route) continue;
+    const rowSucursal = inferSucursalFromLegacyMetadata(r.sucursal, `${r.region || ''} ${r.zona || ''}`);
+    const rawRole = String(r.role || '').toUpperCase().trim();
+    const canon = normalizeVendorName(r.nombre_canonico || r.username || r.nombre);
+    if (!canon) continue;
+
+    if (r.is_supervisor_route || rawRole === 'SUPERVISOR' || rawRole === 'COORDINADORA') {
+      if (!SUPERVISOR_PROFILES[canon]) {
+        SUPERVISOR_PROFILES[canon] = {
+          canonicalUsername: canon,
+          displayName: r.display_name || r.nombre || canon,
+          sucursal: rowSucursal,
+          supervisedVendors: []
+        };
+      } else if (normalizeSucursal(r.sucursal)) {
+        SUPERVISOR_PROFILES[canon].sucursal = rowSucursal;
+      }
+      continue;
+    }
+
     const sup = normalizeVendorName(r.supervisor);
     if (sup && SUPERVISOR_PROFILES[sup] && !SUPERVISOR_PROFILES[sup].supervisedVendors.includes(canon)) {
       SUPERVISOR_PROFILES[sup].supervisedVendors.push(canon);
     }
+
+    const routeId = normalizeVendorName(r.ruta_oficial || r.ruta) || canon;
+    const aliases = Array.from(
+      new Set([canon, routeId, ...(r.aliases || []).map((a) => normalizeVendorName(a)).filter(Boolean)])
+    );
+
     if (!VENDOR_PROFILES[canon]) {
-      const routeId = normalizeVendorName(r.ruta_oficial) || canon;
-      const aliases = Array.from(new Set([canon, routeId, ...(r.aliases || []).map((a) => normalizeVendorName(a)).filter(Boolean)]));
+      const display = r.display_name || r.nombre || canon;
       VENDOR_PROFILES[canon] = {
         canonicalUsername: canon,
-        displayName: r.display_name || canon,
+        displayName: display,
         email: r.email || undefined,
-        routes: [{ id: routeId, label: `Ruta ${r.display_name || canon}`, aliases }],
+        sucursal: rowSucursal,
+        routes: [{ id: routeId, label: `Ruta ${display}`, aliases, sucursal: rowSucursal }],
       };
+    } else {
+      const existing = VENDOR_PROFILES[canon];
+      if (normalizeSucursal(r.sucursal)) {
+        existing.sucursal = rowSucursal;
+      }
+      const hasRoute = existing.routes.some((rt) => rt.id === routeId);
+      if (!hasRoute && routeId) {
+        existing.routes.push({
+          id: routeId,
+          label: `Ruta ${r.display_name || r.nombre || routeId}`,
+          aliases,
+          sucursal: rowSucursal
+        });
+      }
     }
   }
 }
@@ -500,7 +560,7 @@ export function matchesVendorAlias(aliases: string[], sheetVendor: string | null
  * Obtiene el perfil del vendedor logueado asegurando privacidad total.
  * Los vendedores NO tienen acceso a compañeros; su dashboard es personal.
  */
-export function getVendorProfile(username: string): VendorProfile {
+export function getVendorProfile(username: string, fallbackSucursal?: Sucursal): VendorProfile {
   const normUser = normalizeVendorName(username);
   if (VENDOR_PROFILES[normUser]) {
     return VENDOR_PROFILES[normUser];
@@ -516,27 +576,39 @@ export function getVendorProfile(username: string): VendorProfile {
   if (/MIKELANGELO|JOHNATAN|JONATHAN|JHONATAN|SOTO/.test(normUser)) {
     return VENDOR_PROFILES['MIKELANGELO DIAZ'];
   }
-  // Fallback seguro: solo sus propias rutas homónimas
+  const resolvedSuc = normalizeSucursal(fallbackSucursal) || 'OCCIDENTE';
+  // Fallback seguro: solo sus propias rutas homónimas dentro de su sucursal
   return {
     canonicalUsername: normUser,
     displayName: normUser,
+    sucursal: resolvedSuc,
     routes: [
-      { id: normUser, label: `Ruta ${normUser}`, aliases: [normUser] }
+      { id: normUser, label: `Ruta ${normUser}`, aliases: [normUser], sucursal: resolvedSuc }
     ]
   };
 }
 
 /**
- * Obtiene las rutas asignadas que el usuario tiene permitido ver.
- * Si es ADMIN, puede auditar todas las rutas de la empresa.
- * Si es SUPERVISOR, ve las rutas de su equipo supervisado.
- * Si es VENDEDOR, ÚNICAMENTE ve las rutas que le pertenecen.
+ * Obtiene las rutas asignadas que el usuario tiene permitido ver bajo su `sucursal` activa.
+ * - ADMIN / COORDINADORA: únicamente las rutas pertenecientes a `activeSucursal` (si se especifica).
+ * - SUPERVISOR: las rutas de su equipo dentro de su `sucursal`.
+ * - VENDEDOR: ESTRICTAMENTE sus propias rutas dentro de su `sucursal`.
  */
-export function getAllowedRoutesForUser(username: string, role: Role): AssignedRoute[] {
-  if (role === 'ADMIN') {
+export function getAllowedRoutesForUser(
+  username: string,
+  role: Role,
+  activeSucursal?: Sucursal | null
+): AssignedRoute[] {
+  const branchFilter = normalizeSucursal(activeSucursal);
+
+  if (role === 'ADMIN' || role === 'COORDINADORA') {
     const map = new Map<string, AssignedRoute>();
-    Object.values(VENDOR_PROFILES).forEach(profile => {
-      profile.routes.forEach(r => {
+    Object.values(VENDOR_PROFILES).forEach((profile) => {
+      const profSuc = profile.sucursal || 'OCCIDENTE';
+      if (branchFilter && profSuc !== branchFilter) return;
+      profile.routes.forEach((r) => {
+        const rSuc = r.sucursal || profSuc;
+        if (branchFilter && rSuc !== branchFilter) return;
         if (!map.has(r.id)) {
           map.set(r.id, r);
         }
@@ -546,12 +618,15 @@ export function getAllowedRoutesForUser(username: string, role: Role): AssignedR
   }
 
   if (role === 'SUPERVISOR') {
-    return getSupervisedRoutes(username);
+    const supRoutes = getSupervisedRoutes(username);
+    if (!branchFilter) return supRoutes;
+    return supRoutes.filter((r) => (r.sucursal || 'OCCIDENTE') === branchFilter);
   }
 
-  // Para vendedor: ESTRICTAMENTE SUS PROPIAS RUTAS ASIGNADAS
-  const profile = getVendorProfile(username);
-  return profile.routes;
+  // Para vendedor: ESTRICTAMENTE SUS PROPIAS RUTAS ASIGNADAS Y DE SU SUCURSAL
+  const profile = getVendorProfile(username, branchFilter || undefined);
+  if (!branchFilter) return profile.routes;
+  return profile.routes.filter((r) => (r.sucursal || profile.sucursal || 'OCCIDENTE') === branchFilter);
 }
 
 /**
@@ -562,18 +637,29 @@ export function isRouteMatch(
   sheetVendor: string | null | undefined,
   selectedRouteId: string,
   loggedInVendor: string,
-  userRole: Role
+  userRole: Role,
+  activeSucursal?: Sucursal | null
 ): boolean {
   const normSheetVendor = normalizeVendorName(sheetVendor);
   if (!normSheetVendor) return false;
   // Nunca incluir la fila resumen de "ALI PEREZ" como si fuera un vendedor
   if (normSheetVendor === 'ALI PEREZ') return false;
 
+  const branchFilter = normalizeSucursal(activeSucursal);
+  if (branchFilter) {
+    const matchedProfile = VENDOR_PROFILES[normSheetVendor] || Object.values(VENDOR_PROFILES).find((p) =>
+      p.routes.some((r) => matchesVendorAlias([r.id, ...r.aliases], normSheetVendor))
+    );
+    if (matchedProfile && matchedProfile.sucursal && matchedProfile.sucursal !== branchFilter) {
+      return false;
+    }
+  }
+
   // Filtro por equipo de supervisor (ej. SUPERVISOR:ALI PEREZ)
   if (selectedRouteId.startsWith('SUPERVISOR:')) {
     const supName = selectedRouteId.slice('SUPERVISOR:'.length);
     const supAliases = getSupervisedAliases(supName);
-    if (userRole === 'ADMIN') {
+    if (userRole === 'ADMIN' || userRole === 'COORDINADORA') {
       return matchesVendorAlias(supAliases, normSheetVendor);
     }
     if (userRole === 'SUPERVISOR') {
@@ -585,9 +671,9 @@ export function isRouteMatch(
     }
   }
 
-  // 1. Acceso de Administrador
-  if (userRole === 'ADMIN') {
-    if (selectedRouteId === 'ADMIN') return true;
+  // 1. Acceso de Administrador o Coordinadora de Sede (acotado por activeSucursal arriba)
+  if (userRole === 'ADMIN' || userRole === 'COORDINADORA') {
+    if (selectedRouteId === 'ADMIN' || selectedRouteId === 'COORDINADORA_ALL') return true;
     
     // Si el admin seleccionó un vendedor consolidado (todas sus rutas)
     const isConsolidated = selectedRouteId.startsWith('CONSOLIDATED:');

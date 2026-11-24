@@ -69,10 +69,139 @@ var init_firebase = __esm({
   }
 });
 
+// src/utils/sucursalScope.ts
+function normalizeSucursal(raw) {
+  if (raw === null || raw === void 0) return null;
+  const clean = String(raw).normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/^["'\s]+|["'\s]+$/g, "").toUpperCase();
+  if (clean === "CENTRO" || clean === "SEDE CENTRO" || clean === "SUCURSAL CENTRO") {
+    return "CENTRO";
+  }
+  if (clean === "OCCIDENTE" || clean === "SEDE OCCIDENTE" || clean === "SUCURSAL OCCIDENTE") {
+    return "OCCIDENTE";
+  }
+  return null;
+}
+function inferSucursalFromLegacyMetadata(rawSucursal, rawRegionOrZona) {
+  const explicit = normalizeSucursal(rawSucursal);
+  if (explicit) return explicit;
+  const hint = `${String(rawSucursal ?? "")} ${String(rawRegionOrZona ?? "")}`.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+  if (/\b(CENTRO|CARACAS|VALENCIA|MARACAY|ARAGUA|CARABOBO|MIRANDA|GRAN CARACAS|CAPITAL)\b/.test(hint)) {
+    return "CENTRO";
+  }
+  return "OCCIDENTE";
+}
+function validateCrossBranchSubmission(input) {
+  const roleUpper = String(input.sessionRole || "VENDEDOR").toUpperCase().trim();
+  const sessionBranch = normalizeSucursal(input.sessionSucursal);
+  if (!sessionBranch) {
+    return {
+      ok: false,
+      status: 403,
+      code: "INVALID_SESSION_SUCURSAL",
+      error: "La sesi\xF3n actual no posee una sucursal v\xE1lida (CENTRO | OCCIDENTE)."
+    };
+  }
+  let payloadBranch = null;
+  if (input.payloadSucursal !== void 0 && input.payloadSucursal !== null && String(input.payloadSucursal).trim() !== "") {
+    payloadBranch = normalizeSucursal(input.payloadSucursal);
+    if (!payloadBranch) {
+      return {
+        ok: false,
+        status: 400,
+        code: "INVALID_SUCURSAL_VALUE",
+        error: `Sucursal inv\xE1lida "${String(input.payloadSucursal)}". Valores permitidos: 'CENTRO' | 'OCCIDENTE'.`
+      };
+    }
+  }
+  if (roleUpper !== "ADMIN") {
+    if (payloadBranch && payloadBranch !== sessionBranch) {
+      return {
+        ok: false,
+        status: 403,
+        code: "SUCURSAL_TAMPERING_DETECTED",
+        error: `Operaci\xF3n denegada: Tu sesi\xF3n pertenece a ${sessionBranch} y no puede emitir solicitudes bajo ${payloadBranch}.`
+      };
+    }
+    if (input.vendorSucursal && input.vendorSucursal !== sessionBranch) {
+      return {
+        ok: false,
+        status: 403,
+        code: "VENDOR_SUCURSAL_MISMATCH",
+        error: `Operaci\xF3n denegada: El vendedor seleccionado pertenece a ${input.vendorSucursal}, fuera de tu sucursal (${sessionBranch}).`
+      };
+    }
+  }
+  const effectiveSucursal = roleUpper === "ADMIN" ? input.vendorSucursal || input.storeSucursal || payloadBranch || sessionBranch : sessionBranch;
+  if (payloadBranch && payloadBranch !== effectiveSucursal) {
+    return {
+      ok: false,
+      status: 403,
+      code: "SUCURSAL_TAMPERING_DETECTED",
+      error: `Inconsistencia multisede: el campo sucursal (${payloadBranch}) no coincide con la sede autoritativa (${effectiveSucursal}).`
+    };
+  }
+  if (input.vendorSucursal && input.vendorSucursal !== effectiveSucursal) {
+    return {
+      ok: false,
+      status: 403,
+      code: "VENDOR_SUCURSAL_MISMATCH",
+      error: `El vendedor pertenece a ${input.vendorSucursal} pero la solicitud intenta procesarse en ${effectiveSucursal}.`
+    };
+  }
+  if (input.requireCatalogStore && !input.storeExistsInCatalog) {
+    return {
+      ok: false,
+      status: 400,
+      code: "UNCATALOGED_STORE_FORBIDDEN",
+      error: `El cliente/tienda indicado no existe en el cat\xE1logo activo de la sucursal ${effectiveSucursal}. Selecci\xF3nalo desde la lista oficial.`
+    };
+  }
+  if (input.storeSucursal && input.storeSucursal !== effectiveSucursal) {
+    return {
+      ok: false,
+      status: 403,
+      code: "CROSS_BRANCH_STORE_FORBIDDEN",
+      error: `Acceso multisede denegado: un vendedor o sesi\xF3n de ${effectiveSucursal} no puede seleccionar tiendas de ${input.storeSucursal}.`
+    };
+  }
+  if (input.vendorSucursal && input.storeSucursal && input.vendorSucursal !== input.storeSucursal) {
+    return {
+      ok: false,
+      status: 403,
+      code: "CROSS_BRANCH_STORE_FORBIDDEN",
+      error: `Cruce de sucursales prohibido: vendedor (${input.vendorSucursal}) \u2260 tienda (${input.storeSucursal}).`
+    };
+  }
+  if (input.routeSucursal && input.routeSucursal !== effectiveSucursal) {
+    return {
+      ok: false,
+      status: 403,
+      code: "CROSS_BRANCH_ROUTE_FORBIDDEN",
+      error: `La ruta seleccionada pertenece a ${input.routeSucursal} y no puede usarse desde ${effectiveSucursal}.`
+    };
+  }
+  const cleanRoute = String(input.resolvedRoute || "").trim().toUpperCase();
+  if (cleanRoute === "ALL_MY_ROUTES" || cleanRoute === "SUPERVISOR_ALL") {
+    return {
+      ok: false,
+      status: 400,
+      code: "INVALID_CONSOLIDATED_ROUTE",
+      error: "Debes asociar una ruta comercial espec\xEDfica de tu sucursal (no se permite ALL_MY_ROUTES)."
+    };
+  }
+  return { ok: true, sucursal: effectiveSucursal };
+}
+var init_sucursalScope = __esm({
+  "src/utils/sucursalScope.ts"() {
+    init_define_import_meta_env();
+  }
+});
+
 // src/services/authService.ts
 var init_authService = __esm({
   "src/services/authService.ts"() {
     init_define_import_meta_env();
+    init_sucursalScope();
   }
 });
 
@@ -144,21 +273,54 @@ function hydrateVendorProfilesFromMasterCatalog(rows) {
   if (!Array.isArray(rows) || rows.length === 0) return;
   for (const r of rows) {
     if (r.activo === false) continue;
-    const canon = normalizeVendorName(r.nombre_canonico);
-    if (!canon || r.is_supervisor_route) continue;
+    const rowSucursal = inferSucursalFromLegacyMetadata(r.sucursal, `${r.region || ""} ${r.zona || ""}`);
+    const rawRole = String(r.role || "").toUpperCase().trim();
+    const canon = normalizeVendorName(r.nombre_canonico || r.username || r.nombre);
+    if (!canon) continue;
+    if (r.is_supervisor_route || rawRole === "SUPERVISOR" || rawRole === "COORDINADORA") {
+      if (!SUPERVISOR_PROFILES[canon]) {
+        SUPERVISOR_PROFILES[canon] = {
+          canonicalUsername: canon,
+          displayName: r.display_name || r.nombre || canon,
+          sucursal: rowSucursal,
+          supervisedVendors: []
+        };
+      } else if (normalizeSucursal(r.sucursal)) {
+        SUPERVISOR_PROFILES[canon].sucursal = rowSucursal;
+      }
+      continue;
+    }
     const sup = normalizeVendorName(r.supervisor);
     if (sup && SUPERVISOR_PROFILES[sup] && !SUPERVISOR_PROFILES[sup].supervisedVendors.includes(canon)) {
       SUPERVISOR_PROFILES[sup].supervisedVendors.push(canon);
     }
+    const routeId = normalizeVendorName(r.ruta_oficial || r.ruta) || canon;
+    const aliases = Array.from(
+      /* @__PURE__ */ new Set([canon, routeId, ...(r.aliases || []).map((a) => normalizeVendorName(a)).filter(Boolean)])
+    );
     if (!VENDOR_PROFILES[canon]) {
-      const routeId = normalizeVendorName(r.ruta_oficial) || canon;
-      const aliases = Array.from(/* @__PURE__ */ new Set([canon, routeId, ...(r.aliases || []).map((a) => normalizeVendorName(a)).filter(Boolean)]));
+      const display = r.display_name || r.nombre || canon;
       VENDOR_PROFILES[canon] = {
         canonicalUsername: canon,
-        displayName: r.display_name || canon,
+        displayName: display,
         email: r.email || void 0,
-        routes: [{ id: routeId, label: `Ruta ${r.display_name || canon}`, aliases }]
+        sucursal: rowSucursal,
+        routes: [{ id: routeId, label: `Ruta ${display}`, aliases, sucursal: rowSucursal }]
       };
+    } else {
+      const existing = VENDOR_PROFILES[canon];
+      if (normalizeSucursal(r.sucursal)) {
+        existing.sucursal = rowSucursal;
+      }
+      const hasRoute = existing.routes.some((rt) => rt.id === routeId);
+      if (!hasRoute && routeId) {
+        existing.routes.push({
+          id: routeId,
+          label: `Ruta ${r.display_name || r.nombre || routeId}`,
+          aliases,
+          sucursal: rowSucursal
+        });
+      }
     }
   }
 }
@@ -217,7 +379,7 @@ function matchesVendorAlias(aliases, sheetVendor) {
   }
   return false;
 }
-function getVendorProfile(username) {
+function getVendorProfile(username, fallbackSucursal) {
   const normUser = normalizeVendorName(username);
   if (VENDOR_PROFILES[normUser]) {
     return VENDOR_PROFILES[normUser];
@@ -231,19 +393,48 @@ function getVendorProfile(username) {
   if (/MIKELANGELO|JOHNATAN|JONATHAN|JHONATAN|SOTO/.test(normUser)) {
     return VENDOR_PROFILES["MIKELANGELO DIAZ"];
   }
+  const resolvedSuc = normalizeSucursal(fallbackSucursal) || "OCCIDENTE";
   return {
     canonicalUsername: normUser,
     displayName: normUser,
+    sucursal: resolvedSuc,
     routes: [
-      { id: normUser, label: `Ruta ${normUser}`, aliases: [normUser] }
+      { id: normUser, label: `Ruta ${normUser}`, aliases: [normUser], sucursal: resolvedSuc }
     ]
   };
+}
+function getAllowedRoutesForUser(username, role, activeSucursal) {
+  const branchFilter = normalizeSucursal(activeSucursal);
+  if (role === "ADMIN" || role === "COORDINADORA") {
+    const map = /* @__PURE__ */ new Map();
+    Object.values(VENDOR_PROFILES).forEach((profile2) => {
+      const profSuc = profile2.sucursal || "OCCIDENTE";
+      if (branchFilter && profSuc !== branchFilter) return;
+      profile2.routes.forEach((r) => {
+        const rSuc = r.sucursal || profSuc;
+        if (branchFilter && rSuc !== branchFilter) return;
+        if (!map.has(r.id)) {
+          map.set(r.id, r);
+        }
+      });
+    });
+    return Array.from(map.values());
+  }
+  if (role === "SUPERVISOR") {
+    const supRoutes = getSupervisedRoutes(username);
+    if (!branchFilter) return supRoutes;
+    return supRoutes.filter((r) => (r.sucursal || "OCCIDENTE") === branchFilter);
+  }
+  const profile = getVendorProfile(username, branchFilter || void 0);
+  if (!branchFilter) return profile.routes;
+  return profile.routes.filter((r) => (r.sucursal || profile.sucursal || "OCCIDENTE") === branchFilter);
 }
 var SUPERVISOR_SUMMARY_COLUMNS, VENDOR_PROFILES, mikelProfile, SUPERVISOR_PROFILES;
 var init_vendorRoutes = __esm({
   "src/utils/vendorRoutes.ts"() {
     init_define_import_meta_env();
     init_vendorKeyNormalizer();
+    init_sucursalScope();
     SUPERVISOR_SUMMARY_COLUMNS = /* @__PURE__ */ new Set([
       "ALI PEREZ",
       "NELSON FINOL",
@@ -590,6 +781,15 @@ var init_vendorRoutes = __esm({
         ]
       }
     };
+    Object.values(VENDOR_PROFILES).forEach((prof) => {
+      if (!prof.sucursal) prof.sucursal = "OCCIDENTE";
+      prof.routes.forEach((r) => {
+        if (!r.sucursal) r.sucursal = prof.sucursal || "OCCIDENTE";
+      });
+    });
+    Object.values(SUPERVISOR_PROFILES).forEach((sup) => {
+      if (!sup.sucursal) sup.sucursal = "OCCIDENTE";
+    });
   }
 });
 
@@ -7083,6 +7283,7 @@ init_vendorRoutes();
 
 // src/utils/maestraCatalogSanitizer.ts
 init_define_import_meta_env();
+init_sucursalScope();
 function sanitizeCatalogText(val) {
   if (val === null || val === void 0) return "";
   return String(val).replace(/^\uFEFF/, "").replace(/[\u200B-\u200D\uFEFF]/g, "").replace(/Ã‘|Ã±/g, "\xD1").replace(/\s+/g, " ").trim();
@@ -7721,6 +7922,7 @@ function hydrateRuntimeSellerCatalog(rows) {
         supervisor: sanitizeCatalogUpper(raw.supervisor) || existing.supervisor,
         zona: sanitizeCatalogText(raw.zona) || existing.zona,
         region: sanitizeCatalogText(raw.region) || existing.region,
+        sucursal: normalizeSucursal(raw.sucursal) || existing.sucursal || inferSucursalFromLegacyMetadata(raw.region, raw.zona),
         role: sanitizeCatalogUpper(raw.role) || existing.role,
         is_supervisor_route: isSup,
         incluir_en_volumen: typeof raw.incluir_en_volumen === "boolean" ? raw.incluir_en_volumen : existing.incluir_en_volumen,
@@ -7730,6 +7932,7 @@ function hydrateRuntimeSellerCatalog(rows) {
         activo: typeof raw.activo === "boolean" ? raw.activo : existing.activo
       });
     } else {
+      const inferredSuc = inferSucursalFromLegacyMetadata(raw.sucursal, `${raw.region || ""} ${raw.zona || ""}`);
       byCanonical.set(key, {
         vendedor_id: sanitizeCatalogText(raw.vendedor_id) || canon,
         codigo_erp: sanitizeCatalogText(raw.codigo_erp) || "",
@@ -7737,10 +7940,11 @@ function hydrateRuntimeSellerCatalog(rows) {
         display_name: sanitizeCatalogText(raw.display_name) || canon,
         ruta_oficial: sanitizeCatalogUpper(raw.ruta_oficial) || canon,
         aliases: Array.from(/* @__PURE__ */ new Set([canon, ...rawAliases])),
-        supervisor: sanitizeCatalogUpper(raw.supervisor) || "NELSON FINOL",
-        zona: sanitizeCatalogText(raw.zona) || "Maracaibo",
-        region: sanitizeCatalogText(raw.region) || "OCCIDENTE",
-        role: isSup ? "SUPERVISOR" : "VENDEDOR",
+        supervisor: sanitizeCatalogUpper(raw.supervisor) || (inferredSuc === "CENTRO" ? "SUPERVISION CENTRO" : "NELSON FINOL"),
+        zona: sanitizeCatalogText(raw.zona) || (inferredSuc === "CENTRO" ? "Centro" : "Maracaibo"),
+        region: sanitizeCatalogText(raw.region) || inferredSuc,
+        sucursal: inferredSuc,
+        role: sanitizeCatalogUpper(raw.role) || (isSup ? "SUPERVISOR" : "VENDEDOR"),
         is_supervisor_route: isSup,
         incluir_en_volumen: typeof raw.incluir_en_volumen === "boolean" ? raw.incluir_en_volumen : !isSup,
         meta_activacion: Number(raw.meta_activacion) || 0,
@@ -10480,10 +10684,497 @@ var DEFAULT_VENDOR_BCRYPT_CREDENTIALS = {
 
 // server.ts
 init_alkostoPermissions();
-var import_firestore3 = require("firebase/firestore");
+init_sucursalScope();
+
+// src/services/tradeMultisedeService.ts
+init_define_import_meta_env();
 var import_supabase_js = require("@supabase/supabase-js");
-var import_jsonwebtoken = __toESM(require("jsonwebtoken"), 1);
 var import_bcryptjs2 = __toESM(require("bcryptjs"), 1);
+var import_jsonwebtoken = __toESM(require("jsonwebtoken"), 1);
+init_sucursalScope();
+init_vendorRoutes();
+init_productosCodizulca();
+function createTradeSupabaseClients(env = process.env) {
+  const dedicatedUrl = String(env.TRADE_SUPABASE_URL || "").trim().replace(/\/+$/, "");
+  const fallbackUrl = String(env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
+  const url = dedicatedUrl || fallbackUrl;
+  const serviceKey = String(
+    env.TRADE_SUPABASE_SERVICE_ROLE_KEY || (dedicatedUrl ? env.TRADE_SUPABASE_ANON_KEY : env.SUPABASE_SERVICE_ROLE_KEY) || ""
+  ).trim();
+  const anonKey = String(
+    env.TRADE_SUPABASE_ANON_KEY || (!dedicatedUrl ? env.VITE_SUPABASE_ANON_KEY : "") || serviceKey
+  ).trim();
+  const jwtSecret = String(env.TRADE_SUPABASE_JWT_SECRET || "").trim();
+  const strictSucursalColumn = Boolean(dedicatedUrl) || env.TRADE_STRICT_SUCURSAL === "true";
+  const adminClient = url && serviceKey ? (0, import_supabase_js.createClient)(url, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } }) : null;
+  return {
+    adminClient,
+    url,
+    anonKey,
+    jwtSecret,
+    strictSucursalColumn
+  };
+}
+function getScopedTradeClient(clients, actor) {
+  if (!clients.url) return null;
+  if (actor.supabaseAccessToken && clients.anonKey) {
+    return (0, import_supabase_js.createClient)(clients.url, clients.anonKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+      global: {
+        headers: {
+          Authorization: `Bearer ${actor.supabaseAccessToken}`,
+          "X-FDV-Sucursal": actor.sucursal
+        }
+      }
+    });
+  }
+  if (clients.jwtSecret && clients.anonKey) {
+    const nowSec = Math.floor(Date.now() / 1e3);
+    const rlsJwt = import_jsonwebtoken.default.sign(
+      {
+        aud: "authenticated",
+        role: "authenticated",
+        sub: `fdv-${normalizeAsciiKey(actor.vendorId || actor.username) || "user"}`,
+        app_metadata: {
+          role: String(actor.role).toUpperCase(),
+          sucursal: actor.sucursal,
+          vendor_id: actor.vendorId,
+          vendor_name: actor.username
+        },
+        iat: nowSec,
+        exp: nowSec + 300
+      },
+      clients.jwtSecret
+    );
+    return (0, import_supabase_js.createClient)(clients.url, clients.anonKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+      global: {
+        headers: {
+          Authorization: `Bearer ${rlsJwt}`,
+          "X-FDV-Sucursal": actor.sucursal
+        }
+      }
+    });
+  }
+  return clients.adminClient;
+}
+function isMissingTableOrColumnError(err) {
+  if (!err) return false;
+  const code = String(err.code || "");
+  const msg = String(err.message || "");
+  return code === "42P01" || code === "42703" || code === "PGRST204" || code === "PGRST205" || /does not exist|schema cache|Could not find the/i.test(msg);
+}
+async function verifyPasswordOrCedula(rawPwd, storedHashOrCedula) {
+  const pwd = String(rawPwd || "").trim();
+  const pwdDigits = pwd.replace(/\D/g, "");
+  const candidate = String(storedHashOrCedula || "").trim();
+  if (!pwd || !candidate) return false;
+  if (candidate.startsWith("$2")) {
+    if (await import_bcryptjs2.default.compare(pwd, candidate)) return true;
+    if (pwdDigits && pwdDigits !== pwd && await import_bcryptjs2.default.compare(pwdDigits, candidate)) return true;
+    return false;
+  }
+  const candDigits = candidate.replace(/\D/g, "");
+  return pwd === candidate || Boolean(pwdDigits) && Boolean(candDigits) && pwdDigits === candDigits;
+}
+async function authenticateVendorFromTradeSupabase(client, rawUsername, rawPassword) {
+  if (!client) return { matched: false };
+  const userUpper = normalizeVendorName(rawUsername);
+  const userAscii = normalizeAsciiKey(userUpper);
+  if (!userUpper) return { matched: false };
+  for (const tableName of ["vendedores", "vendedores_fdv"]) {
+    try {
+      const { data, error } = await client.from(tableName).select("*");
+      if (error) {
+        if (isMissingTableOrColumnError(error)) continue;
+        break;
+      }
+      if (!Array.isArray(data) || data.length === 0) continue;
+      const found = data.find((r) => {
+        const candidates = [r.username, r.nombre, r.codigo, r.id, r.vendedor_id].map((v) => normalizeVendorName(v)).filter(Boolean);
+        return candidates.some((c) => c === userUpper || normalizeAsciiKey(c) === userAscii);
+      });
+      if (!found) continue;
+      if (found.activo === false) {
+        return { matched: true, inactive: true };
+      }
+      const secretField = String(found.password_hash || found.cedula_hash || found.cedula || found.password || found.codigo || "").trim();
+      const valid = await verifyPasswordOrCedula(rawPassword, secretField);
+      if (!valid) {
+        return { matched: true, validPassword: false };
+      }
+      if (found.password_hash !== void 0 && (!found.password_hash || !String(found.password_hash).startsWith("$2"))) {
+        const cleanDigits = String(rawPassword).replace(/\D/g, "") || String(rawPassword).trim();
+        import_bcryptjs2.default.hash(cleanDigits, 12).then((hash) => {
+          client.from(tableName).update({ password_hash: hash }).eq("id", found.id).then(() => {
+          }, () => {
+          });
+        }).catch(() => {
+        });
+      }
+      const sucursal = normalizeSucursal(found.sucursal);
+      if (!sucursal) {
+        return { matched: false };
+      }
+      const rawRole = String(found.role || found.rol || "VENDEDOR").toUpperCase().trim();
+      const role = rawRole === "ADMIN" || rawRole === "SUPERVISOR" || rawRole === "COORDINADORA" ? rawRole : "VENDEDOR";
+      const canonicalUsername = normalizeVendorName(found.username || found.nombre);
+      const vendorId = String(found.id ?? found.codigo ?? found.vendedor_id ?? canonicalUsername).trim();
+      const ruta = normalizeVendorName(found.ruta || found.ruta_oficial || canonicalUsername);
+      return {
+        matched: true,
+        validPassword: true,
+        user: {
+          username: canonicalUsername,
+          displayName: String(found.nombre || found.display_name || canonicalUsername).trim(),
+          role,
+          vendorId,
+          ruta,
+          sucursal,
+          email: found.email ? String(found.email).trim() : void 0,
+          source: "supabase_vendedores"
+        }
+      };
+    } catch {
+      continue;
+    }
+  }
+  return { matched: false };
+}
+async function fetchProductosNacionales(client) {
+  if (client) {
+    try {
+      const { data, error } = await client.from("productos").select("*");
+      if (!error && Array.isArray(data) && data.length > 0) {
+        return data.filter((p) => p && p.activo !== false).map((p) => {
+          const codigo = String(p.codigo ?? p.sku ?? p.id ?? "").trim();
+          const nombre = String(p.nombre ?? p.descripcion ?? p.producto ?? codigo).trim().toUpperCase();
+          return {
+            id: String(p.id ?? codigo),
+            codigo: codigo || nombre,
+            nombre,
+            categoria: p.categoria ? String(p.categoria).trim().toUpperCase() : void 0
+          };
+        }).filter((p) => Boolean(p.nombre)).sort((a, b) => a.nombre.localeCompare(b.nombre, "es"));
+      }
+    } catch {
+    }
+  }
+  return PRODUCTOS_CODIZULCA.map((p) => ({
+    id: p.codigo,
+    codigo: p.codigo,
+    nombre: p.descripcion,
+    categoria: "NACIONAL"
+  }));
+}
+async function fetchClientesPorSucursal(client, sucursal, actor, fallbackOccidenteRows) {
+  const targetBranch = normalizeSucursal(sucursal) || "OCCIDENTE";
+  if (client) {
+    for (const tableName of ["clientes", "tiendas"]) {
+      try {
+        const { data, error } = await client.from(tableName).select("*").eq("sucursal", targetBranch);
+        if (error) {
+          if (isMissingTableOrColumnError(error)) continue;
+          break;
+        }
+        if (Array.isArray(data)) {
+          const activeRows = data.filter((r) => {
+            if (!r || r.activo === false) return false;
+            return normalizeSucursal(r.sucursal) === targetBranch;
+          });
+          const mapped = activeRows.map((r) => {
+            const codigo = String(r.codigo ?? r.cliente_codigo ?? r.id_cliente ?? r.id ?? "").trim();
+            const nombre = String(r.nombre ?? r.razon_social ?? r.cliente_nombre ?? r.tienda ?? "").trim().toUpperCase();
+            return {
+              id: String(r.id ?? codigo),
+              codigo: codigo || String(r.id ?? ""),
+              nombre,
+              rif: r.rif ? String(r.rif).trim() : void 0,
+              direccion: r.direccion ? String(r.direccion).trim() : void 0,
+              ruta: r.ruta ? String(r.ruta).trim().toUpperCase() : void 0,
+              vendedorId: r.vendedor_id !== void 0 && r.vendedor_id !== null ? String(r.vendedor_id).trim() : void 0,
+              vendedorNombre: r.vendedor_nombre ? String(r.vendedor_nombre).trim().toUpperCase() : void 0,
+              sucursal: targetBranch
+            };
+          }).filter((item) => Boolean(item.nombre && item.codigo));
+          const roleUpper = String(actor?.role || "").toUpperCase();
+          if (roleUpper === "VENDEDOR" && actor?.username) {
+            const prof = getVendorProfile(actor.username, targetBranch);
+            const aliases = Array.from(
+              new Set([
+                actor.username,
+                actor.vendorId || "",
+                prof.canonicalUsername,
+                prof.displayName,
+                ...prof.routes.flatMap((rt) => [rt.id, ...rt.aliases])
+              ].filter(Boolean))
+            );
+            const hasVendorAssignment = mapped.some((m) => Boolean(m.vendedorId || m.vendedorNombre || m.ruta));
+            if (hasVendorAssignment) {
+              const vendorOwned = mapped.filter(
+                (m) => matchesVendorAlias(aliases, m.vendedorNombre) || matchesVendorAlias(aliases, m.vendedorId) || matchesVendorAlias(aliases, m.ruta)
+              );
+              if (vendorOwned.length > 0) {
+                return {
+                  items: vendorOwned.sort((a, b) => a.nombre.localeCompare(b.nombre, "es")),
+                  fromAuthoritativeTable: true
+                };
+              }
+            }
+          }
+          return {
+            items: mapped.sort((a, b) => a.nombre.localeCompare(b.nombre, "es")),
+            fromAuthoritativeTable: true
+          };
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+  if (targetBranch === "OCCIDENTE" && Array.isArray(fallbackOccidenteRows) && fallbackOccidenteRows.length > 0) {
+    const seen = /* @__PURE__ */ new Map();
+    const roleUpper = String(actor?.role || "").toUpperCase();
+    const prof = actor?.username ? getVendorProfile(actor.username, "OCCIDENTE") : null;
+    const aliases = prof ? [
+      actor.username,
+      actor?.vendorId || "",
+      prof.canonicalUsername,
+      prof.displayName,
+      ...prof.routes.flatMap((rt) => [rt.id, ...rt.aliases])
+    ].filter(Boolean) : [];
+    for (const raw of fallbackOccidenteRows) {
+      const rowSuc = inferSucursalFromLegacyMetadata(raw.sucursal, raw.zona || raw.region);
+      if (rowSuc !== "OCCIDENTE") continue;
+      const vId = String(raw.vendedorId ?? raw.vendedor_id ?? "").trim();
+      const vName = String(raw.vendedorNombre ?? raw.vendedor_nombre ?? vId).trim();
+      if (roleUpper === "VENDEDOR" && aliases.length > 0) {
+        if (!matchesVendorAlias(aliases, vName) && !matchesVendorAlias(aliases, vId)) {
+          continue;
+        }
+      }
+      const codigo = String(raw.id ?? raw.cliente_codigo ?? raw.codigo ?? "").replace(/#\d+$/, "").trim();
+      const nombre = String(raw.cliente ?? raw.cliente_nombre ?? raw.nombre ?? "").trim().toUpperCase();
+      if (!codigo || !nombre) continue;
+      const key = `${codigo.toUpperCase()}::${nombre}`;
+      if (!seen.has(key)) {
+        seen.set(key, {
+          id: codigo,
+          codigo,
+          nombre,
+          ruta: vId || vName,
+          vendedorId: vId,
+          vendedorNombre: vName.toUpperCase(),
+          sucursal: "OCCIDENTE"
+        });
+      }
+    }
+    return {
+      items: Array.from(seen.values()).sort((a, b) => a.nombre.localeCompare(b.nombre, "es")),
+      fromAuthoritativeTable: false
+    };
+  }
+  return { items: [], fromAuthoritativeTable: false };
+}
+async function fetchRutasPorSucursal(client, sucursal, actor) {
+  const targetBranch = normalizeSucursal(sucursal) || "OCCIDENTE";
+  if (client) {
+    try {
+      const { data, error } = await client.from("rutas").select("*").eq("sucursal", targetBranch);
+      if (!error && Array.isArray(data) && data.length > 0) {
+        const list = data.filter((r) => r && r.activo !== false && normalizeSucursal(r.sucursal) === targetBranch).map((r) => ({
+          id: String(r.id ?? r.codigo ?? r.nombre).trim(),
+          codigo: String(r.codigo ?? r.id ?? r.nombre).trim().toUpperCase(),
+          nombre: String(r.nombre ?? r.codigo ?? r.id).trim().toUpperCase(),
+          supervisor: r.supervisor ? String(r.supervisor).trim().toUpperCase() : void 0,
+          sucursal: targetBranch
+        }));
+        if (String(actor?.role || "").toUpperCase() === "VENDEDOR" && actor?.username) {
+          const prof = getVendorProfile(actor.username, targetBranch);
+          const aliases = [actor.username, prof.canonicalUsername, ...prof.routes.flatMap((rt) => [rt.id, ...rt.aliases])];
+          const own = list.filter((r) => matchesVendorAlias(aliases, r.nombre) || matchesVendorAlias(aliases, r.codigo));
+          if (own.length > 0) return own;
+        }
+        return list;
+      }
+    } catch {
+    }
+  }
+  const allowed = getAllowedRoutesForUser(
+    actor?.username || "ADMIN",
+    actor?.role || "ADMIN",
+    targetBranch
+  );
+  return allowed.map((r) => ({
+    id: r.id,
+    codigo: r.id,
+    nombre: r.label,
+    sucursal: targetBranch
+  }));
+}
+async function fetchVendedoresPorSucursal(client, sucursal, actor) {
+  const targetBranch = normalizeSucursal(sucursal) || "OCCIDENTE";
+  if (client) {
+    for (const tableName of ["vendedores", "vendedores_fdv"]) {
+      try {
+        const { data, error } = await client.from(tableName).select("*").eq("sucursal", targetBranch);
+        if (error) {
+          if (isMissingTableOrColumnError(error)) continue;
+          break;
+        }
+        if (Array.isArray(data) && data.length > 0) {
+          const items = data.filter((v) => v && v.activo !== false && normalizeSucursal(v.sucursal) === targetBranch).map((v) => {
+            const rawRole = String(v.role || v.rol || "VENDEDOR").toUpperCase().trim();
+            const role = rawRole === "ADMIN" || rawRole === "SUPERVISOR" || rawRole === "COORDINADORA" ? rawRole : "VENDEDOR";
+            const username = normalizeVendorName(v.username || v.nombre);
+            return {
+              id: String(v.id ?? v.codigo ?? username),
+              codigo: v.codigo ? String(v.codigo).trim() : void 0,
+              username,
+              nombre: String(v.nombre || v.display_name || username).trim(),
+              ruta: v.ruta ? String(v.ruta).trim().toUpperCase() : void 0,
+              supervisor: v.supervisor ? String(v.supervisor).trim().toUpperCase() : void 0,
+              role,
+              sucursal: targetBranch
+            };
+          });
+          if (String(actor?.role || "").toUpperCase() === "VENDEDOR" && actor?.username) {
+            return items.filter((v) => matchesVendorAlias([actor.username], v.username) || matchesVendorAlias([actor.username], v.nombre));
+          }
+          return items;
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+  const seen = /* @__PURE__ */ new Set();
+  const list = [];
+  for (const prof of Object.values(VENDOR_PROFILES)) {
+    if (seen.has(prof.canonicalUsername)) continue;
+    seen.add(prof.canonicalUsername);
+    if ((prof.sucursal || "OCCIDENTE") !== targetBranch) continue;
+    if (String(actor?.role || "").toUpperCase() === "VENDEDOR" && actor?.username && !matchesVendorAlias([actor.username], prof.canonicalUsername)) {
+      continue;
+    }
+    list.push({
+      id: prof.canonicalUsername,
+      username: prof.canonicalUsername,
+      nombre: prof.displayName,
+      ruta: prof.routes[0]?.id || prof.canonicalUsername,
+      role: "VENDEDOR",
+      sucursal: targetBranch
+    });
+  }
+  return list.sort((a, b) => a.nombre.localeCompare(b.nombre, "es"));
+}
+async function lookupStoreGlobalSucursal(client, clienteCodigo, clienteNombre) {
+  const cleanCode = String(clienteCodigo || "").replace(/^[#\s]+/, "").replace(/^c-/i, "").trim().toUpperCase();
+  const cleanName = String(clienteNombre || "").trim().toUpperCase();
+  if (client) {
+    for (const tableName of ["clientes", "tiendas"]) {
+      try {
+        const { data, error } = await client.from(tableName).select("*");
+        if (error) {
+          if (isMissingTableOrColumnError(error)) continue;
+          break;
+        }
+        if (!Array.isArray(data) || data.length === 0) continue;
+        const activeRows = data.filter((r) => r && r.activo !== false);
+        if (activeRows.length === 0) continue;
+        const match = activeRows.find((r) => {
+          const rCode = String(r.codigo ?? r.cliente_codigo ?? r.id_cliente ?? r.id ?? "").replace(/^[#\s]+/, "").replace(/^c-/i, "").trim().toUpperCase();
+          const rName = String(r.nombre ?? r.razon_social ?? r.cliente_nombre ?? r.tienda ?? "").trim().toUpperCase();
+          if (cleanCode && cleanCode !== "PDV" && rCode && (rCode === cleanCode || rCode.replace(/^0+/, "") === cleanCode.replace(/^0+/, ""))) {
+            return true;
+          }
+          if (cleanName && rName && rName === cleanName) {
+            return true;
+          }
+          return false;
+        });
+        if (!match) {
+          return { authoritativeCatalogActive: true, found: false, sucursal: null };
+        }
+        return {
+          authoritativeCatalogActive: true,
+          found: true,
+          sucursal: normalizeSucursal(match.sucursal),
+          codigo: String(match.codigo ?? match.cliente_codigo ?? match.id ?? cleanCode).trim(),
+          nombre: String(match.nombre ?? match.razon_social ?? match.cliente_nombre ?? cleanName).trim().toUpperCase(),
+          ruta: match.ruta ? String(match.ruta).trim().toUpperCase() : void 0
+        };
+      } catch {
+        continue;
+      }
+    }
+  }
+  return { authoritativeCatalogActive: false, found: false, sucursal: null };
+}
+async function lookupVendorGlobalSucursal(client, vendedorIdOrName) {
+  const clean = normalizeVendorName(vendedorIdOrName);
+  const ascii = normalizeAsciiKey(clean);
+  if (!clean || clean === "ADMIN" || clean === "GERENCIA TRADE MARKETING") {
+    return { found: false, sucursal: null };
+  }
+  if (client) {
+    for (const tableName of ["vendedores", "vendedores_fdv"]) {
+      try {
+        const { data, error } = await client.from(tableName).select("*");
+        if (error) {
+          if (isMissingTableOrColumnError(error)) continue;
+          break;
+        }
+        if (!Array.isArray(data) || data.length === 0) continue;
+        const match = data.find((v) => {
+          if (!v || v.activo === false) return false;
+          const candidates = [v.username, v.nombre, v.codigo, v.id, v.ruta].map((x) => normalizeVendorName(x)).filter(Boolean);
+          return candidates.some((c) => c === clean || normalizeAsciiKey(c) === ascii);
+        });
+        if (match) {
+          return {
+            found: true,
+            sucursal: normalizeSucursal(match.sucursal),
+            canonicalName: normalizeVendorName(match.username || match.nombre),
+            vendorId: String(match.id ?? match.codigo ?? match.username).trim(),
+            primaryRoute: normalizeVendorName(match.ruta || match.username || match.nombre)
+          };
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+  const sup = getSupervisorProfile(clean);
+  if (sup) {
+    return {
+      found: true,
+      sucursal: sup.sucursal || "OCCIDENTE",
+      canonicalName: sup.canonicalUsername,
+      vendorId: sup.canonicalUsername,
+      primaryRoute: sup.canonicalUsername
+    };
+  }
+  const knownInMemory = VENDOR_PROFILES[clean] || Object.values(VENDOR_PROFILES).find(
+    (p) => normalizeAsciiKey(p.canonicalUsername) === ascii || normalizeAsciiKey(p.displayName) === ascii || p.routes.some((r) => matchesVendorAlias([r.id, ...r.aliases], clean))
+  );
+  if (knownInMemory) {
+    return {
+      found: true,
+      sucursal: knownInMemory.sucursal || "OCCIDENTE",
+      canonicalName: knownInMemory.canonicalUsername,
+      vendorId: knownInMemory.routes[0]?.id || knownInMemory.canonicalUsername,
+      primaryRoute: knownInMemory.routes[0]?.id || knownInMemory.canonicalUsername
+    };
+  }
+  return { found: false, sucursal: null };
+}
+
+// server.ts
+var import_firestore3 = require("firebase/firestore");
+var import_supabase_js2 = require("@supabase/supabase-js");
+var import_jsonwebtoken2 = __toESM(require("jsonwebtoken"), 1);
+var import_bcryptjs3 = __toESM(require("bcryptjs"), 1);
 import_dotenv.default.config();
 process.on("uncaughtException", (err) => {
   const msg = err?.message || String(err);
@@ -10511,7 +11202,9 @@ if (typeof globalThis.WebSocket === "undefined") {
 }
 var SUPABASE_URL = process.env.SUPABASE_URL || "";
 var SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
-var supabase = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY ? (0, import_supabase_js.createClient)(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } }) : null;
+var supabase = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY ? (0, import_supabase_js2.createClient)(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } }) : null;
+var tradeSupabaseCfg = createTradeSupabaseClients(process.env);
+var tradeSupabase = tradeSupabaseCfg.adminClient || supabase;
 var metasPeriodoActual = (d = /* @__PURE__ */ new Date()) => getCaracasYearMonth(d);
 if (process.env.NODE_ENV === "production" && !process.env.JWT_SECRET) {
   throw new Error("[SECURITY] JWT_SECRET es obligatorio en producci\xF3n.");
@@ -10523,7 +11216,7 @@ function authenticateToken(req, res, next) {
   if (!token) {
     return res.status(401).json({ success: false, error: "Token de autenticaci\xF3n requerido (Bearer token ausente)" });
   }
-  import_jsonwebtoken.default.verify(token, JWT_SECRET, (err, decoded) => {
+  import_jsonwebtoken2.default.verify(token, JWT_SECRET, (err, decoded) => {
     if (err) {
       return res.status(403).json({ success: false, error: "Token inv\xE1lido o expirado" });
     }
@@ -10736,9 +11429,11 @@ async function loadWorkbookTransient(forceLive = false, options = {}) {
       lastSuccessfulSheetSyncAt = (/* @__PURE__ */ new Date()).toISOString();
       lastSheetSource = "live_google_sheet";
       lastSheetDegraded = false;
-      try {
-        import_fs.default.writeFileSync(localPath, nodeBuf);
-      } catch (_) {
+      if (!process.env.VITEST && process.env.NODE_ENV !== "test" && process.env.DISABLE_LOCAL_SHEET_OVERWRITE !== "1") {
+        try {
+          import_fs.default.writeFileSync(localPath, nodeBuf);
+        } catch (_) {
+        }
       }
       const wb = XLSX2.read(nodeBuf, { type: "buffer", raw: true });
       return { workbook: wb, sha256: sha, source: "live_google_sheet" };
@@ -10809,7 +11504,7 @@ async function startServer() {
       if (isOriginAllowed(requestOrigin)) {
         res.header("Access-Control-Allow-Origin", requestOrigin);
         res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
-        res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, Pragma, X-Idempotency-Key, X-Sync-Token");
+        res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, Pragma, X-Idempotency-Key, X-Sync-Token, X-Active-Sucursal");
         res.header("Access-Control-Expose-Headers", "X-Last-Sync, X-Last-Sync-Caracas, X-Sync-Source, X-Sync-Degraded, X-Sync-Cooldown-Remaining");
       } else if (req.method === "OPTIONS") {
         return res.status(403).json({ success: false, error: "Origen CORS no autorizado." });
@@ -10861,15 +11556,74 @@ async function startServer() {
       const verifyAgainstHash = async (candidateHash) => {
         if (!candidateHash) return false;
         if (candidateHash.startsWith("$2")) {
-          if (await import_bcryptjs2.default.compare(pwd, candidateHash)) return true;
-          if (pwdClean && pwdClean !== pwd && await import_bcryptjs2.default.compare(pwdClean, candidateHash)) return true;
+          if (await import_bcryptjs3.default.compare(pwd, candidateHash)) return true;
+          if (pwdClean && pwdClean !== pwd && await import_bcryptjs3.default.compare(pwdClean, candidateHash)) return true;
           return false;
         }
         return pwd === candidateHash || Boolean(pwdClean) && pwdClean === candidateHash;
       };
+      if (tradeSupabase) {
+        const tradeAuth = await authenticateVendorFromTradeSupabase(tradeSupabase, usuarioUpper, pwd);
+        if (tradeAuth.matched) {
+          if (tradeAuth.inactive) {
+            return res.status(401).json({ success: false, error: "Usuario inactivo o deshabilitado" });
+          }
+          if (!tradeAuth.validPassword || !tradeAuth.user) {
+            return res.status(401).json({ success: false, error: "Contrase\xF1a incorrecta" });
+          }
+          const tu = tradeAuth.user;
+          hydrateVendorProfilesFromMasterCatalog([
+            {
+              username: tu.username,
+              nombre: tu.displayName,
+              ruta: tu.ruta,
+              sucursal: tu.sucursal,
+              role: tu.role,
+              email: tu.email,
+              activo: true
+            }
+          ]);
+          const token2 = import_jsonwebtoken2.default.sign(
+            {
+              username: tu.username,
+              displayName: tu.displayName,
+              role: tu.role,
+              vendorId: tu.vendorId,
+              ruta: tu.ruta,
+              sucursal: tu.sucursal,
+              vendorKey: normalizeVendorKey(tu.username)
+            },
+            JWT_SECRET,
+            { expiresIn: "7d" }
+          );
+          return res.json({
+            success: true,
+            token: token2,
+            user: {
+              username: tu.username,
+              displayName: tu.displayName,
+              role: tu.role,
+              vendorId: tu.vendorId,
+              ruta: tu.ruta,
+              sucursal: tu.sucursal
+            },
+            source: tu.source
+          });
+        }
+      }
       if (supabase) {
         try {
-          const { data: supaUser, error: supaErr } = await supabase.from("usuarios").select("username,password_hash,role,vendor_id,activo").in("username", [usuarioUpper, matchedCanonicalKey]).maybeSingle();
+          let supaUser = null;
+          let supaErr = null;
+          const withSucRes = await supabase.from("usuarios").select("username,password_hash,role,vendor_id,activo,sucursal").in("username", [usuarioUpper, matchedCanonicalKey]).maybeSingle();
+          if (withSucRes.error && /sucursal|schema cache|42703/i.test(String(withSucRes.error.message || withSucRes.error.code || ""))) {
+            const legacyRes = await supabase.from("usuarios").select("username,password_hash,role,vendor_id,activo").in("username", [usuarioUpper, matchedCanonicalKey]).maybeSingle();
+            supaUser = legacyRes.data;
+            supaErr = legacyRes.error;
+          } else {
+            supaUser = withSucRes.data;
+            supaErr = withSucRes.error;
+          }
           if (!supaErr && supaUser) {
             if (supaUser.activo === false) {
               return res.status(401).json({ success: false, error: "Usuario inactivo o deshabilitado" });
@@ -10880,7 +11634,7 @@ async function startServer() {
             }
             if (isValid) {
               if (supaUser.password_hash && !String(supaUser.password_hash).startsWith("$2")) {
-                import_bcryptjs2.default.hash(pwdClean || pwd, 12).then((upgradedHash) => {
+                import_bcryptjs3.default.hash(pwdClean || pwd, 12).then((upgradedHash) => {
                   supabase.from("usuarios").update({ password_hash: upgradedHash, updated_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("username", supaUser.username).then(() => {
                   }, () => {
                   });
@@ -10890,11 +11644,13 @@ async function startServer() {
               const supProfile = getSupervisorProfile(supaUser.username);
               const resolvedRole = supProfile ? "SUPERVISOR" : supaUser.role;
               const canonicalUser = matchedCanonicalKey || supaUser.username;
-              const token2 = import_jsonwebtoken.default.sign(
+              const resolvedSucursal = normalizeSucursal(supaUser.sucursal) || (resolvedRole === "ADMIN" ? normalizeSucursal(req.body?.sucursal) : null) || supProfile?.sucursal || getVendorProfile(canonicalUser).sucursal || "OCCIDENTE";
+              const token2 = import_jsonwebtoken2.default.sign(
                 {
                   username: canonicalUser,
                   role: resolvedRole,
                   vendorId: supaUser.vendor_id,
+                  sucursal: resolvedSucursal,
                   vendorKey: normalizeVendorKey(canonicalUser)
                 },
                 JWT_SECRET,
@@ -10906,7 +11662,8 @@ async function startServer() {
                 user: {
                   username: canonicalUser,
                   role: resolvedRole,
-                  vendorId: supaUser.vendor_id
+                  vendorId: supaUser.vendor_id,
+                  sucursal: resolvedSucursal
                 },
                 source: "supabase"
               });
@@ -10931,11 +11688,13 @@ async function startServer() {
       if (!isValidPwd) {
         return res.status(401).json({ success: false, error: "Contrase\xF1a incorrecta" });
       }
-      const token = import_jsonwebtoken.default.sign(
+      const localSucursal = creds.role === "ADMIN" ? normalizeSucursal(req.body?.sucursal) || "OCCIDENTE" : getSupervisorProfile(matchedCanonicalKey)?.sucursal || getVendorProfile(matchedCanonicalKey).sucursal || "OCCIDENTE";
+      const token = import_jsonwebtoken2.default.sign(
         {
           username: matchedCanonicalKey,
           role: creds.role,
           vendorId: creds.vendorId,
+          sucursal: localSucursal,
           vendorKey: normalizeVendorKey(matchedCanonicalKey)
         },
         JWT_SECRET,
@@ -10947,7 +11706,8 @@ async function startServer() {
         user: {
           username: matchedCanonicalKey,
           role: creds.role,
-          vendorId: creds.vendorId
+          vendorId: creds.vendorId,
+          sucursal: localSucursal
         },
         source: "local"
       });
@@ -10958,12 +11718,15 @@ async function startServer() {
   app2.get("/api/auth/me", authenticateToken, (req, res) => {
     const supProfile = getSupervisorProfile(req.user?.username);
     const resolvedRole = supProfile ? "SUPERVISOR" : req.user.role;
+    const resolvedSucursal = normalizeSucursal(req.user?.sucursal) || supProfile?.sucursal || getVendorProfile(req.user?.username || "").sucursal || "OCCIDENTE";
     return res.json({
       success: true,
       user: {
         username: req.user.username,
         role: resolvedRole,
-        vendorId: req.user.vendorId
+        vendorId: req.user.vendorId,
+        ruta: req.user.ruta,
+        sucursal: resolvedSucursal
       }
     });
   });
@@ -10975,10 +11738,12 @@ async function startServer() {
     "deg-muplzpkm-ncuu",
     "test-ping-01"
   ]);
-  function normalizeDegustacionRecord(raw) {
+  function normalizeDegustacionRecord(raw, fallbackSucursal) {
     const cleanId = String(raw.id || raw.degustacionId || "").replace(/^DEG-/, "");
+    const resolvedSucursal = normalizeSucursal(raw.sucursal) || fallbackSucursal || "OCCIDENTE";
     return {
       id: cleanId,
+      sucursal: resolvedSucursal,
       clienteCodigo: raw.clienteCodigo || raw.cliente_codigo || "PDV",
       clienteNombre: raw.clienteNombre || raw.cliente_nombre || raw.client || "Punto de Venta",
       vendedorNombre: raw.vendedorNombre || raw.vendedor_nombre || raw.vendedor || "Vendedor",
@@ -11002,6 +11767,36 @@ async function startServer() {
       resultado: raw.resultado || null,
       createdAt: raw.createdAt || raw.created_at || (/* @__PURE__ */ new Date()).toISOString()
     };
+  }
+  function resolveRequestSucursalScope(req) {
+    const user = req.user;
+    if (!user) {
+      return { ok: false, status: 401, code: "AUTH_REQUIRED", error: "Token de autenticaci\xF3n requerido" };
+    }
+    const roleUpper = String(user.role || "VENDEDOR").toUpperCase().trim();
+    const tokenSucursal = normalizeSucursal(user.sucursal) || "OCCIDENTE";
+    const rawRequested = req.headers?.["x-active-sucursal"] ?? req.query?.sucursal ?? req.body?.sucursal;
+    if (rawRequested !== void 0 && rawRequested !== null && String(rawRequested).trim() !== "") {
+      const parsedReq = normalizeSucursal(rawRequested);
+      if (!parsedReq) {
+        return {
+          ok: false,
+          status: 400,
+          code: "INVALID_SUCURSAL_VALUE",
+          error: `Sucursal inv\xE1lida "${String(rawRequested)}". Valores permitidos: 'CENTRO' | 'OCCIDENTE'.`
+        };
+      }
+      if (roleUpper !== "ADMIN" && parsedReq !== tokenSucursal) {
+        return {
+          ok: false,
+          status: 403,
+          code: "SUCURSAL_TAMPERING_DETECTED",
+          error: `Acceso multisede denegado: tu sesi\xF3n pertenece a ${tokenSucursal} y no tiene permisos sobre ${parsedReq}.`
+        };
+      }
+      return { ok: true, sucursal: parsedReq, role: roleUpper };
+    }
+    return { ok: true, sucursal: tokenSucursal, role: roleUpper };
   }
   function sortDegustacionesServer(list, ascending = false) {
     const shiftRank = (turno, hora) => {
@@ -11087,14 +11882,31 @@ async function startServer() {
     }
     throw lastErr || new Error(`Fetch failed for ${url}`);
   }
-  async function loadAllMergedDegustaciones() {
+  async function loadAllMergedDegustaciones(scopeSucursal, actor) {
     const mapById = /* @__PURE__ */ new Map();
-    if (supabase) {
+    const activeClient = actor ? getScopedTradeClient(tradeSupabaseCfg, {
+      username: actor.username,
+      role: actor.role,
+      vendorId: actor.vendorId,
+      sucursal: scopeSucursal
+    }) : tradeSupabase;
+    if (activeClient) {
       try {
-        const { data: supaList, error: supaErr } = await supabase.from("degustaciones").select("*").order("fecha", { ascending: false });
-        if (!supaErr && Array.isArray(supaList)) {
+        let supaList = null;
+        const { data, error } = await activeClient.from("degustaciones").select("*").eq("sucursal", scopeSucursal).order("fecha", { ascending: false });
+        if (!error && Array.isArray(data)) {
+          supaList = data;
+        } else if (error && !tradeSupabaseCfg.strictSucursalColumn && scopeSucursal === "OCCIDENTE" && /sucursal|schema cache|42703|PGRST204/i.test(String(error.message || error.code || ""))) {
+          const legacyRes = await activeClient.from("degustaciones").select("*").order("fecha", { ascending: false });
+          if (!legacyRes.error && Array.isArray(legacyRes.data)) {
+            supaList = legacyRes.data;
+          }
+        }
+        if (Array.isArray(supaList)) {
           for (const row of supaList) {
-            const norm = normalizeDegustacionRecord(row);
+            const rowBranch = normalizeSucursal(row.sucursal) || "OCCIDENTE";
+            if (rowBranch !== scopeSucursal) continue;
+            const norm = normalizeDegustacionRecord(row, scopeSucursal);
             if (norm.id && !EXCLUDED_TEST_DEG_IDS.has(norm.id) && !norm.id.startsWith("test-")) {
               mapById.set(norm.id, norm);
             }
@@ -11105,31 +11917,94 @@ async function startServer() {
     }
     for (const [memId, memRecord] of degustacionesMemoryStore.entries()) {
       if (memId && !EXCLUDED_TEST_DEG_IDS.has(memId) && !memId.startsWith("test-")) {
-        mapById.set(memId, normalizeDegustacionRecord(memRecord));
-      }
-    }
-    if (!supabase) {
-      try {
-        const snapshot = await withTimeout((0, import_firestore3.getDocs)((0, import_firestore3.collection)(db, "degustaciones")), 2500, null);
-        snapshot?.forEach((docSnap) => {
-          const data = docSnap.data();
-          if (data && data.clienteNombre) {
-            const norm = normalizeDegustacionRecord({ id: docSnap.id, ...data });
-            if (norm.id && !EXCLUDED_TEST_DEG_IDS.has(norm.id) && !norm.id.startsWith("test-")) {
-              if (!mapById.has(norm.id)) {
-                mapById.set(norm.id, norm);
-              }
-            }
-          }
-        });
-      } catch (_) {
+        const memBranch = normalizeSucursal(memRecord.sucursal) || "OCCIDENTE";
+        if (memBranch === scopeSucursal) {
+          mapById.set(memId, normalizeDegustacionRecord(memRecord, scopeSucursal));
+        }
       }
     }
     return sortDegustacionesServer(Array.from(mapById.values()), false);
   }
-  app2.get("/api/degustaciones", async (req, res) => {
+  app2.get("/api/degustaciones/catalogos", authenticateToken, async (req, res) => {
     try {
-      let list = await loadAllMergedDegustaciones();
+      const scope = resolveRequestSucursalScope(req);
+      if (!scope.ok) {
+        return res.status(scope.status).json({ success: false, code: scope.code, error: scope.error });
+      }
+      const targetSucursal = scope.sucursal;
+      const scopedClient = getScopedTradeClient(tradeSupabaseCfg, {
+        username: req.user.username,
+        role: scope.role,
+        vendorId: String(req.user.vendorId || ""),
+        sucursal: targetSucursal
+      });
+      const [clientesRes, rutas, vendedores, productos] = await Promise.all([
+        fetchClientesPorSucursal(
+          scopedClient,
+          targetSucursal,
+          { username: req.user.username, role: scope.role, vendorId: req.user.vendorId },
+          cachedActivacionParsed || void 0
+        ),
+        fetchRutasPorSucursal(scopedClient, targetSucursal, {
+          username: req.user.username,
+          role: scope.role
+        }),
+        fetchVendedoresPorSucursal(scopedClient, targetSucursal, {
+          username: req.user.username,
+          role: scope.role
+        }),
+        fetchProductosNacionales(scopedClient)
+      ]);
+      if (vendedores.length > 0) {
+        hydrateVendorProfilesFromMasterCatalog(
+          vendedores.map((v) => ({
+            username: v.username,
+            nombre: v.nombre,
+            ruta: v.ruta,
+            supervisor: v.supervisor,
+            sucursal: v.sucursal,
+            role: v.role,
+            activo: true
+          }))
+        );
+      }
+      return res.json({
+        success: true,
+        sucursal: targetSucursal,
+        clientes: clientesRes.items,
+        rutas,
+        vendedores,
+        productos
+      });
+    } catch (err) {
+      console.error("Error consultando cat\xE1logos multisede de degustaciones:", err);
+      return res.status(500).json({
+        success: false,
+        error: "Error al cargar cat\xE1logos de la sucursal",
+        details: err?.message
+      });
+    }
+  });
+  app2.get("/api/degustaciones", authenticateToken, async (req, res) => {
+    try {
+      const scope = resolveRequestSucursalScope(req);
+      if (!scope.ok) {
+        return res.status(scope.status).json({ success: false, code: scope.code, error: scope.error });
+      }
+      let list = await loadAllMergedDegustaciones(scope.sucursal, {
+        username: req.user.username,
+        role: scope.role,
+        vendorId: String(req.user.vendorId || "")
+      });
+      if (req.query.mine === "true" && scope.role === "VENDEDOR") {
+        const uKey = String(req.user.username || "").toUpperCase().trim();
+        const uId = String(req.user.vendorId || "").toUpperCase().trim();
+        list = list.filter((d) => {
+          const dv = String(d.vendedorNombre || "").toUpperCase().trim();
+          const dvid = String(d.vendedorId || "").toUpperCase().trim();
+          return uKey && (dv.includes(uKey) || uKey.includes(dv)) || uId && dvid === uId;
+        });
+      }
       if (req.query.id) {
         const cleanReqId = String(req.query.id).replace(/^DEG-/, "").trim();
         list = list.filter((d) => String(d.id || "").replace(/^DEG-/, "") === cleanReqId);
@@ -11156,9 +12031,10 @@ async function startServer() {
       }
       res.json({
         success: true,
+        sucursal: scope.sucursal,
         count: list.length,
         data: list,
-        source: supabase ? "supabase_primary" : "memory_fallback"
+        source: tradeSupabase ? "supabase_primary" : "memory_fallback"
       });
     } catch (err) {
       console.error("Error fetching degustaciones via API:", err);
@@ -11166,7 +12042,7 @@ async function startServer() {
     }
   });
   const GOOGLE_SCRIPT_WEBHOOK_URL = process.env.GOOGLE_SCRIPT_WEBHOOK_URL || "";
-  const GERENCIA_TRADE_API_URL = process.env.TRADE_MARKETING_API_URL || process.env.GERENCIA_TRADE_API_URL || "https://trade-marketing-qi6j.onrender.com/api/degustaciones";
+  const GERENCIA_TRADE_API_URL = process.env.TRADE_MARKETING_API_URL || process.env.GERENCIA_TRADE_API_URL || "";
   const TRADE_MARKETING_API_KEY = process.env.TRADE_MARKETING_API_KEY || "";
   const GERENCIA_UTERIO_SURVEYS_URL = process.env.GERENCIA_UTERIO_SURVEYS_URL || "";
   const GERENCIA_UTERIO_ANON_KEY = process.env.GERENCIA_UTERIO_ANON_KEY || "";
@@ -11523,8 +12399,19 @@ async function startServer() {
       console.warn("Failed to delete from Gerencia:", err);
     }
   }
-  app2.post("/api/degustaciones/sync-gerencia", async (req, res) => {
+  app2.post("/api/degustaciones/sync-gerencia", authenticateToken, async (req, res) => {
     try {
+      const scope = resolveRequestSucursalScope(req);
+      if (!scope.ok) {
+        return res.status(scope.status).json({ success: false, code: scope.code, error: scope.error });
+      }
+      if (scope.role !== "ADMIN" && scope.role !== "COORDINADORA" && scope.role !== "SUPERVISOR") {
+        return res.status(403).json({
+          success: false,
+          code: "FORBIDDEN_SYNC",
+          error: "Solo Administraci\xF3n o Coordinaci\xF3n de Trade Marketing pueden disparar sincronizaci\xF3n masiva."
+        });
+      }
       if (inFlightFullTradeSync) {
         const shared = await inFlightFullTradeSync;
         return res.json({
@@ -11535,11 +12422,22 @@ async function startServer() {
         });
       }
       inFlightFullTradeSync = (async () => {
-        console.log("[SYNC TRADE] Sincronizando todas las degustaciones en orden cronol\xF3gico con Trade Marketing...");
-        const mergedDesc = await loadAllMergedDegustaciones();
-        if (supabase && mergedDesc.length > 0) {
+        console.log(`[SYNC TRADE] Sincronizando degustaciones de ${scope.sucursal} con Trade Marketing...`);
+        const mergedDesc = await loadAllMergedDegustaciones(scope.sucursal, {
+          username: req.user.username,
+          role: scope.role,
+          vendorId: String(req.user.vendorId || "")
+        });
+        const scopedClient = getScopedTradeClient(tradeSupabaseCfg, {
+          username: req.user.username,
+          role: scope.role,
+          vendorId: String(req.user.vendorId || ""),
+          sucursal: scope.sucursal
+        });
+        if (scopedClient && mergedDesc.length > 0) {
           const supaRows = mergedDesc.map((record) => ({
             id: record.id,
+            sucursal: scope.sucursal,
             cliente_codigo: record.clienteCodigo || "PDV",
             cliente_nombre: record.clienteNombre,
             vendedor_nombre: record.vendedorNombre || "Vendedor",
@@ -11563,7 +12461,11 @@ async function startServer() {
             resultado: record.resultado || null,
             created_at: record.createdAt
           }));
-          await supabase.from("degustaciones").upsert(supaRows);
+          const { error: upErr } = await scopedClient.from("degustaciones").upsert(supaRows);
+          if (upErr && !tradeSupabaseCfg.strictSucursalColumn && scope.sucursal === "OCCIDENTE" && /sucursal|schema cache|42703|PGRST204/i.test(String(upErr.message || upErr.code || ""))) {
+            const legacyRows = supaRows.map(({ sucursal: _s, ...rest }) => rest);
+            await scopedClient.from("degustaciones").upsert(legacyRows);
+          }
         }
         const remoteById = /* @__PURE__ */ new Map();
         if (GERENCIA_TRADE_API_URL) {
@@ -11648,9 +12550,10 @@ async function startServer() {
       console.warn("Failed to sync with Google Script:", err);
     }
   }
-  function buildSupabaseDegustacionRow(record) {
+  function buildSupabaseDegustacionRow(record, explicitSucursal) {
     return {
       id: record.id,
+      sucursal: explicitSucursal,
       cliente_codigo: record.clienteCodigo || "PDV",
       cliente_nombre: record.clienteNombre,
       vendedor_nombre: record.vendedorNombre || "Vendedor",
@@ -11675,15 +12578,88 @@ async function startServer() {
       created_at: record.createdAt
     };
   }
-  app2.post("/api/degustaciones", async (req, res) => {
+  app2.post("/api/degustaciones", authenticateToken, async (req, res) => {
     try {
       const item = req.body;
       if (!item || !item.clienteNombre || !item.fecha) {
         return res.status(400).json({ success: false, error: "Faltan campos obligatorios (clienteNombre, fecha)" });
       }
+      const sessionRole = String(req.user?.role || "VENDEDOR").toUpperCase().trim();
+      const sessionSucursal = normalizeSucursal(req.user?.sucursal) || "OCCIDENTE";
+      const headerSucRaw = req.headers["x-active-sucursal"];
+      if (headerSucRaw !== void 0 && String(headerSucRaw).trim() !== "") {
+        const headerSuc = normalizeSucursal(headerSucRaw);
+        if (!headerSuc) {
+          return res.status(400).json({
+            success: false,
+            code: "INVALID_SUCURSAL_VALUE",
+            error: `Cabecera X-Active-Sucursal inv\xE1lida: "${String(headerSucRaw)}".`
+          });
+        }
+        if (sessionRole !== "ADMIN" && headerSuc !== sessionSucursal) {
+          return res.status(403).json({
+            success: false,
+            code: "SUCURSAL_TAMPERING_DETECTED",
+            error: `Operaci\xF3n denegada: tu sesi\xF3n (${sessionSucursal}) no puede enviar solicitudes bajo ${headerSuc}.`
+          });
+        }
+      }
+      const requestedVendorRef = sessionRole === "VENDEDOR" ? String(req.user?.username || item.vendedorNombre || item.vendedorId || "").trim() : String(item.vendedorNombre || item.vendedorId || req.user?.username || "").trim();
+      const [storeLookup, vendorLookup] = await Promise.all([
+        lookupStoreGlobalSucursal(tradeSupabase, String(item.clienteCodigo || ""), String(item.clienteNombre || "")),
+        lookupVendorGlobalSucursal(tradeSupabase, requestedVendorRef)
+      ]);
+      const isQaSyntheticStress = /^qa-stress-/i.test(String(item.id || "")) && /\[QA_STRESS_TEST_/i.test(`${String(item.clienteNombre || "")} ${String(item.observaciones || "")}`);
+      const rawRuta = String(item.ruta || item.vendedorId || req.user?.ruta || "").trim();
+      const fallbackProf = getVendorProfile(requestedVendorRef || req.user?.username || "", sessionSucursal);
+      const resolvedRuta = !rawRuta || rawRuta.toUpperCase() === "ALL_MY_ROUTES" || rawRuta.toUpperCase() === "SUPERVISOR_ALL" ? storeLookup.ruta || vendorLookup.primaryRoute || fallbackProf.routes[0]?.id || fallbackProf.canonicalUsername : rawRuta;
+      const resolvedVendorId = !item.vendedorId || String(item.vendedorId).toUpperCase() === "ALL_MY_ROUTES" ? vendorLookup.vendorId || String(req.user?.vendorId || resolvedRuta) : String(item.vendedorId).trim();
+      const resolvedVendorName = sessionRole === "VENDEDOR" ? vendorLookup.canonicalName || fallbackProf.canonicalUsername || String(req.user?.username || "").toUpperCase() : String(item.vendedorNombre || vendorLookup.canonicalName || req.user?.username || "Vendedor").trim().toUpperCase();
+      let routeSucursal = null;
+      if (tradeSupabase && resolvedRuta) {
+        try {
+          const { data: rutaRows, error: rutaErr } = await tradeSupabase.from("rutas").select("codigo,nombre,sucursal,activo").or(`codigo.eq.${resolvedRuta},nombre.eq.${resolvedRuta}`).limit(5);
+          if (!rutaErr && Array.isArray(rutaRows) && rutaRows.length > 0) {
+            const activeRutas = rutaRows.filter((r) => r.activo !== false);
+            if (activeRutas.length > 0) {
+              const matchingBranch = activeRutas.find((r) => normalizeSucursal(r.sucursal) === (vendorLookup.sucursal || sessionSucursal));
+              routeSucursal = normalizeSucursal((matchingBranch || activeRutas[0]).sucursal);
+            }
+          }
+        } catch {
+        }
+      }
+      const branchCheck = validateCrossBranchSubmission({
+        sessionRole,
+        sessionSucursal,
+        payloadSucursal: item.sucursal ?? headerSucRaw,
+        vendorSucursal: vendorLookup.sucursal,
+        storeSucursal: storeLookup.sucursal,
+        routeSucursal,
+        storeExistsInCatalog: storeLookup.found,
+        requireCatalogStore: storeLookup.authoritativeCatalogActive && !isQaSyntheticStress,
+        resolvedRoute: resolvedRuta
+      });
+      if (!branchCheck.ok) {
+        return res.status(branchCheck.status).json({
+          success: false,
+          code: branchCheck.code,
+          error: branchCheck.error
+        });
+      }
+      const authoritativeSucursal = branchCheck.sucursal;
+      const parsedProductos = Array.isArray(item.productos) ? item.productos.map((p) => String(p || "").trim()).filter(Boolean) : typeof item.productos === "string" && item.productos.trim() ? item.productos.split(",").map((s) => s.trim()).filter(Boolean) : [];
+      if (parsedProductos.length === 0) {
+        return res.status(400).json({
+          success: false,
+          code: "PRODUCTS_REQUIRED",
+          error: "Debes seleccionar al menos un producto del cat\xE1logo nacional."
+        });
+      }
       const rawHeaderKey = req.headers["x-idempotency-key"] ? String(req.headers["x-idempotency-key"]).trim() : "";
       const id = String(item.id || rawHeaderKey || `deg-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`).trim();
-      const idempotencyKey = rawHeaderKey || String(item.idempotencyKey || id).trim();
+      const rawIdempKey = rawHeaderKey || String(item.idempotencyKey || id).trim();
+      const idempotencyKey = `${authoritativeSucursal}::${rawIdempKey}`;
       const now = Date.now();
       const cachedDone = completedDegustacionIdempotency.get(idempotencyKey);
       if (cachedDone && cachedDone.expiresAt > now) {
@@ -11704,39 +12680,79 @@ async function startServer() {
           sync: shared.sync
         });
       }
-      const record = normalizeDegustacionRecord({
-        ...item,
-        id,
-        createdAt: item.createdAt || (/* @__PURE__ */ new Date()).toISOString()
-      });
+      const record = normalizeDegustacionRecord(
+        {
+          ...item,
+          id,
+          sucursal: authoritativeSucursal,
+          clienteCodigo: storeLookup.codigo || item.clienteCodigo || "PDV",
+          clienteNombre: storeLookup.nombre || item.clienteNombre,
+          vendedorNombre: resolvedVendorName,
+          vendedorId: resolvedVendorId,
+          ruta: resolvedRuta,
+          productos: parsedProductos,
+          createdAt: item.createdAt || (/* @__PURE__ */ new Date()).toISOString()
+        },
+        authoritativeSucursal
+      );
       const executionPromise = (async () => {
         let supabaseDegustacionesOk = false;
-        let firestoreOk = false;
-        if (supabase) {
-          const { error: supaErr } = await supabase.from("degustaciones").upsert(buildSupabaseDegustacionRow(record), { onConflict: "id" });
+        const scopedClient = getScopedTradeClient(tradeSupabaseCfg, {
+          username: req.user.username,
+          role: sessionRole,
+          vendorId: resolvedVendorId,
+          sucursal: authoritativeSucursal
+        });
+        if (scopedClient) {
+          const explicitRow = buildSupabaseDegustacionRow(record, authoritativeSucursal);
+          const customRpc = String(process.env.TRADE_SUPABASE_INSERT_RPC || "").trim();
+          let supaErr = null;
+          if (customRpc) {
+            const rpcRes = await scopedClient.rpc(customRpc, { p_payload: explicitRow, p_sucursal: authoritativeSucursal });
+            supaErr = rpcRes.error;
+          } else {
+            const upRes = await scopedClient.from("degustaciones").upsert(explicitRow, { onConflict: "id" });
+            supaErr = upRes.error;
+          }
           if (supaErr) {
-            console.warn("[SUPABASE] Error en upsert de degustaci\xF3n:", supaErr.message);
+            const errMsg = String(supaErr.message || "");
+            const errCode = String(supaErr.code || "");
+            const isMissingSucColOnLegacy = !tradeSupabaseCfg.strictSucursalColumn && authoritativeSucursal === "OCCIDENTE" && (errCode === "PGRST204" || errCode === "42703" || /Could not find the 'sucursal' column/i.test(errMsg));
+            if (isMissingSucColOnLegacy) {
+              const { sucursal: _omitSuc, ...legacyRow } = explicitRow;
+              const retryRes = await scopedClient.from("degustaciones").upsert(legacyRow, { onConflict: "id" });
+              if (!retryRes.error) {
+                supabaseDegustacionesOk = true;
+              } else {
+                console.warn("[SUPABASE] Error en fallback legacy de degustaci\xF3n:", retryRes.error.message);
+              }
+            } else if (errCode === "42501" || errCode === "23514" || errCode === "23502" || /row-level security|CROSS_BRANCH|VENDOR_SUCURSAL_MISMATCH|MULTISEDE_/i.test(errMsg)) {
+              const secErr = new Error(errMsg || "Rechazado por pol\xEDtica RLS o integridad multisede en Supabase");
+              secErr.httpStatus = errCode === "42501" || /row-level security|CROSS_BRANCH|MISMATCH/i.test(errMsg) ? 403 : 400;
+              secErr.code = /CROSS_BRANCH/i.test(errMsg) ? "CROSS_BRANCH_STORE_FORBIDDEN" : "SUPABASE_RLS_REJECTED";
+              throw secErr;
+            } else if (authoritativeSucursal === "CENTRO" && /sucursal|PGRST204|42703/i.test(errMsg)) {
+              const schemaErr = new Error(
+                "La instancia de Supabase conectada a\xFAn no posee la columna obligatoria sucursal. Configura TRADE_SUPABASE_URL o ejecuta scripts/sql/05_multisede_sucursal_rls.sql."
+              );
+              schemaErr.httpStatus = 503;
+              schemaErr.code = "MULTISEDE_SCHEMA_REQUIRED";
+              throw schemaErr;
+            } else {
+              console.warn("[SUPABASE] Error en upsert de degustaci\xF3n:", errMsg);
+            }
           } else {
             supabaseDegustacionesOk = true;
           }
         }
         degustacionesMemoryStore.set(record.id, record);
-        try {
-          const firestoreSafeRecord = Object.fromEntries(
-            Object.entries(record).filter(([, value]) => value !== void 0)
-          );
-          await withTimeout((0, import_firestore3.setDoc)((0, import_firestore3.doc)(db, "degustaciones", id), firestoreSafeRecord, { merge: true }), 1500, void 0);
-          firestoreOk = true;
-        } catch (_) {
-          firestoreOk = false;
-        }
         const [directSync] = await Promise.all([
           syncToGerenciaDirect(record),
           syncToGoogleScript(record)
         ]);
         const syncSummary = {
           supabaseDegustaciones: supabaseDegustacionesOk,
-          firestore: firestoreOk,
+          sucursal: authoritativeSucursal,
           ...directSync
         };
         if (completedDegustacionIdempotency.size >= 5e3) {
@@ -11763,31 +12779,63 @@ async function startServer() {
         inFlightDegustacionCreates.delete(idempotencyKey);
       }
     } catch (err) {
+      if (err?.httpStatus) {
+        return res.status(err.httpStatus).json({
+          success: false,
+          code: err.code || "DEGUSTACION_VALIDATION_ERROR",
+          error: err.message
+        });
+      }
       console.error("Error creating degustacion via API:", err);
       res.status(500).json({ success: false, error: "Error al guardar degustacion", details: err?.message });
     }
   });
-  app2.put("/api/degustaciones/:id", async (req, res) => {
+  app2.put("/api/degustaciones/:id", authenticateToken, async (req, res) => {
     try {
+      const scope = resolveRequestSucursalScope(req);
+      if (!scope.ok) {
+        return res.status(scope.status).json({ success: false, code: scope.code, error: scope.error });
+      }
       const { id } = req.params;
       const updates = req.body || {};
+      const scopedClient = getScopedTradeClient(tradeSupabaseCfg, {
+        username: req.user.username,
+        role: scope.role,
+        vendorId: String(req.user.vendorId || ""),
+        sucursal: scope.sucursal
+      });
       let existingRecord = degustacionesMemoryStore.get(id) || null;
-      if (supabase) {
+      if (scopedClient) {
         try {
-          const { data: supaRow } = await supabase.from("degustaciones").select("*").eq("id", id).maybeSingle();
+          const { data: supaRow } = await scopedClient.from("degustaciones").select("*").eq("id", id).maybeSingle();
           if (supaRow) {
-            existingRecord = normalizeDegustacionRecord(supaRow);
+            existingRecord = normalizeDegustacionRecord(supaRow, normalizeSucursal(supaRow.sucursal) || "OCCIDENTE");
           }
         } catch (_) {
         }
       }
-      const mergedRecord = normalizeDegustacionRecord({
-        ...existingRecord || {},
-        ...updates,
-        id
-      });
-      if (supabase) {
-        const supaUpdate = { updated_at: (/* @__PURE__ */ new Date()).toISOString() };
+      if (existingRecord) {
+        const existingSuc = normalizeSucursal(existingRecord.sucursal) || "OCCIDENTE";
+        if (scope.role !== "ADMIN" && existingSuc !== scope.sucursal) {
+          return res.status(403).json({
+            success: false,
+            code: "CROSS_BRANCH_ACCESS_DENIED",
+            error: `No tienes permisos para modificar una degustaci\xF3n de la sucursal ${existingSuc}.`
+          });
+        }
+      }
+      const targetSucursal = existingRecord && normalizeSucursal(existingRecord.sucursal) || scope.sucursal;
+      const mergedRecord = normalizeDegustacionRecord(
+        {
+          ...existingRecord || {},
+          ...updates,
+          id,
+          sucursal: targetSucursal
+        },
+        targetSucursal
+      );
+      if (scopedClient) {
+        const supaUpdate = { updated_at: (/* @__PURE__ */ new Date()).toISOString(), sucursal: targetSucursal };
         if (updates.clienteNombre !== void 0) supaUpdate.cliente_nombre = updates.clienteNombre;
         if (updates.vendedorNombre !== void 0) supaUpdate.vendedor_nombre = updates.vendedorNombre;
         if (updates.estado !== void 0) supaUpdate.estado = updates.estado;
@@ -11797,34 +12845,58 @@ async function startServer() {
         if (updates.kilosEstimados !== void 0) supaUpdate.kilos_estimados = Number(updates.kilosEstimados) || 0;
         if (updates.personasEstimadas !== void 0) supaUpdate.personas_estimadas = Number(updates.personasEstimadas) || 0;
         if (updates.observaciones !== void 0) supaUpdate.observaciones = updates.observaciones;
-        const { error: supaErr } = await supabase.from("degustaciones").update(supaUpdate).eq("id", id);
-        if (supaErr) {
+        let updateQuery = scopedClient.from("degustaciones").update(supaUpdate).eq("id", id).eq("sucursal", targetSucursal);
+        const { error: supaErr } = await updateQuery;
+        if (supaErr && !tradeSupabaseCfg.strictSucursalColumn && targetSucursal === "OCCIDENTE" && /sucursal|PGRST204|42703/i.test(String(supaErr.message || supaErr.code || ""))) {
+          delete supaUpdate.sucursal;
+          await scopedClient.from("degustaciones").update(supaUpdate).eq("id", id);
+        } else if (supaErr) {
           console.warn("[SUPABASE] Error actualizando degustaci\xF3n:", supaErr.message);
         }
       }
       degustacionesMemoryStore.set(id, mergedRecord);
-      completedDegustacionIdempotency.delete(id);
-      try {
-        await withTimeout((0, import_firestore3.setDoc)((0, import_firestore3.doc)(db, "degustaciones", id), updates, { merge: true }), 1500, void 0);
-      } catch (_) {
-      }
+      completedDegustacionIdempotency.delete(`${targetSucursal}::${id}`);
       const syncSummary = await syncToGerenciaDirect(mergedRecord);
       syncToGoogleScript(mergedRecord).catch(() => {
       });
-      res.json({ success: true, id, updated: updates, data: mergedRecord, sync: syncSummary });
+      res.json({ success: true, id, sucursal: targetSucursal, updated: updates, data: mergedRecord, sync: syncSummary });
     } catch (err) {
       console.error("Error updating degustacion via API:", err);
       res.status(500).json({ success: false, error: "Error al actualizar degustacion", details: err?.message });
     }
   });
-  app2.delete("/api/degustaciones/:id", async (req, res) => {
+  app2.delete("/api/degustaciones/:id", authenticateToken, async (req, res) => {
     try {
+      const scope = resolveRequestSucursalScope(req);
+      if (!scope.ok) {
+        return res.status(scope.status).json({ success: false, code: scope.code, error: scope.error });
+      }
       const { id } = req.params;
       const cleanId = String(id).replace(/^DEG-/, "").trim();
+      const scopedClient = getScopedTradeClient(tradeSupabaseCfg, {
+        username: req.user.username,
+        role: scope.role,
+        vendorId: String(req.user.vendorId || ""),
+        sucursal: scope.sucursal
+      });
+      const memExisting = degustacionesMemoryStore.get(cleanId) || degustacionesMemoryStore.get(id);
+      if (memExisting && scope.role !== "ADMIN") {
+        const memSuc = normalizeSucursal(memExisting.sucursal) || "OCCIDENTE";
+        if (memSuc !== scope.sucursal) {
+          return res.status(403).json({
+            success: false,
+            code: "CROSS_BRANCH_ACCESS_DENIED",
+            error: `No puedes eliminar registros pertenecientes a la sucursal ${memSuc}.`
+          });
+        }
+      }
       let supabaseDeleted = false;
-      if (supabase) {
-        const { error: supaErr } = await supabase.from("degustaciones").delete().eq("id", cleanId);
-        if (supaErr) {
+      if (scopedClient) {
+        const { error: supaErr } = await scopedClient.from("degustaciones").delete().eq("id", cleanId).eq("sucursal", scope.sucursal);
+        if (supaErr && !tradeSupabaseCfg.strictSucursalColumn && scope.sucursal === "OCCIDENTE" && /sucursal|PGRST204|42703/i.test(String(supaErr.message || supaErr.code || ""))) {
+          const retryDel = await scopedClient.from("degustaciones").delete().eq("id", cleanId);
+          if (!retryDel.error) supabaseDeleted = true;
+        } else if (supaErr) {
           console.warn("[SUPABASE] Error eliminando degustaci\xF3n:", supaErr.message);
         } else {
           supabaseDeleted = true;
@@ -11833,16 +12905,12 @@ async function startServer() {
       degustacionesMemoryStore.delete(cleanId);
       degustacionesMemoryStore.delete(id);
       for (const [k, v] of completedDegustacionIdempotency.entries()) {
-        if (k === id || k === cleanId || v.record?.id === cleanId) {
+        if (k === id || k === cleanId || k.endsWith(`::${cleanId}`) || v.record?.id === cleanId) {
           completedDegustacionIdempotency.delete(k);
         }
       }
-      try {
-        await withTimeout((0, import_firestore3.deleteDoc)((0, import_firestore3.doc)(db, "degustaciones", cleanId)), 1500, void 0);
-      } catch (_) {
-      }
       await deleteFromGerenciaDirect(cleanId);
-      res.json({ success: true, id: cleanId, supabaseDeleted });
+      res.json({ success: true, id: cleanId, sucursal: scope.sucursal, supabaseDeleted });
     } catch (err) {
       console.error("Error deleting degustacion via API:", err);
       res.status(500).json({ success: false, error: "Error al eliminar degustacion", details: err?.message });
@@ -14858,7 +15926,7 @@ data: ${JSON.stringify(payload)}
     }
     let decodedUser = null;
     try {
-      decodedUser = import_jsonwebtoken.default.verify(token, JWT_SECRET);
+      decodedUser = import_jsonwebtoken2.default.verify(token, JWT_SECRET);
     } catch {
       return res.status(403).json({ success: false, error: "Token inv\xE1lido o expirado." });
     }
@@ -16139,10 +17207,50 @@ data: ${JSON.stringify({
       res.status(500).json([]);
     }
   });
-  app2.get("/api/catalog/vendors", async (_req, res) => {
+  app2.get("/api/catalog/vendors", async (req, res) => {
     try {
+      let requestedSucursal = normalizeSucursal(
+        req.headers?.["x-active-sucursal"] ?? req.query?.sucursal
+      );
+      const authHeader = req.headers?.["authorization"];
+      const rawToken = authHeader && String(authHeader).startsWith("Bearer ") ? String(authHeader).split(" ")[1] : null;
+      if (rawToken) {
+        try {
+          const decoded = import_jsonwebtoken2.default.verify(rawToken, JWT_SECRET);
+          const roleUpper = String(decoded?.role || "").toUpperCase();
+          const tokenSuc = normalizeSucursal(decoded?.sucursal) || "OCCIDENTE";
+          if (roleUpper !== "ADMIN") {
+            requestedSucursal = tokenSuc;
+          } else if (!requestedSucursal) {
+            requestedSucursal = tokenSuc;
+          }
+        } catch {
+        }
+      }
       let vendedores = getRuntimeSellerCatalog();
       let syncedAt = null;
+      if (tradeSupabase) {
+        try {
+          const { data: tradeVend } = await tradeSupabase.from("vendedores").select("*");
+          if (Array.isArray(tradeVend) && tradeVend.length > 0) {
+            const mappedTrade = tradeVend.map((v) => ({
+              vendedor_id: String(v.id ?? v.codigo ?? v.username ?? ""),
+              codigo_erp: String(v.codigo ?? v.id ?? ""),
+              nombre_canonico: normalizeVendorName(v.username || v.nombre),
+              display_name: String(v.nombre || v.username || ""),
+              ruta_oficial: normalizeVendorName(v.ruta || v.username || v.nombre),
+              supervisor: normalizeVendorName(v.supervisor || ""),
+              sucursal: normalizeSucursal(v.sucursal) || "OCCIDENTE",
+              region: normalizeSucursal(v.sucursal) || "OCCIDENTE",
+              role: String(v.role || "VENDEDOR").toUpperCase(),
+              activo: v.activo !== false
+            }));
+            vendedores = hydrateRuntimeSellerCatalog(mappedTrade);
+            hydrateVendorProfilesFromMasterCatalog(mappedTrade);
+          }
+        } catch {
+        }
+      }
       if (supabase) {
         try {
           const { data: supaVendedores } = await supabase.from("vendedores_maestro").select("*");
@@ -16157,8 +17265,9 @@ data: ${JSON.stringify({
         } catch {
         }
       }
+      const filteredVendedores = requestedSucursal ? vendedores.filter((v) => (v.sucursal || normalizeSucursal(v.region) || "OCCIDENTE") === requestedSucursal) : vendedores;
       setNoCacheSyncHeaders(res, "supabase");
-      return res.json({ vendedores, syncedAt });
+      return res.json({ vendedores: filteredVendedores, sucursal: requestedSucursal, syncedAt });
     } catch (err) {
       return res.status(500).json({ error: err?.message || "Error consultando cat\xE1logo de vendedores" });
     }

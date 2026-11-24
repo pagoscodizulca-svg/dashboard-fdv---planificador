@@ -1,4 +1,7 @@
-export type Role = 'ADMIN' | 'SUPERVISOR' | 'VENDEDOR';
+import type { Sucursal } from './utils/sucursalScope';
+export type { Sucursal } from './utils/sucursalScope';
+
+export type Role = 'ADMIN' | 'SUPERVISOR' | 'COORDINADORA' | 'VENDEDOR';
 
 export interface VolumenData {
   id: string;
@@ -72,6 +75,7 @@ export type TurnoDegustacion = 'MAÑANA' | 'TARDE' | 'COMPLETO';
 
 export interface Degustacion {
   id: string;
+  sucursal?: Sucursal;
   clienteCodigo: string;
   clienteNombre: string;
   vendedorNombre: string;
@@ -100,6 +104,59 @@ export interface Degustacion {
   };
   createdAt: string;
   updatedAt?: string;
+}
+
+export interface TiendaCatalogoItem {
+  id: string;
+  codigo: string;
+  nombre: string;
+  rif?: string;
+  direccion?: string;
+  ciudad?: string;
+  ruta?: string;
+  vendedorId?: string;
+  vendedorNombre?: string;
+  sucursal: Sucursal;
+}
+
+export interface RutaCatalogoItem {
+  id: string;
+  codigo: string;
+  nombre: string;
+  supervisor?: string;
+  sucursal: Sucursal;
+}
+
+export interface VendedorCatalogoItem {
+  id: string;
+  codigo?: string;
+  username: string;
+  nombre: string;
+  ruta?: string;
+  rutas?: string[];
+  email?: string;
+  supervisor?: string;
+  role: Role;
+  sucursal: Sucursal;
+}
+
+export interface ProductoNacionalItem {
+  id: string;
+  codigo: string;
+  nombre: string;
+  categoria?: string;
+  rubro?: string;
+  marca?: string;
+  activo?: boolean;
+}
+
+export interface DegustacionCatalogosResponse {
+  success: boolean;
+  sucursal: Sucursal;
+  clientes: TiendaCatalogoItem[];
+  rutas: RutaCatalogoItem[];
+  vendedores: VendedorCatalogoItem[];
+  productos: ProductoNacionalItem[];
 }
 
 export interface DegustacionConfig {

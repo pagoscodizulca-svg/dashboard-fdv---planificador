@@ -156,6 +156,22 @@ import {
 } from './src/services/sheetSyncService';
 import { DEFAULT_VENDOR_BCRYPT_CREDENTIALS } from './src/services/defaultUserHashes';
 import { canAccessAlkosto, ALKOSTO_ACCESS_DENIED_MESSAGE } from './src/utils/alkostoPermissions';
+import {
+  normalizeSucursal,
+  validateCrossBranchSubmission,
+  type Sucursal
+} from './src/utils/sucursalScope';
+import {
+  createTradeSupabaseClients,
+  getScopedTradeClient,
+  authenticateVendorFromTradeSupabase,
+  fetchProductosNacionales,
+  fetchClientesPorSucursal,
+  fetchRutasPorSucursal,
+  fetchVendedoresPorSucursal,
+  lookupStoreGlobalSucursal,
+  lookupVendorGlobalSucursal
+} from './src/services/tradeMultisedeService';
 import { collection, doc, getDocs, setDoc, getDoc, deleteDoc } from 'firebase/firestore';
 import { createClient } from '@supabase/supabase-js';
 import jwt from 'jsonwebtoken';
@@ -175,6 +191,9 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 const supabase = (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
   ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
   : null;
+
+const tradeSupabaseCfg = createTradeSupabaseClients(process.env);
+const tradeSupabase = tradeSupabaseCfg.adminClient || supabase;
 
 // Periodo (YYYY-MM) del mes en curso fijado estrictamente en zona horaria America/Caracas (UTC-4)
 export const metasPeriodoActual = (d: Date = new Date()) => getCaracasYearMonth(d);
@@ -446,9 +465,11 @@ async function loadWorkbookTransient(
       lastSuccessfulSheetSyncAt = new Date().toISOString();
       lastSheetSource = 'live_google_sheet';
       lastSheetDegraded = false;
-      try {
-        fs.writeFileSync(localPath, nodeBuf);
-      } catch (_) {}
+      if (!process.env.VITEST && process.env.NODE_ENV !== 'test' && process.env.DISABLE_LOCAL_SHEET_OVERWRITE !== '1') {
+        try {
+          fs.writeFileSync(localPath, nodeBuf);
+        } catch (_) {}
+      }
       const wb = XLSX.read(nodeBuf, { type: 'buffer', raw: true });
       return { workbook: wb, sha256: sha, source: 'live_google_sheet' };
     } catch (err: any) {
@@ -539,7 +560,7 @@ async function startServer() {
       if (isOriginAllowed(requestOrigin)) {
         res.header('Access-Control-Allow-Origin', requestOrigin);
         res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-        res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, Pragma, X-Idempotency-Key, X-Sync-Token');
+        res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, Cache-Control, Pragma, X-Idempotency-Key, X-Sync-Token, X-Active-Sucursal');
         res.header('Access-Control-Expose-Headers', 'X-Last-Sync, X-Last-Sync-Caracas, X-Sync-Source, X-Sync-Degraded, X-Sync-Cooldown-Remaining');
       } else if (req.method === 'OPTIONS') {
         return res.status(403).json({ success: false, error: 'Origen CORS no autorizado.' });
@@ -616,14 +637,79 @@ async function startServer() {
         return pwd === candidateHash || (Boolean(pwdClean) && pwdClean === candidateHash);
       };
 
-      // 1. Intentar autenticación contra Supabase si la tabla existe
+      // 1A. Intentar autenticación multisede contra tabla `vendedores` / `vendedores_fdv` en Supabase compartido (CENTRO | OCCIDENTE)
+      if (tradeSupabase) {
+        const tradeAuth = await authenticateVendorFromTradeSupabase(tradeSupabase, usuarioUpper, pwd);
+        if (tradeAuth.matched) {
+          if (tradeAuth.inactive) {
+            return res.status(401).json({ success: false, error: 'Usuario inactivo o deshabilitado' });
+          }
+          if (!tradeAuth.validPassword || !tradeAuth.user) {
+            return res.status(401).json({ success: false, error: 'Contraseña incorrecta' });
+          }
+          const tu = tradeAuth.user;
+          hydrateVendorProfilesFromMasterCatalog([
+            {
+              username: tu.username,
+              nombre: tu.displayName,
+              ruta: tu.ruta,
+              sucursal: tu.sucursal,
+              role: tu.role,
+              email: tu.email,
+              activo: true
+            }
+          ]);
+          const token = jwt.sign(
+            {
+              username: tu.username,
+              displayName: tu.displayName,
+              role: tu.role,
+              vendorId: tu.vendorId,
+              ruta: tu.ruta,
+              sucursal: tu.sucursal,
+              vendorKey: normalizeVendorKey(tu.username)
+            },
+            JWT_SECRET,
+            { expiresIn: '7d' }
+          );
+          return res.json({
+            success: true,
+            token,
+            user: {
+              username: tu.username,
+              displayName: tu.displayName,
+              role: tu.role,
+              vendorId: tu.vendorId,
+              ruta: tu.ruta,
+              sucursal: tu.sucursal
+            },
+            source: tu.source
+          });
+        }
+      }
+
+      // 1B. Intentar autenticación contra tabla `usuarios` de Supabase si existe
       if (supabase) {
         try {
-          const { data: supaUser, error: supaErr } = await supabase
+          let supaUser: any = null;
+          let supaErr: any = null;
+          const withSucRes = await supabase
             .from('usuarios')
-            .select('username,password_hash,role,vendor_id,activo')
+            .select('username,password_hash,role,vendor_id,activo,sucursal')
             .in('username', [usuarioUpper, matchedCanonicalKey])
             .maybeSingle();
+          if (withSucRes.error && /sucursal|schema cache|42703/i.test(String(withSucRes.error.message || withSucRes.error.code || ''))) {
+            const legacyRes = await supabase
+              .from('usuarios')
+              .select('username,password_hash,role,vendor_id,activo')
+              .in('username', [usuarioUpper, matchedCanonicalKey])
+              .maybeSingle();
+            supaUser = legacyRes.data;
+            supaErr = legacyRes.error;
+          } else {
+            supaUser = withSucRes.data;
+            supaErr = withSucRes.error;
+          }
 
           if (!supaErr && supaUser) {
             if (supaUser.activo === false) {
@@ -650,11 +736,19 @@ async function startServer() {
               const supProfile = getSupervisorProfile(supaUser.username);
               const resolvedRole = supProfile ? 'SUPERVISOR' : supaUser.role;
               const canonicalUser = matchedCanonicalKey || supaUser.username;
+              const resolvedSucursal: Sucursal =
+                normalizeSucursal(supaUser.sucursal) ||
+                (resolvedRole === 'ADMIN' ? normalizeSucursal(req.body?.sucursal) : null) ||
+                supProfile?.sucursal ||
+                getVendorProfile(canonicalUser).sucursal ||
+                'OCCIDENTE';
+
               const token = jwt.sign(
                 {
                   username: canonicalUser,
                   role: resolvedRole,
                   vendorId: supaUser.vendor_id,
+                  sucursal: resolvedSucursal,
                   vendorKey: normalizeVendorKey(canonicalUser)
                 },
                 JWT_SECRET,
@@ -667,7 +761,8 @@ async function startServer() {
                 user: {
                   username: canonicalUser,
                   role: resolvedRole,
-                  vendorId: supaUser.vendor_id
+                  vendorId: supaUser.vendor_id,
+                  sucursal: resolvedSucursal
                 },
                 source: 'supabase'
               });
@@ -698,11 +793,17 @@ async function startServer() {
         return res.status(401).json({ success: false, error: 'Contraseña incorrecta' });
       }
 
+      const localSucursal: Sucursal =
+        creds.role === 'ADMIN'
+          ? (normalizeSucursal(req.body?.sucursal) || 'OCCIDENTE')
+          : (getSupervisorProfile(matchedCanonicalKey)?.sucursal || getVendorProfile(matchedCanonicalKey).sucursal || 'OCCIDENTE');
+
       const token = jwt.sign(
         {
           username: matchedCanonicalKey,
           role: creds.role,
           vendorId: creds.vendorId,
+          sucursal: localSucursal,
           vendorKey: normalizeVendorKey(matchedCanonicalKey)
         },
         JWT_SECRET,
@@ -715,7 +816,8 @@ async function startServer() {
         user: {
           username: matchedCanonicalKey,
           role: creds.role,
-          vendorId: creds.vendorId
+          vendorId: creds.vendorId,
+          sucursal: localSucursal
         },
         source: 'local'
       });
@@ -724,16 +826,23 @@ async function startServer() {
     }
   });
 
-  // Verificación de sesión activa y perfil del usuario autenticado
+  // Verificación de sesión activa y perfil del usuario autenticado (con sucursal autoritativa)
   app.get("/api/auth/me", authenticateToken, (req: any, res: any) => {
     const supProfile = getSupervisorProfile(req.user?.username);
     const resolvedRole = supProfile ? 'SUPERVISOR' : req.user.role;
+    const resolvedSucursal: Sucursal =
+      normalizeSucursal(req.user?.sucursal) ||
+      supProfile?.sucursal ||
+      getVendorProfile(req.user?.username || '').sucursal ||
+      'OCCIDENTE';
     return res.json({
       success: true,
       user: {
         username: req.user.username,
         role: resolvedRole,
-        vendorId: req.user.vendorId
+        vendorId: req.user.vendorId,
+        ruta: req.user.ruta,
+        sucursal: resolvedSucursal
       }
     });
   });
@@ -746,10 +855,12 @@ async function startServer() {
     'deg-001', 'deg-002', 'deg-003', 'deg-mupk8tih-e3wf', 'deg-muplzpkm-ncuu', 'test-ping-01'
   ]);
 
-  function normalizeDegustacionRecord(raw: any): any {
+  function normalizeDegustacionRecord(raw: any, fallbackSucursal?: Sucursal): any {
     const cleanId = String(raw.id || raw.degustacionId || '').replace(/^DEG-/, '');
+    const resolvedSucursal = normalizeSucursal(raw.sucursal) || fallbackSucursal || 'OCCIDENTE';
     return {
       id: cleanId,
+      sucursal: resolvedSucursal,
       clienteCodigo: raw.clienteCodigo || raw.cliente_codigo || 'PDV',
       clienteNombre: raw.clienteNombre || raw.cliente_nombre || raw.client || 'Punto de Venta',
       vendedorNombre: raw.vendedorNombre || raw.vendedor_nombre || raw.vendedor || 'Vendedor',
@@ -775,6 +886,51 @@ async function startServer() {
       resultado: raw.resultado || null,
       createdAt: raw.createdAt || raw.created_at || new Date().toISOString()
     };
+  }
+
+  /**
+   * Resuelve y valida el alcance de `sucursal` ('CENTRO' | 'OCCIDENTE') para el request autenticado.
+   * - VENDEDOR / SUPERVISOR / COORDINADORA: estrictamente atados al claim `sucursal` firmado en su JWT.
+   *   Cualquier intento de consultar u operar otra sucursal por query/header/body retorna 403.
+   * - ADMIN: puede operar en la sucursal activa solicitada explícitamente ('CENTRO' | 'OCCIDENTE').
+   */
+  function resolveRequestSucursalScope(req: any):
+    | { ok: true; sucursal: Sucursal; role: string; status?: number; code?: string; error?: string }
+    | { ok: false; sucursal?: Sucursal; role?: string; status: number; code: string; error: string } {
+    const user = req.user;
+    if (!user) {
+      return { ok: false, status: 401, code: 'AUTH_REQUIRED', error: 'Token de autenticación requerido' };
+    }
+    const roleUpper = String(user.role || 'VENDEDOR').toUpperCase().trim();
+    const tokenSucursal: Sucursal = normalizeSucursal(user.sucursal) || 'OCCIDENTE';
+
+    const rawRequested =
+      req.headers?.['x-active-sucursal'] ??
+      req.query?.sucursal ??
+      req.body?.sucursal;
+
+    if (rawRequested !== undefined && rawRequested !== null && String(rawRequested).trim() !== '') {
+      const parsedReq = normalizeSucursal(rawRequested);
+      if (!parsedReq) {
+        return {
+          ok: false,
+          status: 400,
+          code: 'INVALID_SUCURSAL_VALUE',
+          error: `Sucursal inválida "${String(rawRequested)}". Valores permitidos: 'CENTRO' | 'OCCIDENTE'.`
+        };
+      }
+      if (roleUpper !== 'ADMIN' && parsedReq !== tokenSucursal) {
+        return {
+          ok: false,
+          status: 403,
+          code: 'SUCURSAL_TAMPERING_DETECTED',
+          error: `Acceso multisede denegado: tu sesión pertenece a ${tokenSucursal} y no tiene permisos sobre ${parsedReq}.`
+        };
+      }
+      return { ok: true, sucursal: parsedReq, role: roleUpper };
+    }
+
+    return { ok: true, sucursal: tokenSucursal, role: roleUpper };
   }
 
   function sortDegustacionesServer(list: any[], ascending: boolean = false): any[] {
@@ -879,18 +1035,53 @@ async function startServer() {
     throw lastErr || new Error(`Fetch failed for ${url}`);
   }
 
-  async function loadAllMergedDegustaciones(): Promise<any[]> {
+  async function loadAllMergedDegustaciones(
+    scopeSucursal: Sucursal,
+    actor?: { username: string; role: string; vendorId: string }
+  ): Promise<any[]> {
     const mapById = new Map<string, any>();
+    const activeClient = actor
+      ? getScopedTradeClient(tradeSupabaseCfg, {
+          username: actor.username,
+          role: actor.role,
+          vendorId: actor.vendorId,
+          sucursal: scopeSucursal
+        })
+      : tradeSupabase;
 
-    if (supabase) {
+    if (activeClient) {
       try {
-        const { data: supaList, error: supaErr } = await supabase
+        let supaList: any[] | null = null;
+        const { data, error } = await activeClient
           .from('degustaciones')
           .select('*')
+          .eq('sucursal', scopeSucursal)
           .order('fecha', { ascending: false });
-        if (!supaErr && Array.isArray(supaList)) {
+
+        if (!error && Array.isArray(data)) {
+          supaList = data;
+        } else if (
+          error &&
+          !tradeSupabaseCfg.strictSucursalColumn &&
+          scopeSucursal === 'OCCIDENTE' &&
+          /sucursal|schema cache|42703|PGRST204/i.test(String(error.message || error.code || ''))
+        ) {
+          // Compatibilidad transitoria solo para OCCIDENTE si la BD legacy aún no tiene columna sucursal
+          // (NUNCA exponer filas legacy de Occidente a una sesión de CENTRO)
+          const legacyRes = await activeClient
+            .from('degustaciones')
+            .select('*')
+            .order('fecha', { ascending: false });
+          if (!legacyRes.error && Array.isArray(legacyRes.data)) {
+            supaList = legacyRes.data;
+          }
+        }
+
+        if (Array.isArray(supaList)) {
           for (const row of supaList) {
-            const norm = normalizeDegustacionRecord(row);
+            const rowBranch = normalizeSucursal(row.sucursal) || 'OCCIDENTE';
+            if (rowBranch !== scopeSucursal) continue;
+            const norm = normalizeDegustacionRecord(row, scopeSucursal);
             if (norm.id && !EXCLUDED_TEST_DEG_IDS.has(norm.id) && !norm.id.startsWith('test-')) {
               mapById.set(norm.id, norm);
             }
@@ -901,36 +1092,109 @@ async function startServer() {
 
     for (const [memId, memRecord] of degustacionesMemoryStore.entries()) {
       if (memId && !EXCLUDED_TEST_DEG_IDS.has(memId) && !memId.startsWith('test-')) {
-        mapById.set(memId, normalizeDegustacionRecord(memRecord));
+        const memBranch = normalizeSucursal(memRecord.sucursal) || 'OCCIDENTE';
+        if (memBranch === scopeSucursal) {
+          mapById.set(memId, normalizeDegustacionRecord(memRecord, scopeSucursal));
+        }
       }
-    }
-
-    // Firestore como respaldo best-effort con timeout acotado (nunca bloquea Supabase)
-    if (!supabase) {
-      try {
-        const snapshot = await withTimeout(getDocs(collection(db, 'degustaciones')), 2500, null as any);
-        snapshot?.forEach((docSnap: any) => {
-          const data = docSnap.data();
-          if (data && data.clienteNombre) {
-            const norm = normalizeDegustacionRecord({ id: docSnap.id, ...data });
-            if (norm.id && !EXCLUDED_TEST_DEG_IDS.has(norm.id) && !norm.id.startsWith('test-')) {
-              if (!mapById.has(norm.id)) {
-                mapById.set(norm.id, norm);
-              }
-            }
-          }
-        });
-      } catch (_) {}
     }
 
     return sortDegustacionesServer(Array.from(mapById.values()), false);
   }
 
-  app.get("/api/degustaciones", async (req, res) => {
+  // CATÁLOGOS DELIMITADOS POR SUCURSAL (Tiendas, Rutas, Vendedores de la sede + Productos Nacionales 100%)
+  app.get("/api/degustaciones/catalogos", authenticateToken, async (req: any, res: any) => {
     try {
-      let list = await loadAllMergedDegustaciones();
+      const scope = resolveRequestSucursalScope(req);
+      if (!scope.ok) {
+        return res.status(scope.status).json({ success: false, code: scope.code, error: scope.error });
+      }
+      const targetSucursal = scope.sucursal;
+      const scopedClient = getScopedTradeClient(tradeSupabaseCfg, {
+        username: req.user.username,
+        role: scope.role,
+        vendorId: String(req.user.vendorId || ''),
+        sucursal: targetSucursal
+      });
 
-      // Filtros opcionales
+      const [clientesRes, rutas, vendedores, productos] = await Promise.all([
+        fetchClientesPorSucursal(
+          scopedClient,
+          targetSucursal,
+          { username: req.user.username, role: scope.role, vendorId: req.user.vendorId },
+          cachedActivacionParsed || undefined
+        ),
+        fetchRutasPorSucursal(scopedClient, targetSucursal, {
+          username: req.user.username,
+          role: scope.role
+        }),
+        fetchVendedoresPorSucursal(scopedClient, targetSucursal, {
+          username: req.user.username,
+          role: scope.role
+        }),
+        fetchProductosNacionales(scopedClient)
+      ]);
+
+      if (vendedores.length > 0) {
+        hydrateVendorProfilesFromMasterCatalog(
+          vendedores.map((v) => ({
+            username: v.username,
+            nombre: v.nombre,
+            ruta: v.ruta,
+            supervisor: v.supervisor,
+            sucursal: v.sucursal,
+            role: v.role,
+            activo: true
+          }))
+        );
+      }
+
+      return res.json({
+        success: true,
+        sucursal: targetSucursal,
+        clientes: clientesRes.items,
+        rutas,
+        vendedores,
+        productos
+      });
+    } catch (err: any) {
+      console.error("Error consultando catálogos multisede de degustaciones:", err);
+      return res.status(500).json({
+        success: false,
+        error: "Error al cargar catálogos de la sucursal",
+        details: err?.message
+      });
+    }
+  });
+
+  app.get("/api/degustaciones", authenticateToken, async (req: any, res: any) => {
+    try {
+      const scope = resolveRequestSucursalScope(req);
+      if (!scope.ok) {
+        return res.status(scope.status).json({ success: false, code: scope.code, error: scope.error });
+      }
+
+      let list = await loadAllMergedDegustaciones(scope.sucursal, {
+        username: req.user.username,
+        role: scope.role,
+        vendorId: String(req.user.vendorId || '')
+      });
+
+      // Si se solicita explícitamente solo las propias del vendedor (`?mine=true`)
+      if (req.query.mine === 'true' && scope.role === 'VENDEDOR') {
+        const uKey = String(req.user.username || '').toUpperCase().trim();
+        const uId = String(req.user.vendorId || '').toUpperCase().trim();
+        list = list.filter((d) => {
+          const dv = String(d.vendedorNombre || '').toUpperCase().trim();
+          const dvid = String(d.vendedorId || '').toUpperCase().trim();
+          return (
+            (uKey && (dv.includes(uKey) || uKey.includes(dv))) ||
+            (uId && dvid === uId)
+          );
+        });
+      }
+
+      // Filtros opcionales dentro de la misma sucursal autorizada
       if (req.query.id) {
         const cleanReqId = String(req.query.id).replace(/^DEG-/, '').trim();
         list = list.filter(d => String(d.id || '').replace(/^DEG-/, '') === cleanReqId);
@@ -961,9 +1225,10 @@ async function startServer() {
 
       res.json({
         success: true,
+        sucursal: scope.sucursal,
         count: list.length,
         data: list,
-        source: supabase ? 'supabase_primary' : 'memory_fallback'
+        source: tradeSupabase ? 'supabase_primary' : 'memory_fallback'
       });
     } catch (err: any) {
       console.error("Error fetching degustaciones via API:", err);
@@ -975,7 +1240,7 @@ async function startServer() {
   const GERENCIA_TRADE_API_URL =
     process.env.TRADE_MARKETING_API_URL ||
     process.env.GERENCIA_TRADE_API_URL ||
-    'https://trade-marketing-qi6j.onrender.com/api/degustaciones';
+    '';
   const TRADE_MARKETING_API_KEY = process.env.TRADE_MARKETING_API_KEY || '';
   const GERENCIA_UTERIO_SURVEYS_URL = process.env.GERENCIA_UTERIO_SURVEYS_URL || '';
   const GERENCIA_UTERIO_ANON_KEY = process.env.GERENCIA_UTERIO_ANON_KEY || '';
@@ -1401,9 +1666,21 @@ async function startServer() {
     }
   }
 
-  // ENDPOINT DE SINCRONIZACIÓN INTEGRAL DE DEGUSTACIONES CON TRADE MARKETING (con coalescing anti-tormenta)
-  app.post("/api/degustaciones/sync-gerencia", async (req, res) => {
+  // ENDPOINT DE SINCRONIZACIÓN INTEGRAL DE DEGUSTACIONES CON TRADE MARKETING (con coalescing anti-tormenta y delimitación por sucursal)
+  app.post("/api/degustaciones/sync-gerencia", authenticateToken, async (req: any, res: any) => {
     try {
+      const scope = resolveRequestSucursalScope(req);
+      if (!scope.ok) {
+        return res.status(scope.status).json({ success: false, code: scope.code, error: scope.error });
+      }
+      if (scope.role !== 'ADMIN' && scope.role !== 'COORDINADORA' && scope.role !== 'SUPERVISOR') {
+        return res.status(403).json({
+          success: false,
+          code: 'FORBIDDEN_SYNC',
+          error: 'Solo Administración o Coordinación de Trade Marketing pueden disparar sincronización masiva.'
+        });
+      }
+
       if (inFlightFullTradeSync) {
         const shared = await inFlightFullTradeSync;
         return res.json({
@@ -1415,13 +1692,24 @@ async function startServer() {
       }
 
       inFlightFullTradeSync = (async () => {
-        console.log("[SYNC TRADE] Sincronizando todas las degustaciones en orden cronológico con Trade Marketing...");
-        const mergedDesc = await loadAllMergedDegustaciones();
+        console.log(`[SYNC TRADE] Sincronizando degustaciones de ${scope.sucursal} con Trade Marketing...`);
+        const mergedDesc = await loadAllMergedDegustaciones(scope.sucursal, {
+          username: req.user.username,
+          role: scope.role,
+          vendorId: String(req.user.vendorId || '')
+        });
 
-        // 1. Asegurar que todas las degustaciones estén en la tabla degustaciones de Supabase
-        if (supabase && mergedDesc.length > 0) {
+        // 1. Asegurar que todas las degustaciones de esta sucursal estén en Supabase con sucursal explícita
+        const scopedClient = getScopedTradeClient(tradeSupabaseCfg, {
+          username: req.user.username,
+          role: scope.role,
+          vendorId: String(req.user.vendorId || ''),
+          sucursal: scope.sucursal
+        });
+        if (scopedClient && mergedDesc.length > 0) {
           const supaRows = mergedDesc.map(record => ({
             id: record.id,
+            sucursal: scope.sucursal,
             cliente_codigo: record.clienteCodigo || 'PDV',
             cliente_nombre: record.clienteNombre,
             vendedor_nombre: record.vendedorNombre || 'Vendedor',
@@ -1445,7 +1733,16 @@ async function startServer() {
             resultado: record.resultado || null,
             created_at: record.createdAt
           }));
-          await supabase.from('degustaciones').upsert(supaRows);
+          const { error: upErr } = await scopedClient.from('degustaciones').upsert(supaRows);
+          if (
+            upErr &&
+            !tradeSupabaseCfg.strictSucursalColumn &&
+            scope.sucursal === 'OCCIDENTE' &&
+            /sucursal|schema cache|42703|PGRST204/i.test(String(upErr.message || upErr.code || ''))
+          ) {
+            const legacyRows = supaRows.map(({ sucursal: _s, ...rest }) => rest);
+            await scopedClient.from('degustaciones').upsert(legacyRows);
+          }
         }
 
         // 2. Consultar estado actual remoto si el webhook está disponible
@@ -1539,9 +1836,10 @@ async function startServer() {
     }
   }
 
-  function buildSupabaseDegustacionRow(record: any) {
+  function buildSupabaseDegustacionRow(record: any, explicitSucursal: Sucursal) {
     return {
       id: record.id,
+      sucursal: explicitSucursal,
       cliente_codigo: record.clienteCodigo || 'PDV',
       cliente_nombre: record.clienteNombre,
       vendedor_nombre: record.vendedorNombre || 'Vendedor',
@@ -1567,18 +1865,130 @@ async function startServer() {
     };
   }
 
-  app.post("/api/degustaciones", async (req, res) => {
+  app.post("/api/degustaciones", authenticateToken, async (req: any, res: any) => {
     try {
       const item = req.body;
       if (!item || !item.clienteNombre || !item.fecha) {
         return res.status(400).json({ success: false, error: "Faltan campos obligatorios (clienteNombre, fecha)" });
       }
 
+      const sessionRole = String(req.user?.role || 'VENDEDOR').toUpperCase().trim();
+      const sessionSucursal: Sucursal = normalizeSucursal(req.user?.sucursal) || 'OCCIDENTE';
+
+      // Validar sucursal explícita en header si fue enviada
+      const headerSucRaw = req.headers['x-active-sucursal'];
+      if (headerSucRaw !== undefined && String(headerSucRaw).trim() !== '') {
+        const headerSuc = normalizeSucursal(headerSucRaw);
+        if (!headerSuc) {
+          return res.status(400).json({
+            success: false,
+            code: 'INVALID_SUCURSAL_VALUE',
+            error: `Cabecera X-Active-Sucursal inválida: "${String(headerSucRaw)}".`
+          });
+        }
+        if (sessionRole !== 'ADMIN' && headerSuc !== sessionSucursal) {
+          return res.status(403).json({
+            success: false,
+            code: 'SUCURSAL_TAMPERING_DETECTED',
+            error: `Operación denegada: tu sesión (${sessionSucursal}) no puede enviar solicitudes bajo ${headerSuc}.`
+          });
+        }
+      }
+
+      // Validación cruzada en BD: Tienda + Vendedor + Ruta + Sesión deben pertenecer a la misma sucursal
+      const requestedVendorRef =
+        sessionRole === 'VENDEDOR'
+          ? String(req.user?.username || item.vendedorNombre || item.vendedorId || '').trim()
+          : String(item.vendedorNombre || item.vendedorId || req.user?.username || '').trim();
+
+      const [storeLookup, vendorLookup] = await Promise.all([
+        lookupStoreGlobalSucursal(tradeSupabase, String(item.clienteCodigo || ''), String(item.clienteNombre || '')),
+        lookupVendorGlobalSucursal(tradeSupabase, requestedVendorRef)
+      ]);
+
+      const isQaSyntheticStress =
+        /^qa-stress-/i.test(String(item.id || '')) &&
+        /\[QA_STRESS_TEST_/i.test(`${String(item.clienteNombre || '')} ${String(item.observaciones || '')}`);
+
+      // Resolver ruta y vendedor concretos (eliminar 'ALL_MY_ROUTES' de forma determinista)
+      const rawRuta = String(item.ruta || item.vendedorId || req.user?.ruta || '').trim();
+      const fallbackProf = getVendorProfile(requestedVendorRef || req.user?.username || '', sessionSucursal);
+      const resolvedRuta =
+        !rawRuta || rawRuta.toUpperCase() === 'ALL_MY_ROUTES' || rawRuta.toUpperCase() === 'SUPERVISOR_ALL'
+          ? (storeLookup.ruta || vendorLookup.primaryRoute || fallbackProf.routes[0]?.id || fallbackProf.canonicalUsername)
+          : rawRuta;
+
+      const resolvedVendorId =
+        !item.vendedorId || String(item.vendedorId).toUpperCase() === 'ALL_MY_ROUTES'
+          ? (vendorLookup.vendorId || String(req.user?.vendorId || resolvedRuta))
+          : String(item.vendedorId).trim();
+
+      const resolvedVendorName =
+        sessionRole === 'VENDEDOR'
+          ? (vendorLookup.canonicalName || fallbackProf.canonicalUsername || String(req.user?.username || '').toUpperCase())
+          : (String(item.vendedorNombre || vendorLookup.canonicalName || req.user?.username || 'Vendedor').trim().toUpperCase());
+
+      // Verificar si la ruta pertenece a otra sucursal en caso de que el cliente la haya especificado manualmente
+      let routeSucursal: Sucursal | null = null;
+      if (tradeSupabase && resolvedRuta) {
+        try {
+          const { data: rutaRows, error: rutaErr } = await tradeSupabase
+            .from('rutas')
+            .select('codigo,nombre,sucursal,activo')
+            .or(`codigo.eq.${resolvedRuta},nombre.eq.${resolvedRuta}`)
+            .limit(5);
+          if (!rutaErr && Array.isArray(rutaRows) && rutaRows.length > 0) {
+            const activeRutas = rutaRows.filter((r: any) => r.activo !== false);
+            if (activeRutas.length > 0) {
+              const matchingBranch = activeRutas.find((r: any) => normalizeSucursal(r.sucursal) === (vendorLookup.sucursal || sessionSucursal));
+              routeSucursal = normalizeSucursal((matchingBranch || activeRutas[0]).sucursal);
+            }
+          }
+        } catch {}
+      }
+
+      const branchCheck = validateCrossBranchSubmission({
+        sessionRole,
+        sessionSucursal,
+        payloadSucursal: item.sucursal ?? headerSucRaw,
+        vendorSucursal: vendorLookup.sucursal,
+        storeSucursal: storeLookup.sucursal,
+        routeSucursal,
+        storeExistsInCatalog: storeLookup.found,
+        requireCatalogStore: storeLookup.authoritativeCatalogActive && !isQaSyntheticStress,
+        resolvedRoute: resolvedRuta
+      });
+
+      if (!branchCheck.ok) {
+        return res.status(branchCheck.status).json({
+          success: false,
+          code: branchCheck.code,
+          error: branchCheck.error
+        });
+      }
+
+      const authoritativeSucursal: Sucursal = branchCheck.sucursal;
+
+      const parsedProductos = Array.isArray(item.productos)
+        ? item.productos.map((p: any) => String(p || '').trim()).filter(Boolean)
+        : typeof item.productos === 'string' && item.productos.trim()
+          ? item.productos.split(',').map((s: string) => s.trim()).filter(Boolean)
+          : [];
+
+      if (parsedProductos.length === 0) {
+        return res.status(400).json({
+          success: false,
+          code: 'PRODUCTS_REQUIRED',
+          error: 'Debes seleccionar al menos un producto del catálogo nacional.'
+        });
+      }
+
       const rawHeaderKey = req.headers['x-idempotency-key'] ? String(req.headers['x-idempotency-key']).trim() : '';
       const id = String(item.id || rawHeaderKey || `deg-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`).trim();
-      const idempotencyKey = rawHeaderKey || String(item.idempotencyKey || id).trim();
+      const rawIdempKey = rawHeaderKey || String(item.idempotencyKey || id).trim();
+      const idempotencyKey = `${authoritativeSucursal}::${rawIdempKey}`;
 
-      // 1. Verificar caché de idempotencia completada (anti doble clic / reintentos de red)
+      // 1. Verificar caché de idempotencia completada (particionada por sucursal)
       const now = Date.now();
       const cachedDone = completedDegustacionIdempotency.get(idempotencyKey);
       if (cachedDone && cachedDone.expiresAt > now) {
@@ -1602,43 +2012,92 @@ async function startServer() {
         });
       }
 
-      const record = normalizeDegustacionRecord({
-        ...item,
-        id,
-        createdAt: item.createdAt || new Date().toISOString()
-      });
+      const record = normalizeDegustacionRecord(
+        {
+          ...item,
+          id,
+          sucursal: authoritativeSucursal,
+          clienteCodigo: storeLookup.codigo || item.clienteCodigo || 'PDV',
+          clienteNombre: storeLookup.nombre || item.clienteNombre,
+          vendedorNombre: resolvedVendorName,
+          vendedorId: resolvedVendorId,
+          ruta: resolvedRuta,
+          productos: parsedProductos,
+          createdAt: item.createdAt || new Date().toISOString()
+        },
+        authoritativeSucursal
+      );
 
       const executionPromise = (async () => {
         let supabaseDegustacionesOk = false;
-        let firestoreOk = false;
+        const scopedClient = getScopedTradeClient(tradeSupabaseCfg, {
+          username: req.user.username,
+          role: sessionRole,
+          vendorId: resolvedVendorId,
+          sucursal: authoritativeSucursal
+        });
 
-        // A. Persistencia primaria estrictamente awaited en Supabase (fuente de verdad compartida con Trade Marketing)
-        if (supabase) {
-          const { error: supaErr } = await supabase
-            .from('degustaciones')
-            .upsert(buildSupabaseDegustacionRow(record), { onConflict: 'id' });
+        // A. Persistencia primaria estrictamente awaited en Supabase compartido con `sucursal` explícito (cumpliendo RLS + Trigger)
+        if (scopedClient) {
+          const explicitRow = buildSupabaseDegustacionRow(record, authoritativeSucursal);
+          const customRpc = String(process.env.TRADE_SUPABASE_INSERT_RPC || '').trim();
+          let supaErr: any = null;
+
+          if (customRpc) {
+            const rpcRes = await scopedClient.rpc(customRpc, { p_payload: explicitRow, p_sucursal: authoritativeSucursal });
+            supaErr = rpcRes.error;
+          } else {
+            const upRes = await scopedClient
+              .from('degustaciones')
+              .upsert(explicitRow, { onConflict: 'id' });
+            supaErr = upRes.error;
+          }
+
           if (supaErr) {
-            console.warn("[SUPABASE] Error en upsert de degustación:", supaErr.message);
+            const errMsg = String(supaErr.message || '');
+            const errCode = String(supaErr.code || '');
+            const isMissingSucColOnLegacy =
+              !tradeSupabaseCfg.strictSucursalColumn &&
+              authoritativeSucursal === 'OCCIDENTE' &&
+              (errCode === 'PGRST204' || errCode === '42703' || /Could not find the 'sucursal' column/i.test(errMsg));
+
+            if (isMissingSucColOnLegacy) {
+              const { sucursal: _omitSuc, ...legacyRow } = explicitRow;
+              const retryRes = await scopedClient.from('degustaciones').upsert(legacyRow, { onConflict: 'id' });
+              if (!retryRes.error) {
+                supabaseDegustacionesOk = true;
+              } else {
+                console.warn("[SUPABASE] Error en fallback legacy de degustación:", retryRes.error.message);
+              }
+            } else if (
+              errCode === '42501' ||
+              errCode === '23514' ||
+              errCode === '23502' ||
+              /row-level security|CROSS_BRANCH|VENDOR_SUCURSAL_MISMATCH|MULTISEDE_/i.test(errMsg)
+            ) {
+              const secErr: any = new Error(errMsg || 'Rechazado por política RLS o integridad multisede en Supabase');
+              secErr.httpStatus = errCode === '42501' || /row-level security|CROSS_BRANCH|MISMATCH/i.test(errMsg) ? 403 : 400;
+              secErr.code = /CROSS_BRANCH/i.test(errMsg) ? 'CROSS_BRANCH_STORE_FORBIDDEN' : 'SUPABASE_RLS_REJECTED';
+              throw secErr;
+            } else if (authoritativeSucursal === 'CENTRO' && /sucursal|PGRST204|42703/i.test(errMsg)) {
+              const schemaErr: any = new Error(
+                'La instancia de Supabase conectada aún no posee la columna obligatoria sucursal. Configura TRADE_SUPABASE_URL o ejecuta scripts/sql/05_multisede_sucursal_rls.sql.'
+              );
+              schemaErr.httpStatus = 503;
+              schemaErr.code = 'MULTISEDE_SCHEMA_REQUIRED';
+              throw schemaErr;
+            } else {
+              console.warn("[SUPABASE] Error en upsert de degustación:", errMsg);
+            }
           } else {
             supabaseDegustacionesOk = true;
           }
         }
 
-        // B. Respaldo en memoria sincronizado para consultas inmediatas / modo offline
+        // B. Respaldo en memoria aislado con sucursal explícita
         degustacionesMemoryStore.set(record.id, record);
 
-        // C. Firestore secundario best-effort (sanitizando undefined para evitar excepciones síncronas del SDK)
-        try {
-          const firestoreSafeRecord = Object.fromEntries(
-            Object.entries(record).filter(([, value]) => value !== undefined)
-          );
-          await withTimeout(setDoc(doc(db, 'degustaciones', id), firestoreSafeRecord, { merge: true }), 1500, undefined);
-          firestoreOk = true;
-        } catch (_) {
-          firestoreOk = false;
-        }
-
-        // D. Sincronización consolidada hacia Trade Marketing + tabla surveys + JSON local atómico
+        // C. Sincronización secundaria (webhook opcional si configurado + JSON local)
         const [directSync] = await Promise.all([
           syncToGerenciaDirect(record),
           syncToGoogleScript(record)
@@ -1646,11 +2105,10 @@ async function startServer() {
 
         const syncSummary = {
           supabaseDegustaciones: supabaseDegustacionesOk,
-          firestore: firestoreOk,
+          sucursal: authoritativeSucursal,
           ...directSync
         };
 
-        // Guardar en caché de idempotencia (evitar crecimiento ilimitado)
         if (completedDegustacionIdempotency.size >= 5000) {
           const oldestKey = completedDegustacionIdempotency.keys().next().value;
           if (oldestKey) completedDegustacionIdempotency.delete(oldestKey);
@@ -1677,34 +2135,71 @@ async function startServer() {
         inFlightDegustacionCreates.delete(idempotencyKey);
       }
     } catch (err: any) {
+      if (err?.httpStatus) {
+        return res.status(err.httpStatus).json({
+          success: false,
+          code: err.code || 'DEGUSTACION_VALIDATION_ERROR',
+          error: err.message
+        });
+      }
       console.error("Error creating degustacion via API:", err);
       res.status(500).json({ success: false, error: "Error al guardar degustacion", details: err?.message });
     }
   });
 
-  app.put("/api/degustaciones/:id", async (req, res) => {
+  app.put("/api/degustaciones/:id", authenticateToken, async (req: any, res: any) => {
     try {
+      const scope = resolveRequestSucursalScope(req);
+      if (!scope.ok) {
+        return res.status(scope.status).json({ success: false, code: scope.code, error: scope.error });
+      }
+
       const { id } = req.params;
       const updates = req.body || {};
 
+      const scopedClient = getScopedTradeClient(tradeSupabaseCfg, {
+        username: req.user.username,
+        role: scope.role,
+        vendorId: String(req.user.vendorId || ''),
+        sucursal: scope.sucursal
+      });
+
       let existingRecord: any = degustacionesMemoryStore.get(id) || null;
-      if (supabase) {
+      if (scopedClient) {
         try {
-          const { data: supaRow } = await supabase.from('degustaciones').select('*').eq('id', id).maybeSingle();
+          const { data: supaRow } = await scopedClient.from('degustaciones').select('*').eq('id', id).maybeSingle();
           if (supaRow) {
-            existingRecord = normalizeDegustacionRecord(supaRow);
+            existingRecord = normalizeDegustacionRecord(supaRow, normalizeSucursal(supaRow.sucursal) || 'OCCIDENTE');
           }
         } catch (_) {}
       }
 
-      const mergedRecord = normalizeDegustacionRecord({
-        ...(existingRecord || {}),
-        ...updates,
-        id
-      });
+      if (existingRecord) {
+        const existingSuc = normalizeSucursal(existingRecord.sucursal) || 'OCCIDENTE';
+        if (scope.role !== 'ADMIN' && existingSuc !== scope.sucursal) {
+          return res.status(403).json({
+            success: false,
+            code: 'CROSS_BRANCH_ACCESS_DENIED',
+            error: `No tienes permisos para modificar una degustación de la sucursal ${existingSuc}.`
+          });
+        }
+      }
 
-      if (supabase) {
-        const supaUpdate: any = { updated_at: new Date().toISOString() };
+      const targetSucursal: Sucursal =
+        (existingRecord && normalizeSucursal(existingRecord.sucursal)) || scope.sucursal;
+
+      const mergedRecord = normalizeDegustacionRecord(
+        {
+          ...(existingRecord || {}),
+          ...updates,
+          id,
+          sucursal: targetSucursal
+        },
+        targetSucursal
+      );
+
+      if (scopedClient) {
+        const supaUpdate: any = { updated_at: new Date().toISOString(), sucursal: targetSucursal };
         if (updates.clienteNombre !== undefined) supaUpdate.cliente_nombre = updates.clienteNombre;
         if (updates.vendedorNombre !== undefined) supaUpdate.vendedor_nombre = updates.vendedorNombre;
         if (updates.estado !== undefined) supaUpdate.estado = updates.estado;
@@ -1715,39 +2210,80 @@ async function startServer() {
         if (updates.personasEstimadas !== undefined) supaUpdate.personas_estimadas = Number(updates.personasEstimadas) || 0;
         if (updates.observaciones !== undefined) supaUpdate.observaciones = updates.observaciones;
 
-        const { error: supaErr } = await supabase.from('degustaciones').update(supaUpdate).eq('id', id);
-        if (supaErr) {
+        let updateQuery = scopedClient.from('degustaciones').update(supaUpdate).eq('id', id).eq('sucursal', targetSucursal);
+        const { error: supaErr } = await updateQuery;
+        if (
+          supaErr &&
+          !tradeSupabaseCfg.strictSucursalColumn &&
+          targetSucursal === 'OCCIDENTE' &&
+          /sucursal|PGRST204|42703/i.test(String(supaErr.message || supaErr.code || ''))
+        ) {
+          delete supaUpdate.sucursal;
+          await scopedClient.from('degustaciones').update(supaUpdate).eq('id', id);
+        } else if (supaErr) {
           console.warn("[SUPABASE] Error actualizando degustación:", supaErr.message);
         }
       }
 
       degustacionesMemoryStore.set(id, mergedRecord);
-      completedDegustacionIdempotency.delete(id);
-
-      // Firestore best-effort no bloqueante
-      try {
-        await withTimeout(setDoc(doc(db, 'degustaciones', id), updates, { merge: true }), 1500, undefined);
-      } catch (_) {}
+      completedDegustacionIdempotency.delete(`${targetSucursal}::${id}`);
 
       const syncSummary = await syncToGerenciaDirect(mergedRecord);
       syncToGoogleScript(mergedRecord).catch(() => {});
 
-      res.json({ success: true, id, updated: updates, data: mergedRecord, sync: syncSummary });
+      res.json({ success: true, id, sucursal: targetSucursal, updated: updates, data: mergedRecord, sync: syncSummary });
     } catch (err: any) {
       console.error("Error updating degustacion via API:", err);
       res.status(500).json({ success: false, error: "Error al actualizar degustacion", details: err?.message });
     }
   });
 
-  app.delete("/api/degustaciones/:id", async (req, res) => {
+  app.delete("/api/degustaciones/:id", authenticateToken, async (req: any, res: any) => {
     try {
+      const scope = resolveRequestSucursalScope(req);
+      if (!scope.ok) {
+        return res.status(scope.status).json({ success: false, code: scope.code, error: scope.error });
+      }
+
       const { id } = req.params;
       const cleanId = String(id).replace(/^DEG-/, '').trim();
 
+      const scopedClient = getScopedTradeClient(tradeSupabaseCfg, {
+        username: req.user.username,
+        role: scope.role,
+        vendorId: String(req.user.vendorId || ''),
+        sucursal: scope.sucursal
+      });
+
+      const memExisting = degustacionesMemoryStore.get(cleanId) || degustacionesMemoryStore.get(id);
+      if (memExisting && scope.role !== 'ADMIN') {
+        const memSuc = normalizeSucursal(memExisting.sucursal) || 'OCCIDENTE';
+        if (memSuc !== scope.sucursal) {
+          return res.status(403).json({
+            success: false,
+            code: 'CROSS_BRANCH_ACCESS_DENIED',
+            error: `No puedes eliminar registros pertenecientes a la sucursal ${memSuc}.`
+          });
+        }
+      }
+
       let supabaseDeleted = false;
-      if (supabase) {
-        const { error: supaErr } = await supabase.from('degustaciones').delete().eq('id', cleanId);
-        if (supaErr) {
+      if (scopedClient) {
+        const { error: supaErr } = await scopedClient
+          .from('degustaciones')
+          .delete()
+          .eq('id', cleanId)
+          .eq('sucursal', scope.sucursal);
+
+        if (
+          supaErr &&
+          !tradeSupabaseCfg.strictSucursalColumn &&
+          scope.sucursal === 'OCCIDENTE' &&
+          /sucursal|PGRST204|42703/i.test(String(supaErr.message || supaErr.code || ''))
+        ) {
+          const retryDel = await scopedClient.from('degustaciones').delete().eq('id', cleanId);
+          if (!retryDel.error) supabaseDeleted = true;
+        } else if (supaErr) {
           console.warn("[SUPABASE] Error eliminando degustación:", supaErr.message);
         } else {
           supabaseDeleted = true;
@@ -1757,18 +2293,13 @@ async function startServer() {
       degustacionesMemoryStore.delete(cleanId);
       degustacionesMemoryStore.delete(id);
       for (const [k, v] of completedDegustacionIdempotency.entries()) {
-        if (k === id || k === cleanId || v.record?.id === cleanId) {
+        if (k === id || k === cleanId || k.endsWith(`::${cleanId}`) || v.record?.id === cleanId) {
           completedDegustacionIdempotency.delete(k);
         }
       }
 
-      // Firestore best-effort no bloqueante
-      try {
-        await withTimeout(deleteDoc(doc(db, 'degustaciones', cleanId)), 1500, undefined);
-      } catch (_) {}
-
       await deleteFromGerenciaDirect(cleanId);
-      res.json({ success: true, id: cleanId, supabaseDeleted });
+      res.json({ success: true, id: cleanId, sucursal: scope.sucursal, supabaseDeleted });
     } catch (err: any) {
       console.error("Error deleting degustacion via API:", err);
       res.status(500).json({ success: false, error: "Error al eliminar degustacion", details: err?.message });
@@ -6886,10 +7417,53 @@ async function startServer() {
     }
   });
 
-  app.get("/api/catalog/vendors", async (_req: any, res: any) => {
+  app.get("/api/catalog/vendors", async (req: any, res: any) => {
     try {
+      let requestedSucursal: Sucursal | null = normalizeSucursal(
+        req.headers?.['x-active-sucursal'] ?? req.query?.sucursal
+      );
+
+      // Si viene token JWT, respetar estrictamente la sucursal de la sesión (salvo ADMIN)
+      const authHeader = req.headers?.['authorization'];
+      const rawToken = authHeader && String(authHeader).startsWith('Bearer ') ? String(authHeader).split(' ')[1] : null;
+      if (rawToken) {
+        try {
+          const decoded: any = jwt.verify(rawToken, JWT_SECRET);
+          const roleUpper = String(decoded?.role || '').toUpperCase();
+          const tokenSuc = normalizeSucursal(decoded?.sucursal) || 'OCCIDENTE';
+          if (roleUpper !== 'ADMIN') {
+            requestedSucursal = tokenSuc;
+          } else if (!requestedSucursal) {
+            requestedSucursal = tokenSuc;
+          }
+        } catch {}
+      }
+
       let vendedores = getRuntimeSellerCatalog();
       let syncedAt: string | null = null;
+
+      if (tradeSupabase) {
+        try {
+          const { data: tradeVend } = await tradeSupabase.from('vendedores').select('*');
+          if (Array.isArray(tradeVend) && tradeVend.length > 0) {
+            const mappedTrade = tradeVend.map((v: any) => ({
+              vendedor_id: String(v.id ?? v.codigo ?? v.username ?? ''),
+              codigo_erp: String(v.codigo ?? v.id ?? ''),
+              nombre_canonico: normalizeVendorName(v.username || v.nombre),
+              display_name: String(v.nombre || v.username || ''),
+              ruta_oficial: normalizeVendorName(v.ruta || v.username || v.nombre),
+              supervisor: normalizeVendorName(v.supervisor || ''),
+              sucursal: normalizeSucursal(v.sucursal) || 'OCCIDENTE',
+              region: normalizeSucursal(v.sucursal) || 'OCCIDENTE',
+              role: (String(v.role || 'VENDEDOR').toUpperCase() as any),
+              activo: v.activo !== false
+            }));
+            vendedores = hydrateRuntimeSellerCatalog(mappedTrade);
+            hydrateVendorProfilesFromMasterCatalog(mappedTrade);
+          }
+        } catch {}
+      }
+
       if (supabase) {
         try {
           const { data: supaVendedores } = await supabase.from('vendedores_maestro').select('*');
@@ -6909,8 +7483,13 @@ async function startServer() {
           // Fallback al catálogo en memoria
         }
       }
+
+      const filteredVendedores = requestedSucursal
+        ? vendedores.filter((v) => (v.sucursal || normalizeSucursal(v.region) || 'OCCIDENTE') === requestedSucursal)
+        : vendedores;
+
       setNoCacheSyncHeaders(res, 'supabase');
-      return res.json({ vendedores, syncedAt });
+      return res.json({ vendedores: filteredVendedores, sucursal: requestedSucursal, syncedAt });
     } catch (err: any) {
       return res.status(500).json({ error: err?.message || 'Error consultando catálogo de vendedores' });
     }
