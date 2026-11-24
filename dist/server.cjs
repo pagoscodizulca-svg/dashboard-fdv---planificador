@@ -10820,8 +10820,22 @@ async function startServer() {
     }
     next();
   });
-  app2.get("/api/health", (req, res) => {
-    res.json({ status: "ok" });
+  const SERVER_STARTED_AT_ISO = (/* @__PURE__ */ new Date()).toISOString();
+  const APP_DEPLOY_COMMIT = String(process.env.RENDER_GIT_COMMIT || process.env.GIT_COMMIT || "local").trim().slice(0, 12);
+  const APP_DEPLOY_BRANCH = String(process.env.RENDER_GIT_BRANCH || "master").trim();
+  let getHealthSyncSummary = null;
+  app2.get("/api/health", (_req, res) => {
+    const syncSummary = getHealthSyncSummary ? getHealthSyncSummary() : null;
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("X-App-Commit", APP_DEPLOY_COMMIT);
+    res.json({
+      status: "ok",
+      commit: APP_DEPLOY_COMMIT,
+      branch: APP_DEPLOY_BRANCH,
+      startedAt: SERVER_STARTED_AT_ISO,
+      uptimeSeconds: Math.round(process.uptime()),
+      sync: syncSummary
+    });
   });
   app2.post("/api/auth/login", async (req, res) => {
     try {
@@ -14664,6 +14678,16 @@ data: ${JSON.stringify(payload)}
       lastUpdatedCaracas: st.lastUpdatedCaracas
     };
   };
+  getHealthSyncSummary = () => {
+    const st = sheetsScheduler.getStatus();
+    return {
+      lastSyncAt: st.lastUpdated || lastSuccessfulSheetSyncAt || null,
+      lastSyncCaracas: st.lastUpdatedCaracas || formatCaracasTimestamp(lastSuccessfulSheetSyncAt),
+      isSyncing: st.isSyncing,
+      degraded: st.degraded,
+      trackedSellers: sellerNumericTracker.getStateSize()
+    };
+  };
   async function runCoalescedSheetsSync(forceRebuild = false, _triggeredBy = "system", source = "manual") {
     const outcome = await sheetsScheduler.triggerSync({ source, forceRebuild });
     lastSheetDegraded = outcome.degraded;
@@ -16408,9 +16432,17 @@ data: ${JSON.stringify({
   if (!isDevMode && distIndexExists) {
     app2.use(
       import_express.default.static(distPath, {
+        etag: true,
+        lastModified: true,
         setHeaders: (res, filePath) => {
-          if (filePath.endsWith("index.html")) {
+          const normalized = filePath.replace(/\\/g, "/");
+          res.setHeader("X-App-Commit", APP_DEPLOY_COMMIT);
+          if (normalized.endsWith("/index.html") || normalized.endsWith("/sw.js") || normalized.endsWith("/manifest.webmanifest")) {
             res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+            res.setHeader("Pragma", "no-cache");
+            res.setHeader("Expires", "0");
+          } else if (normalized.includes("/assets/")) {
+            res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
           }
         }
       })
@@ -16419,7 +16451,10 @@ data: ${JSON.stringify({
       if (req.path.startsWith("/assets/")) {
         return res.status(404).end();
       }
+      res.setHeader("X-App-Commit", APP_DEPLOY_COMMIT);
       res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Expires", "0");
       res.sendFile(import_path.default.join(distPath, "index.html"));
     });
   } else {
@@ -16513,4 +16548,3 @@ startServer().catch((err) => {
   requireAlkostoAccess,
   requireSupervisorOrAdmin
 });
-//# sourceMappingURL=server.cjs.map
