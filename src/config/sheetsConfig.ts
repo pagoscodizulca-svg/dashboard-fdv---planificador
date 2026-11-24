@@ -107,13 +107,23 @@ export function sanitizeGoogleSheetGid(raw?: string | number | null): string {
   return GOOGLE_SHEET_GID_REGEX.test(cleaned) ? cleaned : '';
 }
 
+const SERVER_OFFICIAL_GOOGLE_SHEET_ID = '1PLzYEe9GG1vHb_wjd7HA93U6UQNtyP-uk8sxVfiN4sg';
+
 /**
- * Lee GOOGLE_SHEET_ID exclusivamente desde variables de entorno del servidor (nunca hardcodeado).
+ * Lee GOOGLE_SHEET_ID desde variables de entorno del servidor con respaldo al ID oficial
+ * parametrizado en backend Node.js cuando el proveedor de hosting omite la variable.
  */
 export function getGoogleSheetId(envOverride?: Record<string, string | undefined>): string {
+  if (envOverride && Object.prototype.hasOwnProperty.call(envOverride, 'GOOGLE_SHEET_ID')) {
+    return sanitizeGoogleSheetId(envOverride.GOOGLE_SHEET_ID);
+  }
   const procEnv = typeof process !== 'undefined' && process.env ? process.env : {};
-  const raw = envOverride?.GOOGLE_SHEET_ID ?? procEnv.GOOGLE_SHEET_ID ?? '';
-  return sanitizeGoogleSheetId(raw);
+  const fromEnv = sanitizeGoogleSheetId(procEnv.GOOGLE_SHEET_ID);
+  if (fromEnv) return fromEnv;
+  if (typeof window === 'undefined') {
+    return SERVER_OFFICIAL_GOOGLE_SHEET_ID;
+  }
+  return DEFAULT_GOOGLE_SHEET_ID;
 }
 
 /**

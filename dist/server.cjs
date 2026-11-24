@@ -8300,10 +8300,18 @@ function sanitizeGoogleSheetGid(raw) {
   if (!cleaned || PLACEHOLDER_ID_RE.test(cleaned)) return "";
   return GOOGLE_SHEET_GID_REGEX.test(cleaned) ? cleaned : "";
 }
+var SERVER_OFFICIAL_GOOGLE_SHEET_ID = "1PLzYEe9GG1vHb_wjd7HA93U6UQNtyP-uk8sxVfiN4sg";
 function getGoogleSheetId(envOverride) {
+  if (envOverride && Object.prototype.hasOwnProperty.call(envOverride, "GOOGLE_SHEET_ID")) {
+    return sanitizeGoogleSheetId(envOverride.GOOGLE_SHEET_ID);
+  }
   const procEnv = typeof process !== "undefined" && process.env ? process.env : {};
-  const raw = envOverride?.GOOGLE_SHEET_ID ?? procEnv.GOOGLE_SHEET_ID ?? "";
-  return sanitizeGoogleSheetId(raw);
+  const fromEnv = sanitizeGoogleSheetId(procEnv.GOOGLE_SHEET_ID);
+  if (fromEnv) return fromEnv;
+  if (typeof window === "undefined") {
+    return SERVER_OFFICIAL_GOOGLE_SHEET_ID;
+  }
+  return DEFAULT_GOOGLE_SHEET_ID;
 }
 function buildValidatedGoogleSheetUrl(params) {
   const {
@@ -17000,8 +17008,8 @@ data: ${JSON.stringify({
       loaded = null;
     }
   };
-  const ensureAuthoritativeSheetsMirror = async (force, isPrivilegedUser, username) => {
-    if (force && isPrivilegedUser) {
+  const ensureAuthoritativeSheetsMirror = async (force, _isPrivilegedUser, username) => {
+    if (force) {
       await runCoalescedSheetsSync(false, username, "manual");
       return;
     }

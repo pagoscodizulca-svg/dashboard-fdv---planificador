@@ -121,6 +121,35 @@ describe('E2E Exactness: Google Sheets November Mirror (60s Auto-Sync) vs Supaba
       });
       const sairuAct = await sairuActRes.json();
       expect(sairuAct.length).toBeGreaterThanOrEqual(35);
+
+      // 5. Real-time verification as salesperson MARÍA BRICEÑO (login + force sync + all 3 tabs)
+      const mariaLoginRes = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'MARIA BRICEÑO', password: '15937615' })
+      });
+      expect(mariaLoginRes.status).toBe(200);
+      const mariaAuth = await mariaLoginRes.json();
+      const mariaHeaders = { Authorization: `Bearer ${mariaAuth.token}` };
+
+      const [mbVolRes, mbActRes, mbMetasRes] = await Promise.all([
+        fetch(`${baseUrl}/api/data/volumen?force=true&vendedor=${encodeURIComponent('MARIA BRICEÑO')}`, { headers: mariaHeaders }),
+        fetch(`${baseUrl}/api/data/activacion?force=true&vendedor=${encodeURIComponent('MARIA BRICEÑO')}`, { headers: mariaHeaders }),
+        fetch(`${baseUrl}/api/data/metas-activacion?force=true&vendedor=${encodeURIComponent('MARIA BRICEÑO')}`, { headers: mariaHeaders })
+      ]);
+      expect(mbVolRes.status).toBe(200);
+      expect(mbActRes.status).toBe(200);
+      expect(mbMetasRes.status).toBe(200);
+
+      const [mbVol, mbAct, mbMetas] = await Promise.all([
+        mbVolRes.json(),
+        mbActRes.json(),
+        mbMetasRes.json()
+      ]);
+      expect(mbVol.length).toBeGreaterThanOrEqual(75);
+      expect(mbAct.length).toBeGreaterThanOrEqual(125);
+      expect(mbMetas.length).toBe(5);
+      expect(mbMetas.every((m: any) => m.vendedorId === 'MARIA BRICEÑO' && m.cartera > 0)).toBe(true);
     } finally {
       child.kill();
     }

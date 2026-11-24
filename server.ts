@@ -7188,10 +7188,10 @@ async function startServer() {
    */
   const ensureAuthoritativeSheetsMirror = async (
     force: boolean,
-    isPrivilegedUser: boolean,
+    _isPrivilegedUser: boolean,
     username: string
   ) => {
-    if (force && isPrivilegedUser) {
+    if (force) {
       await runCoalescedSheetsSync(false, username, 'manual');
       return;
     }

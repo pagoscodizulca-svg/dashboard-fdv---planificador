@@ -18,7 +18,7 @@ services:
       - key: SHEETS_SYNC_INTERVAL_MS
         value: "60000"
       - key: GOOGLE_SHEET_ID
-        sync: false
+        value: "1PLzYEe9GG1vHb_wjd7HA93U6UQNtyP-uk8sxVfiN4sg"
       - key: SYNC_SECRET_TOKEN
         sync: false
       - key: SUPABASE_URL
