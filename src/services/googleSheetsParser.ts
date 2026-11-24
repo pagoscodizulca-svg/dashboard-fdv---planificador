@@ -1595,7 +1595,7 @@ export function parseWorkbookFull(
 
     if (c.dbId !== undefined) {
       activacionSupabaseUpserts.push(supaPayload);
-    } else if (c.isNewFromSheet) {
+    } else {
       newSheetClientsForSupabase.push(supaPayload);
     }
 

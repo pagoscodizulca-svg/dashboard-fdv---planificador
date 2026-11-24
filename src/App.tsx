@@ -469,10 +469,11 @@ export default function App() {
       const responseDegraded = Boolean(latestMeta.degraded);
       setIsSyncDegraded(responseDegraded);
 
-      // Last-Known-Good en UI: jamás vaciar tablas/KPIs visibles si una consulta degradada devolvió []
-      setVolumenData((prev) => (vol.length > 0 || (!responseDegraded && prev.length === 0) ? vol : prev));
-      setActivacionData((prev) => (act.length > 0 || (!responseDegraded && prev.length === 0) ? act : prev));
-      setMetasActivacion((prev) => (metas.length > 0 || (!responseDegraded && prev.length === 0) ? metas : prev));
+      // Last-Known-Good en UI: actualizar siempre con la lectura exacta del Google Sheet cuando no está degradado;
+      // conservar estado previo únicamente si Google Sheets entró en modo degradado y devolvió vacío.
+      setVolumenData((prev) => (vol.length > 0 || !responseDegraded ? vol : prev));
+      setActivacionData((prev) => (act.length > 0 || !responseDegraded ? act : prev));
+      setMetasActivacion((prev) => (metas.length > 0 || !responseDegraded ? metas : prev));
 
       if (latestMeta.lastSyncAt) {
         setLastSyncAt(latestMeta.lastSyncAt);
@@ -506,8 +507,8 @@ export default function App() {
     }
     if (!isLoggedInRef.current) return;
     autoSyncIntervalRef.current = setInterval(() => {
-      // TTL 50s en el tick de 60s para leer siempre el nuevo estado del servidor (TTL servidor 55s)
-      loadData(false, false, 50_000, 'background');
+      // TTL 0ms en cada tick de 60s para consultar SIEMPRE el espejo en vivo del servidor sin omitir ticks por caché local
+      loadData(false, false, 0, 'background');
     }, SHEETS_AUTO_REFRESH_INTERVAL_MS);
   }, [loadData]);
 
@@ -622,7 +623,7 @@ export default function App() {
       })
       .catch(() => {});
 
-    loadData(false, false, DEFAULT_SHEETS_CACHE_TTL_MS, 'initial');
+    loadData(false, false, 0, 'initial');
     resetAutoSyncTimer();
 
     const triggerImmediateRecoveryIfStale = () => {

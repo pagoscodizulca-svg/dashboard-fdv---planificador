@@ -5409,12 +5409,25 @@ async function startServer() {
     return changed;
   };
 
-  async function syncWorkbookToSupabase(workbook: any) {
-    const XLSX = await import('xlsx');
-    const periodo = metasPeriodoActual();
+  let invalidateCurrentMonthHistBridge: (() => void) | null = null;
 
-    // 1. Cargar Cartera Maestra desde Supabase (deduplicando códigos repetidos si los hubiera) con fallback a semilla local
-    let masterClients: MasterClientSeed[] = [];
+  async function resolveAuthoritativeMasterClients(): Promise<{
+    masterClients: MasterClientSeed[];
+    hadDbClients: boolean;
+  }> {
+    const idActivacionPorCodigo = new Map<string, number>();
+    const manualFlagsPorCodigo = new Map<
+      string,
+      {
+        has_aceite: boolean;
+        has_azucar: boolean;
+        has_pollo: boolean;
+        has_estandar_asturias: boolean;
+        has_mortadela_salpicao: boolean;
+      }
+    >();
+    const inactiveCodes = new Set<string>();
+    const dbFallbackClients: MasterClientSeed[] = [];
     let hadDbClients = false;
 
     if (supabase) {
@@ -5435,75 +5448,100 @@ async function startServer() {
 
         if (allClients.length > 0) {
           hadDbClients = true;
-          const seenComposite = new Map<string, any>();
           for (const c of allClients) {
+            const rawCod = String(c.cliente_codigo || '').replace(/#\d+$/, '').trim();
+            const canonicalCod = rawCod.replace(/^0+/, '') || rawCod;
+            if (!canonicalCod) continue;
+
             const rawVid = String(c.vendedor_id || '').trim();
             if (
               rawVid.toUpperCase().startsWith('INACTIVO_MAESTRA::') ||
               String(c.status || '').toUpperCase() === 'BAJA_MAESTRA' ||
               c.activo === false
             ) {
+              inactiveCodes.add(canonicalCod);
               continue;
             }
-            const rawCod = String(c.cliente_codigo || '').trim();
-            const cleanCod = rawCod.replace(/#\d+$/, '').trim();
-            if (!cleanCod) continue;
-            const vNorm = normalizeVendorName(c.vendedor_nombre || c.vendedor_id);
-            const compKey = `${vNorm}::${cleanCod}`;
-            if (!seenComposite.has(compKey)) {
-              seenComposite.set(compKey, c);
-            } else {
-              const prev = seenComposite.get(compKey);
-              prev.has_aceite = Boolean(prev.has_aceite || c.has_aceite);
-              prev.has_azucar = Boolean(prev.has_azucar || c.has_azucar);
-              prev.has_pollo = Boolean(prev.has_pollo || c.has_pollo);
-              prev.has_estandar_asturias = Boolean(prev.has_estandar_asturias || c.has_estandar_asturias);
-              prev.has_mortadela_salpicao = Boolean(prev.has_mortadela_salpicao || c.has_mortadela_salpicao);
-            }
-          }
 
-          masterClients = Array.from(seenComposite.values()).map((c: any) => ({
-            id: c.id,
-            cliente_codigo: String(c.cliente_codigo || '').trim(),
-            cliente_nombre: String(c.cliente_nombre || '').trim(),
-            vendedor_id: String(c.vendedor_id || c.vendedor_nombre || '').replace(/\s+/g, ' ').trim(),
-            vendedor_nombre: String(c.vendedor_nombre || c.vendedor_id || '').replace(/\s+/g, ' ').trim(),
-            has_aceite: Boolean(c.has_aceite),
-            has_azucar: Boolean(c.has_azucar),
-            has_pollo: Boolean(c.has_pollo),
-            has_estandar_asturias: Boolean(c.has_estandar_asturias),
-            has_mortadela_salpicao: Boolean(c.has_mortadela_salpicao)
-          }));
+            if (c.id !== undefined && !idActivacionPorCodigo.has(canonicalCod)) {
+              idActivacionPorCodigo.set(canonicalCod, c.id);
+              idActivacionPorCodigo.set(rawCod, c.id);
+            }
+
+            const prevFlags = manualFlagsPorCodigo.get(canonicalCod);
+            manualFlagsPorCodigo.set(canonicalCod, {
+              has_aceite: Boolean(prevFlags?.has_aceite || c.has_aceite),
+              has_azucar: Boolean(prevFlags?.has_azucar || c.has_azucar),
+              has_pollo: Boolean(prevFlags?.has_pollo || c.has_pollo),
+              has_estandar_asturias: Boolean(prevFlags?.has_estandar_asturias || c.has_estandar_asturias),
+              has_mortadela_salpicao: Boolean(prevFlags?.has_mortadela_salpicao || c.has_mortadela_salpicao)
+            });
+
+            dbFallbackClients.push({
+              id: c.id,
+              cliente_codigo: rawCod,
+              cliente_nombre: String(c.cliente_nombre || '').trim(),
+              vendedor_id: String(c.vendedor_id || c.vendedor_nombre || '').replace(/\s+/g, ' ').trim(),
+              vendedor_nombre: String(c.vendedor_nombre || c.vendedor_id || '').replace(/\s+/g, ' ').trim(),
+              has_aceite: Boolean(c.has_aceite),
+              has_azucar: Boolean(c.has_azucar),
+              has_pollo: Boolean(c.has_pollo),
+              has_estandar_asturias: Boolean(c.has_estandar_asturias),
+              has_mortadela_salpicao: Boolean(c.has_mortadela_salpicao)
+            });
+          }
         }
       } catch (dbReadErr: any) {
-        console.warn("[SERVER] Advertencia leyendo cartera maestra desde Supabase:", dbReadErr?.message);
+        console.warn("[SERVER] Advertencia leyendo metadatos de activacion_clientes:", dbReadErr?.message);
       }
-    }
 
-    if (masterClients.length === 0) {
-      masterClients = loadLocalMasterClientSeed();
-    }
-
-    // Fuente preferente: Maestra Activa (tablas maestra_*, cargadas desde "Actualizar Maestra").
-    // Si aún no existen o están vacías, se mantiene la fuente anterior sin cambios.
-    if (supabase) {
-      const idActivacionPorCodigo = new Map<string, number>();
-      for (const mc of masterClients) {
-        if (mc.id !== undefined) idActivacionPorCodigo.set(String(mc.cliente_codigo).trim(), mc.id);
-      }
+      // Prioridad 1: Tablas maestra_* cargadas desde "Actualizar Maestra" (si existen y tienen datos)
       const carteraMaestra = await leerCarteraActivaMaestra(supabase, idActivacionPorCodigo);
       if (carteraMaestra.length > 0) {
-        masterClients = carteraMaestra;
+        return { masterClients: carteraMaestra, hadDbClients };
       }
     }
 
-    // 2. Parsear y normalizar las 10 pestañas del Google Sheet bajo el Contrato Espejo (sin mezclar ventas_historial)
+    // Prioridad 2: Cartera Maestra Oficial completa (2,717 clientes activos de Noviembre)
+    // Jamás truncar la cartera usando una tabla activacion_clientes incompleta en Supabase.
+    const localSeed = loadLocalMasterClientSeed();
+    if (localSeed.length > 0) {
+      const enrichedSeed: MasterClientSeed[] = [];
+      for (const s of localSeed) {
+        const rawCod = String(s.cliente_codigo || '').trim();
+        const canonicalCod = rawCod.replace(/^0+/, '') || rawCod;
+        if (inactiveCodes.has(canonicalCod)) continue;
+        const dbId = idActivacionPorCodigo.get(canonicalCod) ?? idActivacionPorCodigo.get(rawCod);
+        const flags = manualFlagsPorCodigo.get(canonicalCod);
+        enrichedSeed.push({
+          ...(dbId !== undefined ? { id: dbId } : {}),
+          cliente_codigo: rawCod,
+          cliente_nombre: s.cliente_nombre,
+          vendedor_id: s.vendedor_id,
+          vendedor_nombre: s.vendedor_nombre,
+          ...(flags || {})
+        });
+      }
+      return { masterClients: enrichedSeed, hadDbClients };
+    }
+
+    return { masterClients: dbFallbackClients, hadDbClients };
+  }
+
+  async function syncWorkbookToSupabase(workbook: any) {
+    const XLSX = await import('xlsx');
+    const periodo = metasPeriodoActual();
+
+    // 1. Resolver Cartera Maestra autoritativa completa (sin truncar jamás por filas parciales en Supabase)
+    const { masterClients, hadDbClients } = await resolveAuthoritativeMasterClients();
+
+    // 2. Parsear y normalizar las 10 pestañas del Google Sheet bajo el Contrato Espejo 1:1 (sin mezclar ventas_historial)
     const parsed = parseWorkbookFull(XLSX, workbook, {
       periodo,
       masterClients
     });
 
-    // 3. Actualizar cachés en memoria de inmediato para respuesta instantánea y consistente
+    // 3. Actualizar cachés en memoria de inmediato para respuesta instantánea, exacta y sin alteraciones
     cachedVolumenParsed = parsed.volumenApiRows;
     lastVolumenParsedTime = Date.now();
     cachedActivacionParsed = parsed.activacionApiRows;
@@ -5515,6 +5553,9 @@ async function startServer() {
     lastSheetAuditLogs = parsed.auditLogs;
     lastSheetDataQuality = parsed.dataQuality || null;
     lastLiveProductMaps = parsed.productMaps;
+    if (invalidateCurrentMonthHistBridge) {
+      invalidateCurrentMonthHistBridge();
+    }
 
     // 3b. Evaluar hashes SHA-256 numéricos por vendedor y notificar en tiempo real (SSE) solo cambios reales
     applySellerNumericDiffAndBroadcast(parsed);
@@ -6113,14 +6154,54 @@ async function startServer() {
     return names;
   }
 
+  // Puente en vivo del mes actual (Google Sheet) hacia los paneles 360° de Historial (cuyos meses pasados viven en Supabase)
+  const getLiveCurrentMonthCarteraRows = async (): Promise<any[]> => {
+    if (cachedActivacionParsed && cachedActivacionParsed.length > 0) {
+      return cachedActivacionParsed.map((a: any) => ({
+        cliente_codigo: String(a.id || '').trim(),
+        cliente_nombre: String(a.cliente || '').trim(),
+        vendedor_id: String(a.vendedorId || '').trim(),
+        vendedor_nombre: String(a.vendedorId || a.vendedorNombre || '').trim(),
+        has_aceite: Boolean(a.cats?.ACEITE),
+        has_azucar: Boolean(a.cats?.AZUCAR),
+        has_pollo: Boolean(a.cats?.POLLO),
+        has_estandar_asturias: Boolean(a.cats?.ESTANDAR_ASTURIAS),
+        has_mortadela_salpicao: Boolean(a.cats?.MORTADELA_SALPICAO),
+        has_leche_vencampo: Boolean(a.cats?.LECHE_VENCAMPO),
+        has_mortadela_asturias: Boolean(a.cats?.MORTADELA_ASTURIAS),
+        has_salpicao: Boolean(a.cats?.SALPICAO),
+        cajas_aceite: Number(a.cajas?.ACEITE) || 0,
+        cajas_azucar: Number(a.cajas?.AZUCAR) || 0,
+        cajas_pollo: Number(a.cajas?.POLLO) || 0,
+        cajas_estandar_asturias: Number(a.cajas?.ESTANDAR_ASTURIAS) || 0,
+        cajas_mortadela_salpicao: Number(a.cajas?.MORTADELA_SALPICAO) || 0,
+        cajas_leche_vencampo: Number(a.cajas?.LECHE_VENCAMPO) || 0,
+        cajas_mortadela_asturias: Number(a.cajas?.MORTADELA_ASTURIAS) || 0,
+        cajas_salpicao: Number(a.cajas?.SALPICAO) || 0
+      }));
+    }
+    const seed = loadLocalMasterClientSeed();
+    if (seed.length > 0) {
+      return seed.map((s) => ({
+        cliente_codigo: s.cliente_codigo,
+        cliente_nombre: s.cliente_nombre,
+        vendedor_id: s.vendedor_id,
+        vendedor_nombre: s.vendedor_nombre
+      }));
+    }
+    return supabase
+      ? histFetchAll((a, b) => supabase!.from('activacion_clientes').select('*').order('id').range(a, b))
+      : [];
+  };
+
   let histCarteraCache: { rows: { cod: string; vend: string }[]; time: number } | null = null;
   async function histGetCarteraVendorMap(): Promise<{ cod: string; vend: string }[]> {
-    if (histCarteraCache && Date.now() - histCarteraCache.time < 300000) return histCarteraCache.rows;
-    const raw = await histFetchAll((a, b) => supabase!.from('activacion_clientes').select('cliente_codigo,vendedor_nombre').order('id').range(a, b));
+    if (histCarteraCache && Date.now() - histCarteraCache.time < 60000) return histCarteraCache.rows;
+    const raw = await getLiveCurrentMonthCarteraRows();
     const rows = raw
       .map((r: any) => ({
         cod: String(r.cliente_codigo || '').trim().replace(/^#/, '').replace(/^0+/, ''),
-        vend: normHist(r.vendedor_nombre)
+        vend: normHist(r.vendedor_nombre || r.vendedor_id)
       }))
       .filter((r) => r.cod && r.vend);
     histCarteraCache = { rows, time: Date.now() };
@@ -6229,6 +6310,10 @@ async function startServer() {
   }
 
   const histCache = new Map<string, { time: number; data: any }>();
+  invalidateCurrentMonthHistBridge = () => {
+    histCache.clear();
+    histCarteraCache = null;
+  };
   const histCached = async <T,>(key: string, loader: () => Promise<T>): Promise<T> => {
     const hit = histCache.get(key);
     if (hit && Date.now() - hit.time < 300000) return hit.data as T;
@@ -6326,7 +6411,7 @@ async function startServer() {
           m.monto[r.rubro] = (m.monto[r.rubro] || 0) + r.monto;
         });
 
-        const cart = await histFetchAll((a, b) => supabase!.from('activacion_clientes').select('cliente_codigo,vendedor_nombre').order('id').range(a, b));
+        const cart = await getLiveCurrentMonthCarteraRows();
         const allowed = new Set([...scope.names.map(normHist), ...(scope.aliases || [])]);
         const seen = new Set<string>();
         cart.forEach((c: any) => {
@@ -6444,7 +6529,7 @@ async function startServer() {
             if (!scope.all) q = q.in('vendedor', scope.names);
             return q.order('id_cliente').order('id_articulo').range(a, b);
           }),
-          histFetchAll((a, b) => supabase!.from('activacion_clientes').select('cliente_codigo,vendedor_nombre').order('id').range(a, b))
+          getLiveCurrentMonthCarteraRows()
         ]);
 
         const allowed = new Set([...scope.names.map(normHist), ...(scope.aliases || [])]);
@@ -6620,12 +6705,23 @@ async function startServer() {
             if (!scope.all) q = q.in('vendedor', scope.names);
             return q.order('ano').order('mes').order('id_cliente').order('id_articulo').range(a, b);
           }),
-          histFetchAll((a, b) =>
-            supabase!.from('activacion_clientes').select('*').order('id').range(a, b)
-          ),
+          getLiveCurrentMonthCarteraRows(),
           histFetchAll((a, b) =>
             supabase!.from('metas_activacion').select('*').order('id').range(a, b)
-          )
+          ).then((dbMetas) => {
+            const currentPer = metasPeriodoActual();
+            if (!cachedMetasParsed || cachedMetasParsed.length === 0) return dbMetas;
+            const pastMetas = dbMetas.filter((m: any) => String(m.periodo || '') !== currentPer);
+            const liveMetas = cachedMetasParsed.map((m: any) => ({
+              periodo: currentPer,
+              vendedor_id: m.vendedorId,
+              categoria: m.categoria,
+              cartera: m.cartera,
+              meta: m.meta,
+              activados: m.activados
+            }));
+            return [...pastMetas, ...liveMetas];
+          })
         ]);
         const rows = (scope.clientIds && scope.clientIds.size > 0)
           ? rawRows.filter((r: any) => scope.clientIds!.has(String(r.id_cliente || '').trim().replace(/^#/, '').replace(/^0+/, '')))
@@ -7050,9 +7146,10 @@ async function startServer() {
       await loadWorkbookTransient(false);
     try {
       const XLSX = await import('xlsx');
+      const { masterClients } = await resolveAuthoritativeMasterClients();
       const parsed = parseWorkbookFull(XLSX, loaded.workbook, {
         periodo: metasPeriodoActual(),
-        masterClients: loadLocalMasterClientSeed()
+        masterClients
       });
       const updateAll = scope === 'all' || lastSheetSource === 'live_google_sheet';
       if (updateAll || scope === 'volumen') {
@@ -7072,6 +7169,9 @@ async function startServer() {
       lastSheetAuditLogs = parsed.auditLogs;
       lastSheetDataQuality = parsed.dataQuality || null;
       lastLiveProductMaps = parsed.productMaps;
+      if (invalidateCurrentMonthHistBridge) {
+        invalidateCurrentMonthHistBridge();
+      }
 
       // Evaluar hashes SHA-256 numéricos por vendedor (en arranque frío solo registra versión 1 sin toast)
       applySellerNumericDiffAndBroadcast(parsed);
@@ -7079,6 +7179,35 @@ async function startServer() {
     } finally {
       if (loaded) loaded.workbook = null;
       loaded = null;
+    }
+  };
+
+  /**
+   * Garantiza que el espejo en memoria del mes actual (Google Sheet) esté hidratado y fresco cada 60s.
+   * Jamás permite que un gap entre 55s y 60s sobrescriba los datos exactos del Google Sheet con tablas parciales de Supabase.
+   */
+  const ensureAuthoritativeSheetsMirror = async (
+    force: boolean,
+    isPrivilegedUser: boolean,
+    username: string
+  ) => {
+    if (force && isPrivilegedUser) {
+      await runCoalescedSheetsSync(false, username, 'manual');
+      return;
+    }
+    if (!cachedVolumenParsed || !cachedActivacionParsed || !cachedMetasParsed) {
+      try {
+        await runCoalescedSheetsSync(false, 'cold_boot', 'startup');
+      } catch {
+        try {
+          await hydrateParsedCachesFromWorkbookFallback('all');
+        } catch {}
+      }
+      return;
+    }
+    // Guardia anti-desfase: si por cualquier motivo transcurrieron >65s sin tick del planificador, disparar refresco no bloqueante
+    if (Date.now() - lastVolumenParsedTime >= SHEETS_AUTO_SYNC_INTERVAL_MS + 5_000) {
+      runCoalescedSheetsSync(false, 'auto_stale_guard', 'interval').catch(() => {});
     }
   };
 
@@ -7168,14 +7297,10 @@ async function startServer() {
         });
       };
 
-      if (force && isPrivilegedUser) {
-        await runCoalescedSheetsSync(false, String(user?.username || 'SUPERVISOR'));
-        setNoCacheSyncHeaders(res);
-        return res.json(filterByVendor(cachedVolumenParsed || []));
-      }
+      await ensureAuthoritativeSheetsMirror(force, isPrivilegedUser, String(user?.username || 'SUPERVISOR'));
 
-      if (!force && cachedVolumenParsed && (Date.now() - lastVolumenParsedTime < PARSED_DATA_TTL)) {
-        setNoCacheSyncHeaders(res, 'memory');
+      if (cachedVolumenParsed) {
+        setNoCacheSyncHeaders(res, lastSheetSource);
         return res.json(filterByVendor(cachedVolumenParsed));
       }
 
@@ -7265,14 +7390,10 @@ async function startServer() {
         });
       };
 
-      if (force && isPrivilegedUser) {
-        await runCoalescedSheetsSync(false, String(user?.username || 'SUPERVISOR'));
-        setNoCacheSyncHeaders(res);
-        return res.json(filterByVendor(cachedActivacionParsed || []));
-      }
+      await ensureAuthoritativeSheetsMirror(force, isPrivilegedUser, String(user?.username || 'SUPERVISOR'));
 
-      if (!force && cachedActivacionParsed && (Date.now() - lastActivacionParsedTime < PARSED_DATA_TTL)) {
-        setNoCacheSyncHeaders(res, 'memory');
+      if (cachedActivacionParsed) {
+        setNoCacheSyncHeaders(res, lastSheetSource);
         return res.json(filterByVendor(cachedActivacionParsed));
       }
 
@@ -7600,14 +7721,10 @@ async function startServer() {
         });
       };
 
-      if (force && isPrivilegedUser) {
-        await runCoalescedSheetsSync(false, String(user?.username || 'SUPERVISOR'));
-        setNoCacheSyncHeaders(res);
-        return res.json(filterByVendor(cachedMetasParsed || []));
-      }
+      await ensureAuthoritativeSheetsMirror(force, isPrivilegedUser, String(user?.username || 'SUPERVISOR'));
 
-      if (!force && cachedMetasParsed && (Date.now() - lastMetasParsedTime < PARSED_DATA_TTL)) {
-        setNoCacheSyncHeaders(res, 'memory');
+      if (cachedMetasParsed) {
+        setNoCacheSyncHeaders(res, lastSheetSource);
         return res.json(filterByVendor(cachedMetasParsed));
       }
 
@@ -7909,8 +8026,8 @@ async function startServer() {
       console.log(`Server running on port ${portToTry}`);
       registerGracefulShutdown();
 
-      // Iniciar planificador centralizado (sincronización inicial a los 3s y luego cada 60s con mutex + Last-Known-Good)
-      sheetsScheduler.start({ initialDelayMs: 3000 });
+      // Iniciar planificador centralizado inmediatamente (boot inmediato + sincronización exacta cada 60s con mutex + Last-Known-Good)
+      sheetsScheduler.start({ initialDelayMs: 50 });
     });
 
     serverInstance.on('error', (err: any) => {
