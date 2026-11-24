@@ -1,0 +1,56 @@
+name: CI & Render Auto-Deploy
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ci-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-and-deploy:
+    name: Validate, Build & Trigger Render
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies (clean lockfile)
+        run: npm ci --include=dev --no-audit --no-fund
+
+      - name: TypeScript typecheck
+        run: npm run lint
+
+      - name: Run core sync & security unit tests
+        run: npx vitest run tests/unit/sheetSyncService.test.ts tests/unit/autoSync60sResilience.test.ts tests/unit/safeNumberAndSheetsAudit.test.ts tests/unit/googleSheetsParser.test.ts
+
+      - name: Production build (Vite + esbuild)
+        env:
+          NODE_OPTIONS: --max-old-space-size=1024
+        run: npm run build
+
+      - name: Verify build outputs exist
+        run: |
+          test -f dist/index.html
+          test -f dist/server.cjs
+
+      - name: Trigger Render Deploy Hook (if configured in GitHub Secrets)
+        if: github.ref == 'refs/heads/master' && secrets.RENDER_DEPLOY_HOOK_URL != ''
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          echo "Disparando despliegue en Render vía Deploy Hook..."
+          curl --fail --silent --show-error -X POST "$RENDER_DEPLOY_HOOK_URL" > /dev/null
+          echo "Deploy Hook aceptado por Render."
