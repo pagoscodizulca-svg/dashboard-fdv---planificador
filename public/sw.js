@@ -1,3 +1,4 @@
+const APP_BUILD_ID = '__APP_BUILD_ID__';
 const SHARE_CACHE_NAME = 'fdv-whatsapp-share-v1';
 const SHARED_RECEIPT_KEY = '/__shared_whatsapp_receipt__';
 const SHARED_META_KEY = '/__shared_whatsapp_meta__';
@@ -72,7 +73,29 @@ self.addEventListener('install', () => {
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(self.clients.claim());
+  event.waitUntil(
+    caches
+      .keys()
+      .then((keys) =>
+        Promise.all(
+          keys
+            .filter((key) => key !== SHARE_CACHE_NAME)
+            .map((key) => caches.delete(key).catch(() => false))
+        )
+      )
+      .then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener('message', (event) => {
+  const type = event.data && event.data.type;
+  if (type === 'SKIP_WAITING') {
+    self.skipWaiting();
+    return;
+  }
+  if (type === 'GET_BUILD_ID' && event.ports && event.ports[0]) {
+    event.ports[0].postMessage({ buildId: APP_BUILD_ID });
+  }
 });
 
 self.addEventListener('fetch', (event) => {

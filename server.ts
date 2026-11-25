@@ -7984,38 +7984,59 @@ async function startServer() {
   // Servir estáticos de producción si se especificó production o si existe dist y no es el script dev
   const isDevMode = process.env.npm_lifecycle_event === 'dev' || process.env.NODE_ENV === 'development';
 
+  const STATIC_EXT_RE = /\.(?:m?js|cjs|css|map|json|webmanifest|png|jpe?g|webp|svg|ico|gif|woff2?|ttf|eot|txt|xml)$/i;
+  const applyFdvStaticHeaders = (res: express.Response, filePath: string) => {
+    const normalized = filePath.replace(/\\/g, '/');
+    const base = path.posix.basename(normalized).toLowerCase();
+    res.setHeader('X-App-Commit', APP_DEPLOY_COMMIT);
+    if (
+      base === 'index.html' ||
+      base === 'version.json' ||
+      base === 'sw.js' ||
+      base === 'registersw.js' ||
+      base === 'manifest.json' ||
+      base === 'manifest.webmanifest'
+    ) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+      res.setHeader('Surrogate-Control', 'no-store');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      if (base === 'sw.js' || base === 'registersw.js') {
+        res.setHeader('Service-Worker-Allowed', '/');
+      } else if (base === 'version.json') {
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      } else if (base.endsWith('.webmanifest')) {
+        res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+      }
+    } else if (normalized.includes('/assets/')) {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    }
+  };
+  const sendFdvSpaFallback = (req: express.Request, res: express.Response) => {
+    if (req.path.startsWith('/assets/') || STATIC_EXT_RE.test(req.path)) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      return res.status(404).type('text/plain; charset=utf-8').send('Asset not found');
+    }
+    res.setHeader('X-App-Commit', APP_DEPLOY_COMMIT);
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+    res.setHeader('Surrogate-Control', 'no-store');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.sendFile(path.join(distPath, 'index.html'));
+  };
+
   if (!isDevMode && distIndexExists) {
     app.use(
       express.static(distPath, {
+        index: false,
         etag: true,
         lastModified: true,
-        setHeaders: (res, filePath) => {
-          const normalized = filePath.replace(/\\/g, '/');
-          res.setHeader('X-App-Commit', APP_DEPLOY_COMMIT);
-          if (
-            normalized.endsWith('/index.html') ||
-            normalized.endsWith('/sw.js') ||
-            normalized.endsWith('/manifest.webmanifest')
-          ) {
-            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-            res.setHeader('Pragma', 'no-cache');
-            res.setHeader('Expires', '0');
-          } else if (normalized.includes('/assets/')) {
-            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-          }
-        }
+        setHeaders: applyFdvStaticHeaders,
       })
     );
-    app.get('*', (req, res) => {
-      if (req.path.startsWith('/assets/')) {
-        return res.status(404).end();
-      }
-      res.setHeader('X-App-Commit', APP_DEPLOY_COMMIT);
-      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-      res.setHeader('Pragma', 'no-cache');
-      res.setHeader('Expires', '0');
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+    app.get('*', sendFdvSpaFallback);
   } else {
     try {
       const vite = await createViteServer({
@@ -8026,14 +8047,13 @@ async function startServer() {
     } catch (vErr) {
       console.error("[SERVER] Error al inicializar Vite en modo desarrollo, usando fallback a dist:", vErr);
       if (distIndexExists) {
-        app.use(express.static(distPath));
-        app.get('*', (req, res) => {
-          if (req.path.startsWith('/assets/')) {
-            return res.status(404).end();
-          }
-          res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-          res.sendFile(path.join(distPath, 'index.html'));
-        });
+        app.use(
+          express.static(distPath, {
+            index: false,
+            setHeaders: applyFdvStaticHeaders,
+          })
+        );
+        app.get('*', sendFdvSpaFallback);
       }
     }
   }
