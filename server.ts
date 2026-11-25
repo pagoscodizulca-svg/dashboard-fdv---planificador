@@ -599,6 +599,16 @@ async function startServer() {
     });
   });
 
+  // Caché en memoria de hashes bcrypt provenientes de la pestaña "Usuarios" del Google Sheet (sincronizada cada 60s, cero texto plano)
+  const liveSheetUsersHashCache = new Map<
+    string,
+    { username: string; passwordHash: string; role: 'ADMIN' | 'SUPERVISOR' | 'VENDEDOR'; vendorId: string }
+  >();
+  let lastUsuariosSheetDigest = '';
+  // Caché efímera HMAC-SHA256 de digestos verificados (TTL 5 min, cero credenciales en texto plano) para acelerar logins concurrentes en Render Free Tier
+  const verifiedLoginDigestCache = new Map<string, number>();
+  const VERIFIED_LOGIN_CACHE_TTL_MS = 5 * 60 * 1000;
+
   // ==============================================================
   // ENDPOINT DE AUTENTICACIÓN SEGURA (BCRYPT EXCLUSIVO - CERO TEXTO PLANO)
   // ==============================================================
@@ -614,8 +624,17 @@ async function startServer() {
       const pwdClean = pwd.replace(/\D/g, '');
       const usuarioNorm = normalizeVendorKey(usuarioUpper);
 
-      let creds = DEFAULT_VENDOR_BCRYPT_CREDENTIALS[usuarioUpper];
-      let matchedCanonicalKey = usuarioUpper;
+      let creds = liveSheetUsersHashCache.get(usuarioUpper) || DEFAULT_VENDOR_BCRYPT_CREDENTIALS[usuarioUpper];
+      let matchedCanonicalKey: string = creds && 'username' in creds ? String(creds.username) : usuarioUpper;
+      if (!creds) {
+        for (const [normKey, liveVal] of liveSheetUsersHashCache.entries()) {
+          if (normalizeVendorKey(normKey) === usuarioNorm) {
+            creds = liveVal;
+            matchedCanonicalKey = liveVal.username;
+            break;
+          }
+        }
+      }
       if (!creds) {
         for (const [key, val] of Object.entries(DEFAULT_VENDOR_BCRYPT_CREDENTIALS)) {
           if (normalizeVendorKey(key) === usuarioNorm) {
@@ -628,13 +647,30 @@ async function startServer() {
 
       const verifyAgainstHash = async (candidateHash: string): Promise<boolean> => {
         if (!candidateHash) return false;
-        if (candidateHash.startsWith('$2')) {
-          if (await bcrypt.compare(pwd, candidateHash)) return true;
-          if (pwdClean && pwdClean !== pwd && (await bcrypt.compare(pwdClean, candidateHash))) return true;
-          return false;
+        const digestKey = crypto
+          .createHmac('sha256', JWT_SECRET)
+          .update(`${usuarioNorm}\0${pwd}\0${candidateHash}`)
+          .digest('hex');
+        const cachedExp = verifiedLoginDigestCache.get(digestKey);
+        if (cachedExp && cachedExp > Date.now()) {
+          return true;
         }
-        // Compatibilidad transitoria si la fila en BD aún no ha pasado por el primer hash bcrypt(12)
-        return pwd === candidateHash || (Boolean(pwdClean) && pwdClean === candidateHash);
+        let ok = false;
+        if (candidateHash.startsWith('$2')) {
+          if (await bcrypt.compare(pwd, candidateHash)) ok = true;
+          else if (pwdClean && pwdClean !== pwd && (await bcrypt.compare(pwdClean, candidateHash))) ok = true;
+        } else {
+          // Compatibilidad transitoria si la fila en BD aún no ha pasado por el primer hash bcrypt(12)
+          ok = pwd === candidateHash || (Boolean(pwdClean) && pwdClean === candidateHash);
+        }
+        if (ok) {
+          if (verifiedLoginDigestCache.size >= 500) {
+            const firstKey = verifiedLoginDigestCache.keys().next().value;
+            if (firstKey) verifiedLoginDigestCache.delete(firstKey);
+          }
+          verifiedLoginDigestCache.set(digestKey, Date.now() + VERIFIED_LOGIN_CACHE_TTL_MS);
+        }
+        return ok;
       };
 
       // 1A. Intentar autenticación multisede contra tabla `vendedores` / `vendedores_fdv` en Supabase compartido (CENTRO | OCCIDENTE)
@@ -5560,6 +5596,49 @@ async function startServer() {
     // 3b. Evaluar hashes SHA-256 numéricos por vendedor y notificar en tiempo real (SSE) solo cambios reales
     applySellerNumericDiffAndBroadcast(parsed);
 
+    // 3c. Sincronizar Usuarios en memoria (`liveSheetUsersHashCache`) y hacia Supabase con bcrypt(12)
+    //     solo cuando cambia el digest SHA-256 de la pestaña "Usuarios" (ahorra CPU cada 60s y habilita acceso inmediato)
+    if (parsed.usuariosRows.length > 0) {
+      const currentUsuariosDigest = crypto
+        .createHash('sha256')
+        .update(JSON.stringify(parsed.usuariosRows))
+        .digest('hex');
+      if (currentUsuariosDigest !== lastUsuariosSheetDigest) {
+        lastUsuariosSheetDigest = currentUsuariosDigest;
+        buildHashedUsersForSupabase(parsed.usuariosRows, SUPERVISOR_SUMMARY_COLUMNS)
+          .then(async (hashedUsers) => {
+            if (hashedUsers.length === 0) return;
+            for (const u of hashedUsers) {
+              const effectiveRole: 'ADMIN' | 'SUPERVISOR' | 'VENDEDOR' = getSupervisorProfile(u.username)
+                ? 'SUPERVISOR'
+                : u.role === 'ADMIN'
+                  ? 'ADMIN'
+                  : 'VENDEDOR';
+              liveSheetUsersHashCache.set(u.username.toUpperCase().trim(), {
+                username: u.username.toUpperCase().trim(),
+                passwordHash: u.password_hash,
+                role: effectiveRole,
+                vendorId: String(u.vendor_id || '')
+              });
+            }
+            if (!supabase) return;
+            const upserts = hashedUsers.map((u) => ({
+              username: u.username,
+              password_hash: u.password_hash,
+              role: getSupervisorProfile(u.username) ? 'SUPERVISOR' : (u.role === 'SUPERVISOR' ? 'VENDEDOR' : u.role),
+              vendor_id: u.vendor_id,
+              nombre_completo: u.nombre_completo,
+              activo: true,
+              updated_at: new Date().toISOString()
+            }));
+            await supabase.from('usuarios').upsert(upserts, { onConflict: 'username' });
+          })
+          .catch(() => {
+            lastUsuariosSheetDigest = '';
+          });
+      }
+    }
+
     if (parsed.warnings.length > 0) {
       console.warn(
         `[SHEET QA] ${parsed.warnings.length} advertencia(s) y ${parsed.auditLogs.length} evento(s) de auditoría registrados sin cortar carga.`
@@ -5683,24 +5762,7 @@ async function startServer() {
         }
       }
 
-      // 4d. Sincronizar Usuarios con bcrypt(12) en background sin exponer jamás contraseñas en texto plano
-      if (parsed.usuariosRows.length > 0) {
-        buildHashedUsersForSupabase(parsed.usuariosRows, SUPERVISOR_SUMMARY_COLUMNS)
-          .then(async (hashedUsers) => {
-            if (!supabase || hashedUsers.length === 0) return;
-            const upserts = hashedUsers.map((u) => ({
-              username: u.username,
-              password_hash: u.password_hash,
-              role: u.role === 'SUPERVISOR' ? 'VENDEDOR' : u.role,
-              vendor_id: u.vendor_id,
-              nombre_completo: u.nombre_completo,
-              activo: true,
-              updated_at: new Date().toISOString()
-            }));
-            await supabase.from('usuarios').upsert(upserts, { onConflict: 'username' });
-          })
-          .catch(() => {});
-      }
+      // (Sincronización de Usuarios consolidada en el paso 3c con digest SHA-256 en memoria + Supabase)
     }
 
     if (lastWorkbookSha256) {

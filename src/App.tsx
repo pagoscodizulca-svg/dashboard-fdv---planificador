@@ -309,8 +309,14 @@ export default function App() {
           setActiveVendedorId(savedRoute || defaultRoute);
         } else {
           const profile = getVendorProfile(sessionRes.user.username, verifiedSuc);
-          const initialRoute = profile.routes.length > 1 ? 'ALL_MY_ROUTES' : (profile.routes[0]?.id || profile.canonicalUsername);
-          setActiveVendedorId(initialRoute);
+          const allowedIds = [
+            ...(profile.routes.length > 1 ? ['ALL_MY_ROUTES'] : []),
+            ...profile.routes.map((r) => r.id)
+          ];
+          const savedRoute = localStorage.getItem('dashboard_fdv_active_route') || '';
+          const validSavedRoute = allowedIds.includes(savedRoute) ? savedRoute : '';
+          const fallbackRoute = profile.routes.length > 1 ? 'ALL_MY_ROUTES' : (profile.routes[0]?.id || profile.canonicalUsername);
+          setActiveVendedorId(validSavedRoute || fallbackRoute);
         }
       }
     }
@@ -783,6 +789,12 @@ export default function App() {
           : (serverRuta || profile.routes[0]?.id || profile.canonicalUsername);
         if (usuarioUpper.includes('VILLA') && profile.routes.some(r => r.id.includes('VILLA'))) {
           initialRoute = profile.routes.find(r => r.id.includes('VILLA'))?.id || initialRoute;
+        } else if (usuarioUpper.includes('CAB/OJE') && profile.routes.some(r => r.id.includes('CAB/OJE'))) {
+          initialRoute = profile.routes.find(r => r.id.includes('CAB/OJE'))?.id || initialRoute;
+        } else if (usuarioUpper.includes('CORO') && profile.routes.some(r => r.id.includes('CORO'))) {
+          initialRoute = profile.routes.find(r => r.id.includes('CORO'))?.id || initialRoute;
+        } else if (usuarioUpper.includes('COSTA') && profile.routes.some(r => r.id.includes('COSTA'))) {
+          initialRoute = profile.routes.find(r => r.id.includes('COSTA'))?.id || initialRoute;
         } else if ((usuarioUpper.includes('JOHNATAN') || usuarioUpper.includes('SOTO') || usuarioUpper.includes('DIAZ1')) && !usuarioUpper.includes('VILLA')) {
           initialRoute = profile.routes[0]?.id || initialRoute;
         }

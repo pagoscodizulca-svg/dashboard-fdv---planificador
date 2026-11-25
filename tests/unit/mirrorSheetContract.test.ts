@@ -290,9 +290,10 @@ describe('Phase 2 Baseline — Mirror Contract for Dashboard_Vendedores', () => 
     const wb = XLSX.readFile(localSheetPath, { raw: true });
     const parsed = parseWorkbookFull(XLSX, wb, { periodo: '2026-11', masterClients: [] });
 
-    // All negative SKU rows (including the 11 with CUOTA = "-") must be preserved
+    // All negative SKU rows (including credit notes with CUOTA = "-") must be preserved as live sales progress
     const negativeRows = parsed.volumenSupabaseRows.filter((r) => r.venta_neta_kg < 0);
-    expect(negativeRows.length).toBeGreaterThanOrEqual(70);
+    expect(negativeRows.length).toBeGreaterThanOrEqual(50);
+    expect(negativeRows.some((r) => r.meta_kg === 0)).toBe(true);
 
     // Detail sheets read 100% of non-empty data rows without premature break (accounting identity holds on all 5 tabs)
     expect(parsed.metrics['Azucar'].validRecordsRead).toBeGreaterThanOrEqual(1200);

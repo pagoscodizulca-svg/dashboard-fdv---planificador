@@ -10649,17 +10649,17 @@ var DEFAULT_VENDOR_BCRYPT_CREDENTIALS = {
   "ADMIN": { passwordHash: "$2b$10$2gmLccv6ZOfTGjug5IYd1eRg.f8w7lFTxDl98528gHELi84PCqjw6", role: "ADMIN", vendorId: "ADMIN" },
   "MARIA BRICE\xD1O": { passwordHash: "$2b$10$.lsOQ2WyrSmGKr4.p.afpe0B3.yyJp7zKagWH32PjNKINIDlCRg0S", role: "VENDEDOR", vendorId: "1" },
   "MARIANA CHACIN": { passwordHash: "$2b$10$NP271ZsGqQBaCgFaT2kATeiTGlw4BqJtmqy9s/75TpfGcdIkdphTC", role: "VENDEDOR", vendorId: "2" },
-  "MIKELANGELO DIAZ": { passwordHash: "$2b$10$QafAApUrfC7By8KoW.ve0.vhOXhQj4j9c1meBJwO0d1esbtPSTfwa", role: "VENDEDOR", vendorId: "3" },
-  "MIKELANGELODIAZ@GMAIL.COM": { passwordHash: "$2b$10$QafAApUrfC7By8KoW.ve0.vhOXhQj4j9c1meBJwO0d1esbtPSTfwa", role: "VENDEDOR", vendorId: "3" },
-  "MIKELANGELO": { passwordHash: "$2b$10$QafAApUrfC7By8KoW.ve0.vhOXhQj4j9c1meBJwO0d1esbtPSTfwa", role: "VENDEDOR", vendorId: "3" },
-  "MIKELANGELO DIAZ1": { passwordHash: "$2b$10$QafAApUrfC7By8KoW.ve0.vhOXhQj4j9c1meBJwO0d1esbtPSTfwa", role: "VENDEDOR", vendorId: "3" },
-  "MIKELANGELO DIAZ - VILLA DEL ROS": { passwordHash: "$2b$10$QafAApUrfC7By8KoW.ve0.vhOXhQj4j9c1meBJwO0d1esbtPSTfwa", role: "VENDEDOR", vendorId: "37" },
-  "MIKELANGELO DIAZ VILLA DEL ROS": { passwordHash: "$2b$10$QafAApUrfC7By8KoW.ve0.vhOXhQj4j9c1meBJwO0d1esbtPSTfwa", role: "VENDEDOR", vendorId: "37" },
-  "MIKELANGELO VILLA DEL ROS": { passwordHash: "$2b$10$QafAApUrfC7By8KoW.ve0.vhOXhQj4j9c1meBJwO0d1esbtPSTfwa", role: "VENDEDOR", vendorId: "37" },
-  "JOHNATAN SOTO": { passwordHash: "$2b$10$QafAApUrfC7By8KoW.ve0.vhOXhQj4j9c1meBJwO0d1esbtPSTfwa", role: "VENDEDOR", vendorId: "3" },
-  "JOHNATAN": { passwordHash: "$2b$10$QafAApUrfC7By8KoW.ve0.vhOXhQj4j9c1meBJwO0d1esbtPSTfwa", role: "VENDEDOR", vendorId: "3" },
-  "JONATHAN": { passwordHash: "$2b$10$QafAApUrfC7By8KoW.ve0.vhOXhQj4j9c1meBJwO0d1esbtPSTfwa", role: "VENDEDOR", vendorId: "3" },
-  "JHONATAN": { passwordHash: "$2b$10$QafAApUrfC7By8KoW.ve0.vhOXhQj4j9c1meBJwO0d1esbtPSTfwa", role: "VENDEDOR", vendorId: "3" },
+  "MIKELANGELO DIAZ": { passwordHash: "$2b$10$519wucUdaWz/E.gAVzPpnO/wdZ.ia3a0LlFm7TTOH8pt9yqEfMa2u", role: "VENDEDOR", vendorId: "47" },
+  "MIKELANGELODIAZ@GMAIL.COM": { passwordHash: "$2b$10$519wucUdaWz/E.gAVzPpnO/wdZ.ia3a0LlFm7TTOH8pt9yqEfMa2u", role: "VENDEDOR", vendorId: "47" },
+  "MIKELANGELO": { passwordHash: "$2b$10$519wucUdaWz/E.gAVzPpnO/wdZ.ia3a0LlFm7TTOH8pt9yqEfMa2u", role: "VENDEDOR", vendorId: "47" },
+  "MIKELANGELO DIAZ1": { passwordHash: "$2b$10$519wucUdaWz/E.gAVzPpnO/wdZ.ia3a0LlFm7TTOH8pt9yqEfMa2u", role: "VENDEDOR", vendorId: "47" },
+  "MIKELANGELO DIAZ - VILLA DEL ROS": { passwordHash: "$2b$10$mKQAf0tzR6LbRtLNYPGdQOoX5Sib4BGcBr9qqC3gK0mcpBom7Ri6G", role: "VENDEDOR", vendorId: "37" },
+  "MIKELANGELO DIAZ VILLA DEL ROS": { passwordHash: "$2b$10$mKQAf0tzR6LbRtLNYPGdQOoX5Sib4BGcBr9qqC3gK0mcpBom7Ri6G", role: "VENDEDOR", vendorId: "37" },
+  "MIKELANGELO VILLA DEL ROS": { passwordHash: "$2b$10$mKQAf0tzR6LbRtLNYPGdQOoX5Sib4BGcBr9qqC3gK0mcpBom7Ri6G", role: "VENDEDOR", vendorId: "37" },
+  "JOHNATAN SOTO": { passwordHash: "$2b$10$N0t83nEO9099jXn.4WHAlOVJrcnHwrhPWg/zoL6fpXfMPkbMQgd96", role: "SUPERVISOR", vendorId: "3" },
+  "JOHNATAN": { passwordHash: "$2b$10$N0t83nEO9099jXn.4WHAlOVJrcnHwrhPWg/zoL6fpXfMPkbMQgd96", role: "SUPERVISOR", vendorId: "3" },
+  "JONATHAN": { passwordHash: "$2b$10$N0t83nEO9099jXn.4WHAlOVJrcnHwrhPWg/zoL6fpXfMPkbMQgd96", role: "SUPERVISOR", vendorId: "3" },
+  "JHONATAN": { passwordHash: "$2b$10$N0t83nEO9099jXn.4WHAlOVJrcnHwrhPWg/zoL6fpXfMPkbMQgd96", role: "SUPERVISOR", vendorId: "3" },
   "HERNAN PAZ": { passwordHash: "$2b$10$Vv4ivNR8fGkkrfVNKVvuGe/vpwPFwqutV32cZ2JtU0T4kIN.oorKa", role: "VENDEDOR", vendorId: "4" },
   "OSWALDO CHURION": { passwordHash: "$2b$10$P/Cx3jKhpZX9ozweuhDz1ubtZ411kz8G7YoIj1uGPYfsPq8TEfdfq", role: "VENDEDOR", vendorId: "7" },
   "CARLOS FUENMAYOR": { passwordHash: "$2b$10$eSURQrx7cKzrVTAu2J0HOeHzX/XenBwNDRY90gAEpkPa0H9Jr6fx.", role: "VENDEDOR", vendorId: "12" },
@@ -10676,10 +10676,10 @@ var DEFAULT_VENDOR_BCRYPT_CREDENTIALS = {
   "SAIRU VALLES": { passwordHash: "$2b$10$ywRlszZqEEDgyB2JUPzpk.Av5.PbT9wkPbxtH5WbpGFxuCqXSLSYG", role: "VENDEDOR", vendorId: "26" },
   "ELISA SOLER": { passwordHash: "$2b$10$driuV7zvIU.bBfT1IQIg2OPpmVZrWwlur3qS1da2.f9D.6FIjpoS2", role: "VENDEDOR", vendorId: "28" },
   "ALI PEREZ": { passwordHash: "$2b$10$t9au4en88NkkWBmEt6JrzOkDBS/fVeE5GyNJXSIqC2dlHD4jfLm2C", role: "SUPERVISOR", vendorId: "SUPERVISOR_ALI_PEREZ" },
-  "ANGEL NAVARRO": { passwordHash: "$2b$10$CwHCSO4rpKd08PEKkf62EeRtXGD0w.y332k59w5owFNdKsg20ASqy", role: "VENDEDOR", vendorId: "29" },
-  "MARIANGEL GONZALEZ": { passwordHash: "$2b$10$gC2sVl.p/lAgW./xGofIE.Olh9XR3jhRzdI0/pDaqrjvcFXogzNZu", role: "VENDEDOR", vendorId: "47" },
-  "MARIANGEL": { passwordHash: "$2b$10$gC2sVl.p/lAgW./xGofIE.Olh9XR3jhRzdI0/pDaqrjvcFXogzNZu", role: "VENDEDOR", vendorId: "47" },
-  "VICTOR CAMPOS": { passwordHash: "$2b$10$vk7adrdmsyCv07MDWvRmN.eKkDLVdiBSjOH94cp9OVIFmYxKmnLlO", role: "VENDEDOR", vendorId: "48" },
+  "ANGEL NAVARRO": { passwordHash: "$2b$10$CwHCSO4rpKd08PEKkf62EeRtXGD0w.y332k59w5owFNdKsg20ASqy", role: "VENDEDOR", vendorId: "48" },
+  "MARIANGEL GONZALEZ": { passwordHash: "$2b$10$gC2sVl.p/lAgW./xGofIE.Olh9XR3jhRzdI0/pDaqrjvcFXogzNZu", role: "VENDEDOR", vendorId: "49" },
+  "MARIANGEL": { passwordHash: "$2b$10$gC2sVl.p/lAgW./xGofIE.Olh9XR3jhRzdI0/pDaqrjvcFXogzNZu", role: "VENDEDOR", vendorId: "49" },
+  "VICTOR CAMPOS": { passwordHash: "$2b$10$vk7adrdmsyCv07MDWvRmN.eKkDLVdiBSjOH94cp9OVIFmYxKmnLlO", role: "VENDEDOR", vendorId: "50" },
   "J PABLO ARAUJO": { passwordHash: "$2b$10$y2d2jrl32fVin3vwN75KxOsCCDt8rZtafJz9iWItH5feloLeqYTk6", role: "VENDEDOR", vendorId: "31" },
   "EDUARDO PI\xD1A": { passwordHash: "$2b$10$JEUwa/KjFQfodHf.vPoKJ./OIJVFAbYSLz25Ay0UZ3LsZgfhKKVlC", role: "VENDEDOR", vendorId: "33" },
   "JOHNATAN SOTO VILLA DEL ROS": { passwordHash: "$2b$10$mKQAf0tzR6LbRtLNYPGdQOoX5Sib4BGcBr9qqC3gK0mcpBom7Ri6G", role: "VENDEDOR", vendorId: "37" },
@@ -11540,6 +11540,10 @@ async function startServer() {
       sync: syncSummary
     });
   });
+  const liveSheetUsersHashCache = /* @__PURE__ */ new Map();
+  let lastUsuariosSheetDigest = "";
+  const verifiedLoginDigestCache = /* @__PURE__ */ new Map();
+  const VERIFIED_LOGIN_CACHE_TTL_MS = 5 * 60 * 1e3;
   app2.post("/api/auth/login", async (req, res) => {
     try {
       const { username, password } = req.body;
@@ -11550,8 +11554,17 @@ async function startServer() {
       const pwd = String(password).trim();
       const pwdClean = pwd.replace(/\D/g, "");
       const usuarioNorm = normalizeVendorKey(usuarioUpper);
-      let creds = DEFAULT_VENDOR_BCRYPT_CREDENTIALS[usuarioUpper];
-      let matchedCanonicalKey = usuarioUpper;
+      let creds = liveSheetUsersHashCache.get(usuarioUpper) || DEFAULT_VENDOR_BCRYPT_CREDENTIALS[usuarioUpper];
+      let matchedCanonicalKey = creds && "username" in creds ? String(creds.username) : usuarioUpper;
+      if (!creds) {
+        for (const [normKey, liveVal] of liveSheetUsersHashCache.entries()) {
+          if (normalizeVendorKey(normKey) === usuarioNorm) {
+            creds = liveVal;
+            matchedCanonicalKey = liveVal.username;
+            break;
+          }
+        }
+      }
       if (!creds) {
         for (const [key, val] of Object.entries(DEFAULT_VENDOR_BCRYPT_CREDENTIALS)) {
           if (normalizeVendorKey(key) === usuarioNorm) {
@@ -11563,12 +11576,26 @@ async function startServer() {
       }
       const verifyAgainstHash = async (candidateHash) => {
         if (!candidateHash) return false;
-        if (candidateHash.startsWith("$2")) {
-          if (await import_bcryptjs3.default.compare(pwd, candidateHash)) return true;
-          if (pwdClean && pwdClean !== pwd && await import_bcryptjs3.default.compare(pwdClean, candidateHash)) return true;
-          return false;
+        const digestKey = import_crypto3.default.createHmac("sha256", JWT_SECRET).update(`${usuarioNorm}\0${pwd}\0${candidateHash}`).digest("hex");
+        const cachedExp = verifiedLoginDigestCache.get(digestKey);
+        if (cachedExp && cachedExp > Date.now()) {
+          return true;
         }
-        return pwd === candidateHash || Boolean(pwdClean) && pwdClean === candidateHash;
+        let ok = false;
+        if (candidateHash.startsWith("$2")) {
+          if (await import_bcryptjs3.default.compare(pwd, candidateHash)) ok = true;
+          else if (pwdClean && pwdClean !== pwd && await import_bcryptjs3.default.compare(pwdClean, candidateHash)) ok = true;
+        } else {
+          ok = pwd === candidateHash || Boolean(pwdClean) && pwdClean === candidateHash;
+        }
+        if (ok) {
+          if (verifiedLoginDigestCache.size >= 500) {
+            const firstKey = verifiedLoginDigestCache.keys().next().value;
+            if (firstKey) verifiedLoginDigestCache.delete(firstKey);
+          }
+          verifiedLoginDigestCache.set(digestKey, Date.now() + VERIFIED_LOGIN_CACHE_TTL_MS);
+        }
+        return ok;
       };
       if (tradeSupabase) {
         const tradeAuth = await authenticateVendorFromTradeSupabase(tradeSupabase, usuarioUpper, pwd);
@@ -15565,6 +15592,37 @@ data: ${JSON.stringify(payload)}
       invalidateCurrentMonthHistBridge();
     }
     applySellerNumericDiffAndBroadcast(parsed);
+    if (parsed.usuariosRows.length > 0) {
+      const currentUsuariosDigest = import_crypto3.default.createHash("sha256").update(JSON.stringify(parsed.usuariosRows)).digest("hex");
+      if (currentUsuariosDigest !== lastUsuariosSheetDigest) {
+        lastUsuariosSheetDigest = currentUsuariosDigest;
+        buildHashedUsersForSupabase(parsed.usuariosRows, SUPERVISOR_SUMMARY_COLUMNS).then(async (hashedUsers) => {
+          if (hashedUsers.length === 0) return;
+          for (const u of hashedUsers) {
+            const effectiveRole = getSupervisorProfile(u.username) ? "SUPERVISOR" : u.role === "ADMIN" ? "ADMIN" : "VENDEDOR";
+            liveSheetUsersHashCache.set(u.username.toUpperCase().trim(), {
+              username: u.username.toUpperCase().trim(),
+              passwordHash: u.password_hash,
+              role: effectiveRole,
+              vendorId: String(u.vendor_id || "")
+            });
+          }
+          if (!supabase) return;
+          const upserts = hashedUsers.map((u) => ({
+            username: u.username,
+            password_hash: u.password_hash,
+            role: getSupervisorProfile(u.username) ? "SUPERVISOR" : u.role === "SUPERVISOR" ? "VENDEDOR" : u.role,
+            vendor_id: u.vendor_id,
+            nombre_completo: u.nombre_completo,
+            activo: true,
+            updated_at: (/* @__PURE__ */ new Date()).toISOString()
+          }));
+          await supabase.from("usuarios").upsert(upserts, { onConflict: "username" });
+        }).catch(() => {
+          lastUsuariosSheetDigest = "";
+        });
+      }
+    }
     if (parsed.warnings.length > 0) {
       console.warn(
         `[SHEET QA] ${parsed.warnings.length} advertencia(s) y ${parsed.auditLogs.length} evento(s) de auditor\xEDa registrados sin cortar carga.`
@@ -15678,22 +15736,6 @@ data: ${JSON.stringify(payload)}
         } catch (mErr) {
           console.warn("[SERVER] Error fallback metas_activacion:", mErr?.message);
         }
-      }
-      if (parsed.usuariosRows.length > 0) {
-        buildHashedUsersForSupabase(parsed.usuariosRows, SUPERVISOR_SUMMARY_COLUMNS).then(async (hashedUsers) => {
-          if (!supabase || hashedUsers.length === 0) return;
-          const upserts = hashedUsers.map((u) => ({
-            username: u.username,
-            password_hash: u.password_hash,
-            role: u.role === "SUPERVISOR" ? "VENDEDOR" : u.role,
-            vendor_id: u.vendor_id,
-            nombre_completo: u.nombre_completo,
-            activo: true,
-            updated_at: (/* @__PURE__ */ new Date()).toISOString()
-          }));
-          await supabase.from("usuarios").upsert(upserts, { onConflict: "username" });
-        }).catch(() => {
-        });
       }
     }
     if (lastWorkbookSha256) {
